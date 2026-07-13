@@ -73,6 +73,11 @@ class Scene:
         self.camera.center = molecule.centroid()
         self.fit()
 
+    @property
+    def render_size(self):
+        """(width, height) of the internal render buffer, in supersampled px."""
+        return self._renderer.width, self._renderer.height
+
     # -- rendering --------------------------------------------------------
     def render(self) -> np.ndarray:
         img = self._renderer.render(self.molecule, self.camera, self.style)

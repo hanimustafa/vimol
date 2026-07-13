@@ -107,36 +107,106 @@ def test_camera_orbit_changes_view():
     assert not np.array_equal(before, after)
 
 
-def test_viewer_input_handling_headless():
-    """Drive the Viewer's input parser without a real TTY."""
-    from mviewer.viewer import Viewer
+def test_input_decoder_keys_and_arrows():
+    from mviewer.input import InputDecoder, KeyEvent, MouseEvent
 
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
-    v = Viewer(mol)
-    v._cell_w, v._cell_h = 9.0, 18.0
-    r0 = v.scene.camera.rotation.copy()
-    # arrow key right
-    v._handle(b"\x1b[C")
-    assert not np.array_equal(r0, v.scene.camera.rotation)
-    # representation switch
-    v._handle(b"2")
-    assert v.style.representation == "spacefill"
-    # SGR mouse: press, drag, release
-    v._handle(b"\x1b[<0;10;10M")
-    assert v._dragging
-    r1 = v.scene.camera.rotation.copy()
-    v._handle(b"\x1b[<32;20;18M")  # motion with button held
-    assert not np.array_equal(r1, v.scene.camera.rotation)
-    v._handle(b"\x1b[<0;20;18m")
-    assert not v._dragging
-    # wheel zoom
-    z = v.scene.camera.zoom
-    v._handle(b"\x1b[<64;5;5M")
-    assert v.scene.camera.zoom != z
-    # quit
-    v._running = True
-    v._handle(b"q")
-    assert v._running is False
+    dec = InputDecoder(pixel=False)
+    evs = dec.feed(b"a\x1b[C")  # 'a' then right-arrow
+    assert isinstance(evs[0], KeyEvent) and evs[0].key == "a"
+    assert isinstance(evs[1], KeyEvent) and evs[1].key == "right"
+    # a lone ESC only resolves on flush (ambiguous until then)
+    assert dec.feed(b"\x1b") == []
+    assert dec.flush() == [KeyEvent("escape")]
+
+
+def test_input_decoder_split_sequence():
+    """An escape sequence split across two feeds must still decode once."""
+    from mviewer.input import InputDecoder, MouseEvent
+
+    dec = InputDecoder(pixel=True)
+    assert dec.feed(b"\x1b[<0;100;2") == []  # incomplete: buffered
+    evs = dec.feed(b"00M")
+    assert len(evs) == 1
+    ev = evs[0]
+    assert isinstance(ev, MouseEvent) and ev.action == "down"
+    assert ev.pixel and ev.x == 100 and ev.y == 200  # pixel coords, not 1-based cells
+
+
+def test_input_decoder_mouse_actions():
+    from mviewer.input import InputDecoder, MouseEvent
+
+    dec = InputDecoder(pixel=False)
+    (down,) = dec.feed(b"\x1b[<0;5;5M")
+    assert down.action == "down" and down.button == 0
+    (drag,) = dec.feed(b"\x1b[<32;9;9M")   # motion bit + button 0
+    assert drag.action == "drag" and drag.button == 0
+    (move,) = dec.feed(b"\x1b[<35;9;9M")   # motion bit + no button (low bits 3)
+    assert move.action == "move" and move.button is None
+    (up,) = dec.feed(b"\x1b[<0;9;9m")
+    assert up.action == "up"
+    (scroll,) = dec.feed(b"\x1b[<64;5;5M")
+    assert scroll.action == "scroll" and scroll.scroll == "up"
+
+
+def test_widget_mouse_rotate_pan_zoom():
+    from mviewer.widget import MoleculeWidget
+    from mviewer.input import MouseEvent
+
+    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    ensure_bonds(mol)
+    w = MoleculeWidget(mol, 200, 200, supersample=1)
+
+    r0 = w.scene.camera.rotation.copy()
+    w.handle_mouse(MouseEvent("down", 100, 100, button=0, pixel=True))
+    assert w.handle_mouse(MouseEvent("drag", 140, 110, button=0, pixel=True))
+    assert not np.array_equal(r0, w.scene.camera.rotation)  # rotated
+
+    p0 = w.scene.camera.pan.copy()
+    w.handle_mouse(MouseEvent("down", 100, 100, button=2, pixel=True))  # right = pan
+    w.handle_mouse(MouseEvent("drag", 130, 120, button=2, pixel=True))
+    assert not np.array_equal(p0, w.scene.camera.pan)
+
+    z0 = w.scene.camera.zoom
+    w.handle_mouse(MouseEvent("scroll", 100, 100, scroll="up", pixel=True))
+    assert w.scene.camera.zoom > z0
+
+
+def test_widget_pick_center_atom():
+    """Hovering the projected center of an atom should pick that atom."""
+    from mviewer.widget import MoleculeWidget
+
+    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    ensure_bonds(mol)
+    w = MoleculeWidget(mol, 200, 200, supersample=1)
+    cam = w.scene.camera
+    Wr, Hr = w.scene.render_size
+    v = cam.view_positions(mol.positions)
+    sz = v[:, 2]
+    front = int(np.argmax(sz))  # front-most atom is unambiguous to pick
+    sx = Wr * 0.5 + cam.pan[0] + v[front, 0] * cam.zoom
+    sy = Hr * 0.5 - cam.pan[1] - v[front, 1] * cam.zoom
+    assert w.pick(sx / w.scene.supersample, sy / w.scene.supersample) == front
+    # clicking empty corner picks nothing
+    assert w.pick(1, 1) is None
+
+
+def test_widget_hover_highlight_changes_render():
+    from mviewer.widget import MoleculeWidget
+
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    w = MoleculeWidget(mol, 120, 120)
+    plain = w.render().copy()
+    w.hovered = 0
+    assert not np.array_equal(plain, w.render())
+
+
+def test_mouse_enable_sequences():
+    from mviewer.input import enable_mouse
+    seq = enable_mouse(pixel=True, hover=True)
+    assert b"1003" in seq and b"1006" in seq and b"1016" in seq
+    seq2 = enable_mouse(pixel=False, hover=False)
+    assert b"1002" in seq2 and b"1016" not in seq2
 
 
 def test_viewer_draw_writes_bytes(tmp_path):

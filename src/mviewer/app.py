@@ -177,7 +177,7 @@ def main(argv: List[str] | None = None) -> int:
     viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin)
     viewer.frame_index = idx
     # apply initial rotation
-    viewer.scene.camera.orbit(args.rotate[0], args.rotate[1])
+    viewer.widget.scene.camera.orbit(args.rotate[0], args.rotate[1])
     viewer.run()
     return 0
 

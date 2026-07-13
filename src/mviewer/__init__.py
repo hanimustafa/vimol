@@ -24,6 +24,8 @@ from .molecule import Molecule
 from .camera import Camera
 from .render import Renderer, Style
 from .scene import Scene
+from .widget import MoleculeWidget
+from .input import InputDecoder, MouseEvent, KeyEvent, enable_mouse, disable_mouse
 from .parsers import load, load_all, loads, SUPPORTED_EXTENSIONS
 from .bonds import perceive_bonds, ensure_bonds
 from . import kitty
@@ -32,7 +34,8 @@ from . import elements
 __version__ = "0.1.0"
 
 __all__ = [
-    "Molecule", "Camera", "Renderer", "Style", "Scene",
+    "Molecule", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
+    "InputDecoder", "MouseEvent", "KeyEvent", "enable_mouse", "disable_mouse",
     "load", "load_all", "loads", "SUPPORTED_EXTENSIONS",
     "perceive_bonds", "ensure_bonds", "kitty", "elements",
     "view", "__version__",
@@ -52,4 +55,6 @@ def view(molecule_or_path, **kwargs):
     else:
         mol = molecule_or_path
     ensure_bonds(mol)
-    Viewer(mol, **kwargs).run()
+    v = Viewer(mol, **kwargs)
+    v.widget.scene.camera.orbit(20, -15)  # a pleasant default 3/4 view
+    v.run()
