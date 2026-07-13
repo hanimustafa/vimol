@@ -78,22 +78,35 @@ class Scene:
     # -- sizing / framing -------------------------------------------------
     def set_size(self, width: int, height: int, refit: bool = False) -> None:
         """Resize the viewport. By default this preserves the current
-        rotation/pan/zoom (a plain window resize shouldn't touch the view --
-        see the keep_zoom note on :meth:`fit`). Pass ``refit=True`` when the
-        new size is establishing the *real* initial framing rather than
-        responding to a later resize -- e.g. a host app constructs its widget
-        at a placeholder size before it knows the real window's pixel
-        dimensions, then corrects it once with the true size; preserving zoom
-        across *that* correction would keep the zoom that was fit for the
-        placeholder's (usually much smaller) size instead of the real window.
+        *apparent framing* -- the fraction of the viewport the molecule fills,
+        plus any manual scroll-zoom -- rather than the raw pixels-per-angstrom.
+        It does that by rescaling zoom/pan by the min-dimension ratio, exactly
+        as :meth:`set_supersample` does for a quality switch.
+
+        This matters for two reasons. (1) For a fit-derived zoom the rescale
+        reproduces *precisely* what a fresh :meth:`fit` would compute for the
+        new size (both reduce to ``min(W,H)/2 / (extent*margin)``), so if the
+        host learns the real terminal size in two steps -- an early, slightly
+        wrong report followed by the settled one -- the second, non-refit
+        resize self-heals to the correct framing instead of freezing the
+        molecule at the first size's zoom. (2) For a user's manual zoom it
+        keeps the molecule the same on-screen fraction across a terminal
+        resize, which is the intuitive behaviour.
+
+        Pass ``refit=True`` to snap to a fresh fit regardless (used the very
+        first time a host establishes real geometry from a placeholder size).
         """
+        old_min = max(min(self._renderer.width, self._renderer.height), 1)
         self.width = max(1, int(width))
         self.height = max(1, int(height))
         self._renderer.resize(self.width * self.supersample, self.height * self.supersample)
         if refit:
             self.fit()
-        else:
-            self.fit(keep_orientation=True, keep_zoom=True)
+            return
+        new_min = max(min(self._renderer.width, self._renderer.height), 1)
+        scale = new_min / old_min
+        self.camera.zoom *= scale
+        self.camera.pan = self.camera.pan * scale
 
     def set_supersample(self, factor: int) -> None:
         new_ss = max(1, int(factor))

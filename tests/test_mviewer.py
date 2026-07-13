@@ -166,12 +166,16 @@ def test_backend_gl_explicit_raises_if_unavailable(monkeypatch):
         Scene(mol, 80, 80, backend="gl")
 
 
-def test_resize_preserves_zoom_pan_and_rotation():
-    """A plain window/terminal resize (Scene.set_size) must not reset the
-    user's view -- it used to call fit() unconditionally, snapping zoom and
-    pan back to the default fit-to-extent framing on every resize (including
-    resize-like events from the terminal itself, e.g. a font-zoom gesture or
-    a tmux pane zoom), even though rotation happened to survive by accident."""
+def test_resize_preserves_framing_and_rotation():
+    """A plain window/terminal resize (Scene.set_size, refit=False) preserves
+    the *apparent framing* -- the fraction of the viewport the molecule fills,
+    plus any manual pan -- and the rotation, rather than the raw
+    pixels-per-angstrom. Zoom and pan therefore scale by the min-dimension
+    ratio (exactly as set_supersample does), keeping the molecule the same
+    on-screen size across a resize. (It used to preserve raw zoom, which both
+    changed the on-screen fraction on resize and froze the startup framing at
+    an early, slightly-wrong terminal size -- see
+    test_resize_self_heals_two_step_geometry.)"""
     mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 400, 300)
@@ -183,14 +187,15 @@ def test_resize_preserves_zoom_pan_and_rotation():
     pan0 = scene.camera.pan.copy()
 
     scene.set_size(500, 350)
+    ratio = min(500, 350) / min(400, 300)
 
     assert np.array_equal(scene.camera.rotation, rot0)
-    assert scene.camera.zoom == pytest.approx(zoom0)
-    assert np.array_equal(scene.camera.pan, pan0)
+    assert scene.camera.zoom == pytest.approx(zoom0 * ratio)
+    assert np.allclose(scene.camera.pan, pan0 * ratio)
 
-    # an explicit fit() (the 'f' key) must still re-fit as before
+    # an explicit fit() (the 'f' key) must still re-fit to the extent
     scene.fit()
-    assert scene.camera.zoom != pytest.approx(zoom0)
+    assert scene.camera.zoom != pytest.approx(zoom0 * ratio)
     assert np.array_equal(scene.camera.pan, np.zeros(2))
 
 
@@ -244,8 +249,9 @@ def test_set_size_refit_vs_preserve():
     """set_size(..., refit=True) is what Viewer uses the first time it learns
     the real terminal size (the widget starts at a 320x240 placeholder before
     that) -- it must fit fresh to the new size, not preserve the zoom that was
-    fit for the placeholder. Later resizes (refit=False, the default) must
-    still preserve the user's zoom/pan/rotation as before."""
+    fit for the placeholder. Later resizes (refit=False, the default) preserve
+    the user's manual zoom by keeping its *apparent framing*: zoom scales by
+    the min-dimension ratio so the molecule stays the same on-screen fraction."""
     mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 320, 240)  # placeholder-sized, as Viewer.__init__ does
@@ -259,7 +265,25 @@ def test_set_size_refit_vs_preserve():
     scene.camera.zoom_by(2.0)               # user scrolls to zoom in
     zoomed = scene.camera.zoom
     scene.set_size(1300, 850)                # a later, genuine resize (refit=False default)
-    assert scene.camera.zoom == pytest.approx(zoomed)
+    ratio = min(1300, 850) / min(1200, 800)
+    assert scene.camera.zoom == pytest.approx(zoomed * ratio)
+
+
+def test_resize_self_heals_two_step_geometry():
+    """Regression for the startup zoom bug: the viewer opened slightly zoomed
+    and only 'z' (a fresh fit) corrected it. Root cause -- the host learns the
+    real terminal size in two steps (an early, slightly-wrong report, then the
+    settled size), and the second, non-refit resize used to freeze the molecule
+    at the first size's zoom. Proportional rescaling makes a fit-derived zoom
+    land exactly where a fresh fit for the settled size would, so it self-heals
+    without any keypress."""
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    scene = Scene(mol, 320, 240)
+    scene.set_size(900, 700, refit=True)     # early, slightly-wrong size
+    scene.set_size(1200, 800)                # settled real size (refit=False default)
+    fresh = Scene(mol, 1200, 800)
+    assert scene.camera.zoom == pytest.approx(fresh.camera.zoom)
 
 
 def test_camera_orbit_changes_view():
