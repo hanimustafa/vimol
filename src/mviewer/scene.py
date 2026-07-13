@@ -78,9 +78,13 @@ class Scene:
         img = self._renderer.render(self.molecule, self.camera, self.style)
         return _downsample(img, self.supersample)
 
-    def to_kitty(self, *, image_id: int = 1, cols: Optional[int] = None,
+    def to_kitty(self, *, image_id: Optional[int] = None, cols: Optional[int] = None,
                  rows: Optional[int] = None, move_cursor: bool = False) -> bytes:
         img = self.render()
+        if image_id is None:
+            # per-process id so concurrent Scenes (e.g. two panes of one
+            # kitty process) don't clobber each other's image storage.
+            image_id = kitty.unique_id_base() + 1
         return kitty.encode_image(img, image_id=image_id, cols=cols, rows=rows,
                                   move_cursor=move_cursor)
 

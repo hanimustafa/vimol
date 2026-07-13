@@ -71,7 +71,13 @@ class Viewer:
 
         self.scene = Scene(self.frames[0], 320, 240, style=self.style, supersample=1)
         self._max_ss = 2          # idle-quality supersample cap (toggle with 'g')
-        self._img_id = 1          # double-buffer image ids toggle 1<->2
+        # Double-buffer image ids, salted per-process: image ids are a
+        # namespace global to the whole kitty process (all its panes/tabs),
+        # so two mviewer instances sharing one kitty process must not both
+        # hardcode e.g. 1/2 or they can delete/overwrite each other's frames.
+        base = kitty.unique_id_base()
+        self._buf_ids = (base + 1, base + 2)
+        self._buf_toggle = 0
         self._prev_img_id = None
         self._running = False
         self._show_help = False
@@ -96,7 +102,11 @@ class Viewer:
 
     def _exit(self):
         import termios
-        kitty.write_bytes(kitty.clear_all_images() + _MOUSE_OFF + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
+        # Delete only our own two buffer images, not clear_all_images() —
+        # that deletes every image in the whole kitty process (a=d,d=A is
+        # process-wide, not per-pane) and would wipe out other panes' graphics.
+        cleanup = kitty.delete_image(self._buf_ids[0]) + kitty.delete_image(self._buf_ids[1])
+        kitty.write_bytes(cleanup + _MOUSE_OFF + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
         if self._old_termios is not None:
             termios.tcsetattr(self.fd_in, termios.TCSADRAIN, self._old_termios)
 
@@ -126,7 +136,8 @@ class Viewer:
             self.scene.set_supersample(want_ss)
 
         img = self.scene.render()
-        new_id = 2 if self._img_id == 1 else 1
+        self._buf_toggle ^= 1
+        new_id = self._buf_ids[self._buf_toggle]
         data = kitty.encode_image(
             img, image_id=new_id, placement_id=new_id,
             cols=self._img_cols, rows=self._img_rows, move_cursor=False,
@@ -143,7 +154,6 @@ class Viewer:
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
         self._prev_img_id = new_id
-        self._img_id = new_id
 
         if self._show_help:
             self._draw_help()

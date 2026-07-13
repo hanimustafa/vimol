@@ -54,6 +54,23 @@ def cell_size_px(fd: int = 1) -> Tuple[float, float]:
     return cw, ch
 
 
+def unique_id_base(stride: int = 4) -> int:
+    """A per-process base for Kitty graphics ``i=``/``p=`` ids.
+
+    Image ids live in a namespace global to the whole kitty *process* (shared
+    across all its panes/tabs), not per-window — see the graphics protocol
+    spec's note that "IDs are in a global namespace [so] there can easily be
+    collisions." Hardcoding small ids like 1/2 means two independent
+    mviewer instances sharing a kitty process (e.g. two panes) can delete or
+    overwrite each other's frames. Deriving the base from the pid keeps
+    concurrent instances apart; the stride ensures that even OS-assigned
+    sequential pids (common right after spawning several processes) don't
+    produce adjacent, overlapping id ranges.
+    """
+    pid = os.getpid()
+    return ((pid * stride) % 0x7FFFFFFF) or 1
+
+
 def supports_kitty() -> bool:
     """Best-effort detection of Kitty graphics support via environment."""
     if os.environ.get("MVIEWER_FORCE_KITTY"):
@@ -82,7 +99,7 @@ def encode_image(
     pixels: np.ndarray,
     *,
     image_id: int = 1,
-    placement_id: int = 1,
+    placement_id: Optional[int] = None,
     cols: Optional[int] = None,
     rows: Optional[int] = None,
     move_cursor: bool = False,
@@ -95,8 +112,11 @@ def encode_image(
     cols/rows scale the image into that many terminal cells (defaults to the
     image's native pixel size). When *move_cursor* is False (C=1) the cursor is
     left in place, which is what you want when compositing a UI around the
-    image.
+    image. placement_id defaults to image_id (placements are scoped to their
+    image, so this is always collision-safe).
     """
+    if placement_id is None:
+        placement_id = image_id
     arr = np.ascontiguousarray(pixels, dtype=np.uint8)
     h, w = arr.shape[0], arr.shape[1]
     fmt = 32 if arr.ndim == 3 and arr.shape[2] == 4 else 24
