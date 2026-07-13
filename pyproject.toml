@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mviewer"
+version = "0.1.0"
+description = "An embeddable terminal molecular viewer using the Kitty graphics protocol"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "mviewer contributors" }]
+keywords = ["molecular", "viewer", "terminal", "kitty", "chemistry", "visualization"]
+dependencies = ["numpy>=1.20"]
+
+[project.scripts]
+mviewer = "mviewer.app:main"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mviewer = ["py.typed"]
