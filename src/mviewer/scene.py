@@ -40,38 +40,91 @@ def _downsample(img: np.ndarray, factor: int) -> np.ndarray:
 
 class Scene:
     def __init__(self, molecule: Molecule, width: int = 640, height: int = 480,
-                 style: Optional[Style] = None, supersample: int = 1):
+                 style: Optional[Style] = None, supersample: int = 1,
+                 backend: str = "auto"):
         self.molecule = molecule
         self.style = style or Style()
         self.width = width
         self.height = height
         self.supersample = max(1, int(supersample))
         self.camera = Camera(center=molecule.centroid(), extent=molecule.radius_of_gyration_extent())
-        self._renderer = Renderer(width * self.supersample, height * self.supersample)
+        self._backend_name, self._renderer = self._make_renderer(
+            backend, width * self.supersample, height * self.supersample)
         self.fit()
 
+    @staticmethod
+    def _make_renderer(backend: str, w: int, h: int):
+        if backend not in ("auto", "cpu", "gl"):
+            raise ValueError(f"unknown backend {backend!r} (expected 'auto', 'cpu', or 'gl')")
+        if backend == "cpu":
+            return "cpu", Renderer(w, h)
+        if backend == "gl":
+            from .gl_render import GLRenderer  # raises if unavailable -- explicit request, no silent fallback
+            return "gl", GLRenderer(w, h)
+        # "auto": prefer GL, silently fall back to the CPU raycaster if no
+        # GL package/context is available (missing moderngl, no driver, no
+        # display -- see gl_render.py's docstring).
+        try:
+            from .gl_render import GLRenderer
+            return "gl", GLRenderer(w, h)
+        except Exception:
+            return "cpu", Renderer(w, h)
+
+    @property
+    def backend(self) -> str:
+        """Which renderer actually got picked: ``"cpu"`` or ``"gl"``."""
+        return self._backend_name
+
     # -- sizing / framing -------------------------------------------------
-    def set_size(self, width: int, height: int) -> None:
+    def set_size(self, width: int, height: int, refit: bool = False) -> None:
+        """Resize the viewport. By default this preserves the current
+        rotation/pan/zoom (a plain window resize shouldn't touch the view --
+        see the keep_zoom note on :meth:`fit`). Pass ``refit=True`` when the
+        new size is establishing the *real* initial framing rather than
+        responding to a later resize -- e.g. a host app constructs its widget
+        at a placeholder size before it knows the real window's pixel
+        dimensions, then corrects it once with the true size; preserving zoom
+        across *that* correction would keep the zoom that was fit for the
+        placeholder's (usually much smaller) size instead of the real window.
+        """
         self.width = max(1, int(width))
         self.height = max(1, int(height))
         self._renderer.resize(self.width * self.supersample, self.height * self.supersample)
-        self.fit()
+        if refit:
+            self.fit()
+        else:
+            self.fit(keep_orientation=True, keep_zoom=True)
 
     def set_supersample(self, factor: int) -> None:
-        self.supersample = max(1, int(factor))
-        self._renderer.resize(self.width * self.supersample, self.height * self.supersample)
-        # preserve framing/orientation, just rescale zoom relative to SS
-        self.fit(keep_orientation=True)
+        new_ss = max(1, int(factor))
+        if new_ss == self.supersample:
+            return
+        # Rescale zoom/pan (both in supersampled-buffer pixel units) by the
+        # exact ratio so the apparent on-screen picture -- including any
+        # manual scroll-to-zoom -- is bit-for-bit preserved across a
+        # supersample change. This must NOT go through fit()/Camera.fit():
+        # that recomputes zoom purely from the molecule's extent, with no
+        # memory of the user's current zoom, so it silently discarded any
+        # scroll-zoom every time the interactive quality switch (fast while
+        # dragging/scrolling -> crisp ~0.25s after stopping) fired.
+        scale = new_ss / self.supersample
+        self.supersample = new_ss
+        self._renderer.resize(self.width * new_ss, self.height * new_ss)
+        self.camera.zoom *= scale
+        self.camera.pan = self.camera.pan * scale
 
-    def fit(self, keep_orientation: bool = False) -> None:
+    def fit(self, keep_orientation: bool = False, keep_zoom: bool = False) -> None:
         rot = self.camera.rotation.copy()
         pan = self.camera.pan.copy()
+        zoom = self.camera.zoom
         self.camera.center = self.molecule.centroid()
         ext = self.molecule.radius_of_gyration_extent() + self._max_atom_radius()
         self.camera.fit(self._renderer.width, self._renderer.height, ext)
         if keep_orientation:
             self.camera.rotation = rot
             self.camera.pan = pan
+        if keep_zoom:
+            self.camera.zoom = zoom
 
     def _max_atom_radius(self) -> float:
         if self.molecule.n_atoms == 0:
@@ -92,6 +145,15 @@ class Scene:
 
     # -- rendering --------------------------------------------------------
     def render(self) -> np.ndarray:
+        if self._backend_name == "gl":
+            from .gl_adapter import molecule_to_gl_inputs
+            w, h = self._renderer.width, self._renderer.height
+            spheres, cylinders, proj, shading = molecule_to_gl_inputs(
+                self.molecule, self.camera, self.style, w, h)
+            # the GL renderer supersamples/downsamples on the GPU, so it returns
+            # a display-size image directly -- no CPU _downsample pass.
+            return self._renderer.render(spheres, cylinders, proj, shading,
+                                         downsample=self.supersample)
         img = self._renderer.render(self.molecule, self.camera, self.style)
         return _downsample(img, self.supersample)
 

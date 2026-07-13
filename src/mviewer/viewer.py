@@ -39,7 +39,7 @@ HELP_LINES = [
     "  s .................. cycle style       a .................. autospin",
     "  n / p .............. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
-    "  f / r .............. re-fit / reset    ? .................. toggle help",
+    "  f / r / z .......... re-fit / reset    ? .................. toggle help",
     "  q / Esc ............ quit",
 ]
 
@@ -50,7 +50,7 @@ class Viewer:
     def __init__(self, molecule: Molecule, frames: Optional[List[Molecule]] = None,
                  style: Optional[Style] = None, fd_in: int = 0, fd_out: int = 1,
                  autospin: bool = False, target_fps: float = 60.0, picking: bool = True,
-                 transparent: bool = True):
+                 transparent: bool = True, backend: str = "auto"):
         self.frames = frames or [molecule]
         for m in self.frames:
             ensure_bonds(m)
@@ -65,9 +65,10 @@ class Viewer:
         self.target_fps = target_fps
 
         self.widget = MoleculeWidget(self.frames[0], 320, 240, style=self.style,
-                                     supersample=1, picking=picking)
+                                     supersample=1, picking=picking, backend=backend)
         self.decoder = _input.InputDecoder(pixel=False)
         self._max_ss = 2
+        self._drawn_ss = None   # supersample of the last frame actually drawn
         # single per-process image id, replaced in place each frame (this is
         # flicker-free in kitty and, unlike a double buffer, never lets a
         # transparent frame ghost the previous one through its cutout).
@@ -79,6 +80,7 @@ class Viewer:
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
         self._old_termios = None
+        self._geometry_established = False   # True once the real (not placeholder) size is known
 
     # -- terminal lifecycle ----------------------------------------------
     def _enter(self):
@@ -113,16 +115,30 @@ class Viewer:
             self._img_cols = cols
             w = int(self._img_cols * cw)
             h = int(self._img_rows * ch)
-            self.widget.set_pixel_size(max(w, 16), max(h, 16))
+            # The widget was built at a 320x240 placeholder (the real terminal
+            # size isn't known until the tty is in raw mode); the first time we
+            # learn the real size, fit fresh to it rather than preserving the
+            # zoom that was fit for the placeholder. Every later resize (the
+            # user actually resizing their terminal) preserves the view as usual.
+            self.widget.set_pixel_size(max(w, 16), max(h, 16),
+                                       refit=not self._geometry_established)
+            self._geometry_established = True
         return changed
 
     # -- rendering --------------------------------------------------------
+    def _target_ss(self) -> int:
+        """Supersample factor we *want* right now: 1 while interacting (fast),
+        higher once settled (crisp). The loop redraws when this changes so the
+        crisp frame lands ~0.25s after you stop, without re-drawing meanwhile.
+        """
+        idle = (time.time() - self._last_interact) > 0.25 and not self.autospin
+        return self._max_ss if idle else 1
+
     def _draw(self):
-        now = time.time()
-        idle = (now - self._last_interact) > 0.25 and not self.autospin
-        want_ss = self._max_ss if idle else 1
+        want_ss = self._target_ss()
         if self.widget.scene.supersample != want_ss:
             self.widget.scene.set_supersample(want_ss)
+        self._drawn_ss = want_ss
 
         img = self.widget.render()
         data = kitty.encode_image(img, image_id=self._img_id, placement_id=self._img_id,
@@ -152,7 +168,8 @@ class Viewer:
         frame = f"  {self.frame_index+1}/{len(self.frames)}" if len(self.frames) > 1 else ""
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
-        seg = f"\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m {left}  [{rep}]{frame}{spin} q{self.widget.scene.supersample}x{px}  ? help  q quit "
+        backend = "gpu" if self.widget.scene.backend == "gl" else "cpu"
+        seg = f"\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m {left}  [{rep}]{frame}{spin} q{self.widget.scene.supersample}x{px}  [{backend}]  ? help  q quit "
         return seg + "\x1b[0m"
 
     # -- input ------------------------------------------------------------
@@ -165,18 +182,33 @@ class Viewer:
         except OSError:
             return b""
 
-    def _dispatch(self, events):
+    def _input_pending(self) -> bool:
+        """True if input is already waiting to be read (non-blocking peek)."""
+        try:
+            r, _, _ = select.select([self.fd_in], [], [], 0)
+            return bool(r)
+        except (OSError, ValueError):
+            return False
+
+    def _dispatch(self, events) -> bool:
+        """Apply input events; return True if anything visible changed and the
+        frame should be redrawn."""
+        changed = False
         for ev in events:
             if isinstance(ev, _input.KeyEvent) and ev.key in _DRIVER_KEYS:
-                self._driver_key(ev.key)
+                if self._driver_key(ev.key):
+                    changed = True
             else:
-                changed = self.widget.handle_event(ev)
-                if changed:
+                if self.widget.handle_event(ev):
                     self._last_interact = time.time()
+                    changed = True
+        return changed
 
-    def _driver_key(self, key: str):
+    def _driver_key(self, key: str) -> bool:
+        """Handle a driver-level key; return True if it changed the view."""
         if key in ("q", "escape", "\x03"):
             self._running = False
+            return False
         elif key == "a":
             self.autospin = not self.autospin
         elif key == "?":
@@ -197,6 +229,9 @@ class Viewer:
             self.frame_index = (self.frame_index + (1 if key == "n" else -1)) % len(self.frames)
             self.widget.set_molecule(self.frames[self.frame_index])
             self._last_interact = time.time()
+        else:
+            return False
+        return True
 
     # -- main loop --------------------------------------------------------
     def run(self):
@@ -210,15 +245,23 @@ class Viewer:
             frame_dt = 1.0 / self.target_fps
             while self._running:
                 data = self._read(frame_dt)
-                if data:
-                    self._dispatch(self.decoder.feed(data))
-                else:
-                    self._dispatch(self.decoder.flush())
+                changed = self._dispatch(self.decoder.feed(data) if data
+                                         else self.decoder.flush())
                 if self._update_geometry():
                     kitty.write_bytes(_CLEAR, self.fd_out)
+                    changed = True
                 if self.autospin:
                     self.widget.scene.camera.orbit(1.4, 0)  # ~0.014 rad/frame
                     self._last_interact = time.time()
-                self._draw()
+                    changed = True
+                if changed:
+                    self._draw()
+                elif self._target_ss() != self._drawn_ss and not self._input_pending():
+                    # Settle to a crisp, supersampled frame once the view stops
+                    # moving -- but ONLY in a genuine lull with nothing queued.
+                    # The high-quality downsample is a heavy synchronous step
+                    # (~0.2s at full screen); running it while a keypress or
+                    # mouse-move is waiting would stall that input behind it.
+                    self._draw()
         finally:
             self._exit()

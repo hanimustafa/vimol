@@ -133,6 +133,135 @@ def test_png_roundtrip_header():
     assert png.rstrip().endswith(b"IEND".rjust(4)) or b"IEND" in png
 
 
+def test_backend_auto_never_raises():
+    """`backend="auto"` must silently fall back to CPU with zero GL deps
+    installed -- the "never breaks the zero-dependency default" guarantee."""
+    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    scene = Scene(mol, 80, 80, backend="auto")
+    assert scene.backend in ("cpu", "gl")
+
+
+def test_backend_cpu_explicit():
+    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    scene = Scene(mol, 80, 80, backend="cpu")
+    assert scene.backend == "cpu"
+    img = scene.render()
+    assert img.shape == (80, 80, 3)
+
+
+def test_backend_invalid_name_raises():
+    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    with pytest.raises(ValueError):
+        Scene(mol, 80, 80, backend="not-a-backend")
+
+
+def test_backend_gl_explicit_raises_if_unavailable(monkeypatch):
+    """An explicit `backend="gl"` request must not silently downgrade to
+    CPU -- force the GL import to fail regardless of whether moderngl is
+    actually installed in this environment, and assert it raises."""
+    monkeypatch.setitem(sys.modules, "moderngl", None)
+    monkeypatch.setitem(sys.modules, "mviewer.gl_render", None)
+    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    with pytest.raises(Exception):
+        Scene(mol, 80, 80, backend="gl")
+
+
+def test_resize_preserves_zoom_pan_and_rotation():
+    """A plain window/terminal resize (Scene.set_size) must not reset the
+    user's view -- it used to call fit() unconditionally, snapping zoom and
+    pan back to the default fit-to-extent framing on every resize (including
+    resize-like events from the terminal itself, e.g. a font-zoom gesture or
+    a tmux pane zoom), even though rotation happened to survive by accident."""
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    scene = Scene(mol, 400, 300)
+    scene.camera.orbit(30, 20)
+    scene.camera.zoom_by(2.5)
+    scene.camera.pan_by(15, -10)
+    rot0 = scene.camera.rotation.copy()
+    zoom0 = scene.camera.zoom
+    pan0 = scene.camera.pan.copy()
+
+    scene.set_size(500, 350)
+
+    assert np.array_equal(scene.camera.rotation, rot0)
+    assert scene.camera.zoom == pytest.approx(zoom0)
+    assert np.array_equal(scene.camera.pan, pan0)
+
+    # an explicit fit() (the 'f' key) must still re-fit as before
+    scene.fit()
+    assert scene.camera.zoom != pytest.approx(zoom0)
+    assert np.array_equal(scene.camera.pan, np.zeros(2))
+
+
+def test_supersample_change_preserves_manual_zoom_and_pan():
+    """set_supersample used to call fit(), which recomputes zoom purely from
+    the molecule's extent -- silently discarding any scroll-to-zoom every
+    time the interactive quality switch fired (fast while scrolling/dragging,
+    crisp ~0.25s after stopping). Zoom/pan must instead rescale by the exact
+    supersample ratio, preserving whatever the user had zoomed/panned to."""
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    scene = Scene(mol, 400, 300)
+    scene.set_supersample(2)
+    base_zoom = scene.camera.zoom
+
+    scene.set_supersample(1)              # interaction starts: fast quality
+    scene.camera.zoom_by(1.12 ** 6)       # user scrolls to zoom in
+    scene.camera.pan_by(20, -5)
+    zoomed = scene.camera.zoom
+    panned = scene.camera.pan.copy()
+
+    scene.set_supersample(2)              # settle back to crisp quality
+    assert scene.camera.zoom == pytest.approx(zoomed * 2)
+    assert np.allclose(scene.camera.pan, panned * 2)
+
+    scene.set_supersample(1)              # and back down again
+    assert scene.camera.zoom == pytest.approx(zoomed)
+    assert np.allclose(scene.camera.pan, panned)
+
+
+def test_z_key_resets_view_like_r():
+    """'z' is an alias for 'r': full reset of rotation, pan, and zoom."""
+    from mviewer.widget import MoleculeWidget
+
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    w = MoleculeWidget(mol, 200, 200)
+    fitted_zoom = w.scene.camera.zoom
+
+    w.scene.camera.orbit(45, 30)
+    w.scene.camera.zoom_by(3.0)
+    w.scene.camera.pan_by(20, 10)
+
+    assert w.handle_key("z") is True
+    assert np.array_equal(w.scene.camera.rotation, np.eye(3))
+    assert np.array_equal(w.scene.camera.pan, np.zeros(2))
+    assert w.scene.camera.zoom == pytest.approx(fitted_zoom)
+
+
+def test_set_size_refit_vs_preserve():
+    """set_size(..., refit=True) is what Viewer uses the first time it learns
+    the real terminal size (the widget starts at a 320x240 placeholder before
+    that) -- it must fit fresh to the new size, not preserve the zoom that was
+    fit for the placeholder. Later resizes (refit=False, the default) must
+    still preserve the user's zoom/pan/rotation as before."""
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    scene = Scene(mol, 320, 240)  # placeholder-sized, as Viewer.__init__ does
+    placeholder_zoom = scene.camera.zoom
+
+    scene.set_size(1200, 800, refit=True)  # first real geometry
+    fresh = Scene(mol, 1200, 800)
+    assert scene.camera.zoom == pytest.approx(fresh.camera.zoom)
+    assert scene.camera.zoom != pytest.approx(placeholder_zoom)
+
+    scene.camera.zoom_by(2.0)               # user scrolls to zoom in
+    zoomed = scene.camera.zoom
+    scene.set_size(1300, 850)                # a later, genuine resize (refit=False default)
+    assert scene.camera.zoom == pytest.approx(zoomed)
+
+
 def test_camera_orbit_changes_view():
     mol = mviewer.load(os.path.join(EX, "water.xyz"))
     scene = Scene(mol, 60, 60)
@@ -234,6 +363,66 @@ def test_widget_hover_highlight_changes_render():
     plain = w.render().copy()
     w.hovered = 0
     assert not np.array_equal(plain, w.render())
+
+
+def test_handle_event_reports_change():
+    """handle_event must return whether the view changed -- the interactive
+    loop gates redraws on this, so a wrong return means either no redraw on
+    input or a redraw every idle frame (terminal flood)."""
+    from mviewer.widget import MoleculeWidget
+    from mviewer.input import KeyEvent
+
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    w = MoleculeWidget(mol, 120, 120)
+    assert w.handle_event(KeyEvent("left")) is True     # rotate
+    assert w.handle_event(KeyEvent("right")) is True
+    assert w.handle_event(KeyEvent("q")) is False        # unbound in the widget (driver-level quit key)
+
+
+def test_viewer_only_redraws_on_change(tmp_path):
+    """An idle viewer must not redraw every loop iteration (that floods the
+    terminal with full-frame images); input and the post-settle quality bump
+    must still trigger exactly one redraw each."""
+    from mviewer.viewer import Viewer
+    from mviewer.input import KeyEvent
+    import time
+
+    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    ensure_bonds(mol)
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        v._update_geometry()
+        count = {"n": 0}
+        orig = v._draw
+        v._draw = lambda: (count.__setitem__("n", count["n"] + 1), orig())[1]
+
+        def loop_iter(events):
+            changed = v._dispatch(events)
+            if v._target_ss() != v._drawn_ss:
+                changed = True
+            if changed:
+                v._draw()
+
+        v._draw()  # initial frame
+
+        count["n"] = 0
+        loop_iter([KeyEvent("left")])
+        assert count["n"] == 1                      # input -> redraw
+
+        count["n"] = 0
+        time.sleep(0.3)                             # cross the 0.25s settle
+        for _ in range(20):
+            loop_iter([])
+        assert count["n"] == 1                      # exactly one crisp bump
+
+        count["n"] = 0
+        for _ in range(20):
+            loop_iter([])
+        assert count["n"] == 0                      # then fully idle -> no draws
+    finally:
+        os.close(fd)
 
 
 def test_mouse_enable_sequences():

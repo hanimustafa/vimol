@@ -34,9 +34,10 @@ REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
 class MoleculeWidget:
     def __init__(self, molecule: Molecule, width: int = 320, height: int = 240,
                  style: Optional[Style] = None, supersample: int = 1,
-                 picking: bool = True):
+                 picking: bool = True, backend: str = "auto"):
         self.style = style or Style()
-        self.scene = Scene(molecule, width, height, style=self.style, supersample=supersample)
+        self.scene = Scene(molecule, width, height, style=self.style, supersample=supersample,
+                           backend=backend)
         self.rotate_speed = 0.007   # radians per pixel of drag
         self.zoom_step = 1.12
         self.picking = picking
@@ -62,8 +63,8 @@ class MoleculeWidget:
         self._base_colors = molecule.element_colors()
         self.hovered = self.selected = None
 
-    def set_pixel_size(self, width: int, height: int) -> None:
-        self.scene.set_size(width, height)
+    def set_pixel_size(self, width: int, height: int, refit: bool = False) -> None:
+        self.scene.set_size(width, height, refit=refit)
 
     def set_cell_metrics(self, cell_w: float, cell_h: float) -> None:
         self.cell_w, self.cell_h = cell_w, cell_h
@@ -100,11 +101,13 @@ class MoleculeWidget:
         self.scene.fit(keep_orientation=True)
 
     # -- event handling ---------------------------------------------------
-    def handle_event(self, ev: Event, origin: Tuple[float, float] = (0.0, 0.0)) -> None:
+    def handle_event(self, ev: Event, origin: Tuple[float, float] = (0.0, 0.0)) -> bool:
+        """Apply an event. Returns True if it changed the view."""
         if isinstance(ev, MouseEvent):
-            self.handle_mouse(ev, origin)
+            return self.handle_mouse(ev, origin)
         elif isinstance(ev, KeyEvent):
-            self.handle_key(ev.key)
+            return self.handle_key(ev.key)
+        return False
 
     def _local_px(self, ev: MouseEvent, origin: Tuple[float, float]) -> Tuple[float, float]:
         """Event coords -> pixels local to the widget's top-left origin."""
@@ -171,7 +174,7 @@ class MoleculeWidget:
             cam.roll(-0.15); return True
         if key == "]":
             cam.roll(0.15); return True
-        if key == "r":
+        if key in ("r", "z"):
             self.reset(); return True
         if key == "f":
             self.fit(); return True

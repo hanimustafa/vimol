@@ -67,6 +67,9 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("file", nargs="?", help="structure file (xyz/pdb/mol/sdf)")
     p.add_argument("--style", default="ball_and_stick",
                    choices=["ball_and_stick", "spacefill", "licorice", "wireframe"])
+    p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
+                   help="rendering backend: numpy CPU raycaster, GPU (OpenGL, needs "
+                        "mviewer[gl]), or auto (GPU if available, else CPU)")
     p.add_argument("--size", default="0x0", help="pixel size WxH for --render/--kitty (0=auto)")
     p.add_argument("--supersample", type=int, default=2, help="anti-aliasing factor for stills")
     p.add_argument("--rotate", nargs=2, type=float, metavar=("YAW", "PITCH"),
@@ -147,7 +150,8 @@ def main(argv: List[str] | None = None) -> int:
     if args.render:
         if not w:
             w, h = 900, 700
-        scene = Scene(mol, w, h, style=style, supersample=max(1, args.supersample))
+        scene = Scene(mol, w, h, style=style, supersample=max(1, args.supersample),
+                     backend=args.backend)
         scene.camera.orbit(args.rotate[0], args.rotate[1])
         scene.to_png(args.render)
         print(f"wrote {args.render} ({w}x{h})")
@@ -161,7 +165,8 @@ def main(argv: List[str] | None = None) -> int:
             w = int(min(cols, 60) * cw)
             h = int(min(rows - 2, 30) * ch)
             w, h = max(w, 200), max(h, 200)
-        scene = Scene(mol, w, h, style=style, supersample=max(1, args.supersample))
+        scene = Scene(mol, w, h, style=style, supersample=max(1, args.supersample),
+                     backend=args.backend)
         scene.camera.orbit(args.rotate[0], args.rotate[1])
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -185,7 +190,7 @@ def main(argv: List[str] | None = None) -> int:
         style.transparent = True
 
     from .viewer import Viewer
-    viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin)
+    viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin, backend=args.backend)
     viewer.frame_index = idx
     # apply initial rotation
     viewer.widget.scene.camera.orbit(args.rotate[0], args.rotate[1])

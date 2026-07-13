@@ -18,6 +18,7 @@ mviewer = "mviewer.app:main"
 
 [project.optional-dependencies]
 test = ["pytest"]
+gl = ["moderngl"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
