@@ -69,6 +69,41 @@ def test_render_produces_image():
     assert drawn.sum() > 200
 
 
+def test_transparent_render_is_rgba_with_cutout():
+    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    ensure_bonds(mol)
+    scene = Scene(mol, 120, 120, style=Style(transparent=True), supersample=1)
+    img = scene.render()
+    assert img.shape == (120, 120, 4)
+    # corners must be fully transparent, the molecule center opaque
+    assert img[0, 0, 3] == 0
+    assert img[60, 60, 3] == 255
+
+
+def test_transparent_supersample_no_black_fringe():
+    """Premultiplied downsampling: edge pixels must not fringe toward black."""
+    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    ensure_bonds(mol)
+    scene = Scene(mol, 100, 100, style=Style(transparent=True), supersample=3)
+    img = scene.render()
+    assert img.shape == (100, 100, 4)
+    # partially covered edge pixels exist and their (straight) color is not
+    # dragged to black by the transparent background
+    edge = (img[..., 3] > 20) & (img[..., 3] < 235)
+    assert edge.sum() > 0
+    assert img[..., :3][edge].max() > 60
+
+
+def test_hydrogen_ball_bigger_than_bond():
+    """Ball-and-stick must scale atoms by vdW radius so H stays visible."""
+    from mviewer.render import _atom_radii
+    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    st = Style(representation="ball_and_stick")
+    radii = _atom_radii(mol, st)
+    h_idx = [i for i, s in enumerate(mol.symbols) if s == "H"]
+    assert min(radii[i] for i in h_idx) > st.bond_radius  # H ball wider than the stick
+
+
 def test_all_representations_render():
     mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)

@@ -60,8 +60,10 @@ NGL) use — just done on the CPU.
   supports it — probed at startup, with automatic fallback to cell coordinates —
   for smooth dragging and accurate **hover-to-identify** atom picking.
 - **Rendering:** Phong lighting (key + fill + specular), depth cueing, adaptive
-  supersampling (crisp when idle, fast while dragging), flicker-free
-  double-buffered animation.
+  supersampling (crisp when idle, fast while dragging), and an optional
+  **transparent background** — RGBA cutout with premultiplied-alpha edge
+  anti-aliasing, so the molecule composites straight onto your terminal
+  background (any theme, light or dark). On by default in the interactive viewer.
 - **Output:** live terminal, one-shot Kitty frame to stdout (pipeable), or PNG
   (via a built-in stdlib PNG encoder — no Pillow needed).
 
@@ -132,6 +134,7 @@ host app that puts its own chrome above the molecule and routes the mouse.
 | Representation | `1` ball · `2` space · `3` licorice · `4` wire · `s` cycle |
 | Autospin | `a` |
 | Trajectory frame | `n` / `p` |
+| Transparent background | `t` |
 | Depth cue / hi-quality / re-fit / reset | `d` / `g` / `f` / `r` |
 | Help / quit | `?` / `q` or `Esc` |
 

@@ -37,6 +37,11 @@ def build_style(args) -> Style:
         st.bond_radius = args.bond_radius
     if args.background is not None:
         st.background = _parse_color(args.background)
+        st.transparent = False
+    if args.transparent:
+        st.transparent = True
+    if args.opaque:
+        st.transparent = False
     if args.no_depth_cue:
         st.depth_cue = 0.0
     return st
@@ -73,7 +78,9 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--frame", type=int, default=0, help="frame/model index for multi-model files")
     p.add_argument("--atom-scale", type=float, default=None)
     p.add_argument("--bond-radius", type=float, default=None)
-    p.add_argument("--background", type=str, default=None, help="hex or r,g,b background color")
+    p.add_argument("--background", type=str, default=None, help="hex or r,g,b background color (implies --opaque)")
+    p.add_argument("--transparent", action="store_true", help="transparent background (RGBA cutout)")
+    p.add_argument("--opaque", action="store_true", help="solid background (default for --render)")
     p.add_argument("--no-depth-cue", action="store_true")
     p.add_argument("--no-bonds", action="store_true", help="do not auto-perceive bonds")
     p.add_argument("--bond-tolerance", type=float, default=0.45)
@@ -172,6 +179,10 @@ def main(argv: List[str] | None = None) -> int:
         print("         Set MVIEWER_FORCE_KITTY=1 to try anyway, or use --render out.png.",
               file=sys.stderr)
         return 5
+
+    # interactive defaults to a terminal-matching transparent background
+    if not args.opaque and args.background is None:
+        style.transparent = True
 
     from .viewer import Viewer
     viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin)

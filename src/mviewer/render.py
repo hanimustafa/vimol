@@ -23,9 +23,10 @@ from .molecule import Molecule
 class Style:
     """Rendering options."""
     representation: str = "ball_and_stick"   # ball_and_stick | spacefill | wireframe | licorice
-    atom_scale: float = 0.24                 # multiplier on covalent radius (ball_and_stick)
-    bond_radius: float = 0.13                # angstrom (cylinder radius)
+    atom_scale: float = 0.25                 # multiplier on van der Waals radius (ball_and_stick)
+    bond_radius: float = 0.10                # angstrom (cylinder radius)
     background: Tuple[float, float, float] = (0.05, 0.06, 0.09)
+    transparent: bool = False                # emit RGBA with an alpha cutout (terminal shows through)
     ambient: float = 0.28
     specular_strength: float = 0.55
     shininess: float = 32.0
@@ -41,7 +42,9 @@ def _atom_radii(mol: Molecule, style: Style) -> np.ndarray:
         return mol.vdw_radii()
     if style.representation in ("wireframe", "licorice"):
         return np.full(mol.n_atoms, style.bond_radius * (1.6 if style.representation == "licorice" else 1.0))
-    return mol.covalent_radii() * style.atom_scale
+    # ball-and-stick: scale by van der Waals radius so hydrogens stay visible
+    # (their covalent radius is tiny, which would hide them inside the bonds).
+    return mol.vdw_radii() * style.atom_scale
 
 
 class Renderer:
@@ -57,11 +60,17 @@ class Renderer:
     def render(self, mol: Molecule, camera: Camera, style: Style | None = None) -> np.ndarray:
         style = style or Style()
         W, H = self.width, self.height
-        bg = np.array(style.background, np.float32)
-        color = np.tile(bg, (H, W, 1)).astype(np.float32)
+        transparent = style.transparent
+        if transparent:
+            # start black so undrawn pixels are premultiplied-zero; alpha comes
+            # from the z-buffer at the end (drawn <-> not drawn).
+            color = np.zeros((H, W, 3), np.float32)
+        else:
+            bg = np.array(style.background, np.float32)
+            color = np.tile(bg, (H, W, 1)).astype(np.float32)
         zbuf = np.full((H, W), -np.inf, np.float32)
         if mol.n_atoms == 0:
-            return (np.clip(color, 0, 1) * 255).astype(np.uint8)
+            return self._finish(color, zbuf, transparent)
 
         vpos = camera.view_positions(mol.positions).astype(np.float64)  # (N,3) view space
         zoom = camera.zoom
@@ -144,8 +153,16 @@ class Renderer:
             shaded = shade(normals, albedo)
             self._composite(color, zbuf, x0, x1, y0, y1, mask, depth, shaded, style, cz, zmin, zspan)
 
+        return self._finish(color, zbuf, transparent)
+
+    @staticmethod
+    def _finish(color: np.ndarray, zbuf: np.ndarray, transparent: bool) -> np.ndarray:
         img = np.clip(color, 0.0, 1.0)
-        return (img * 255).astype(np.uint8)
+        rgb = (img * 255).astype(np.uint8)
+        if not transparent:
+            return rgb
+        alpha = np.where(zbuf > -np.inf, 255, 0).astype(np.uint8)
+        return np.dstack([rgb, alpha])
 
     # ------------------------------------------------------------------
     def _draw_bonds(self, mol, vpos, sx, sy, sz, zoom, ox_s, oy_s, style, base_colors,

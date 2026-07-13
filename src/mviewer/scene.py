@@ -20,10 +20,22 @@ def _downsample(img: np.ndarray, factor: int) -> np.ndarray:
     if factor <= 1:
         return img
     h, w = img.shape[:2]
+    ch = img.shape[2]
     h2, w2 = h // factor, w // factor
     img = img[: h2 * factor, : w2 * factor]
-    img = img.reshape(h2, factor, w2, factor, img.shape[2]).astype(np.uint16)
-    return (img.mean(axis=(1, 3))).astype(np.uint8)
+    blocks = img.reshape(h2, factor, w2, factor, ch).astype(np.float32)
+    if ch == 4:
+        # premultiplied-alpha average so anti-aliased edges don't fringe toward
+        # black over a transparent background. RGB is already premultiplied
+        # (undrawn pixels are 0,0,0,0), so straight = sum(rgb)/coverage.
+        rgb_sum = blocks[..., :3].sum(axis=(1, 3))
+        a_sum = blocks[..., 3].sum(axis=(1, 3))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            straight = np.where(a_sum[..., None] > 0, 255.0 * rgb_sum / a_sum[..., None], 0.0)
+        alpha = a_sum / (factor * factor)
+        out = np.dstack([np.clip(straight, 0, 255), alpha])
+        return out.astype(np.uint8)
+    return blocks.mean(axis=(1, 3)).astype(np.uint8)
 
 
 class Scene:
@@ -66,7 +78,7 @@ class Scene:
             return 0.0
         if self.style.representation == "spacefill":
             return float(self.molecule.vdw_radii().max())
-        return float(self.molecule.covalent_radii().max()) * self.style.atom_scale
+        return float(self.molecule.vdw_radii().max()) * self.style.atom_scale
 
     def set_molecule(self, molecule: Molecule) -> None:
         self.molecule = molecule

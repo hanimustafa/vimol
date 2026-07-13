@@ -38,22 +38,27 @@ HELP_LINES = [
     "  1 2 3 4 ............ ball / space / licorice / wire",
     "  s .................. cycle style       a .................. autospin",
     "  n / p .............. next/prev frame   d .................. depth cue",
-    "  g .................. hi-quality        f / r .............. re-fit / reset",
-    "  ? .................. toggle help       q / Esc ............ quit",
+    "  t .................. transparent bg    g .................. hi-quality",
+    "  f / r .............. re-fit / reset    ? .................. toggle help",
+    "  q / Esc ............ quit",
 ]
 
-_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "n", "p", "\x03"}
+_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "\x03"}
 
 
 class Viewer:
     def __init__(self, molecule: Molecule, frames: Optional[List[Molecule]] = None,
                  style: Optional[Style] = None, fd_in: int = 0, fd_out: int = 1,
-                 autospin: bool = False, target_fps: float = 60.0, picking: bool = True):
+                 autospin: bool = False, target_fps: float = 60.0, picking: bool = True,
+                 transparent: bool = True):
         self.frames = frames or [molecule]
         for m in self.frames:
             ensure_bonds(m)
         self.frame_index = 0
         self.style = style or Style()
+        if style is None:
+            # default to a terminal-matching transparent background
+            self.style.transparent = transparent
         self.fd_in = fd_in
         self.fd_out = fd_out
         self.autospin = autospin
@@ -63,10 +68,10 @@ class Viewer:
                                      supersample=1, picking=picking)
         self.decoder = _input.InputDecoder(pixel=False)
         self._max_ss = 2
-        base = kitty.unique_id_base()
-        self._buf_ids = (base + 1, base + 2)
-        self._buf_toggle = 0
-        self._prev_img_id: Optional[int] = None
+        # single per-process image id, replaced in place each frame (this is
+        # flicker-free in kitty and, unlike a double buffer, never lets a
+        # transparent frame ghost the previous one through its cutout).
+        self._img_id = kitty.unique_id_base() + 1
 
         self._running = False
         self._show_help = False
@@ -90,7 +95,7 @@ class Viewer:
 
     def _exit(self):
         import termios
-        cleanup = kitty.delete_image(self._buf_ids[0]) + kitty.delete_image(self._buf_ids[1])
+        cleanup = kitty.delete_image(self._img_id)
         kitty.write_bytes(_input.disable_mouse(pixel=True) + cleanup
                           + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
         if self._old_termios is not None:
@@ -120,18 +125,13 @@ class Viewer:
             self.widget.scene.set_supersample(want_ss)
 
         img = self.widget.render()
-        self._buf_toggle ^= 1
-        new_id = self._buf_ids[self._buf_toggle]
-        data = kitty.encode_image(img, image_id=new_id, placement_id=new_id,
+        data = kitty.encode_image(img, image_id=self._img_id, placement_id=self._img_id,
                                   cols=self._img_cols, rows=self._img_rows, move_cursor=False)
         out = bytearray()
         out += _HOME + data
-        if self._prev_img_id is not None:
-            out += kitty.delete_image(self._prev_img_id)
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
-        self._prev_img_id = new_id
         if self._show_help:
             self._draw_help()
 
@@ -188,6 +188,10 @@ class Viewer:
             self._last_interact = time.time()
         elif key == "g":
             self._max_ss = 3 if self._max_ss == 2 else 2
+            self._last_interact = time.time()
+        elif key == "t":
+            self.style.transparent = not self.style.transparent
+            kitty.write_bytes(_CLEAR, self.fd_out)
             self._last_interact = time.time()
         elif key in ("n", "p") and len(self.frames) > 1:
             self.frame_index = (self.frame_index + (1 if key == "n" else -1)) % len(self.frames)
