@@ -93,9 +93,21 @@ class Renderer:
         fill = np.array([-light[0], -light[1], 0.6])
         fill = fill / (np.linalg.norm(fill) + 1e-12)
 
+        # Build arrow geometry up front (reusing vpos instead of recomputing
+        # the view transform) so the fog depth range below can include the
+        # arrow endpoints -- the GL backend derives its single depth range
+        # from atoms + bonds + arrow endpoints, and the fog must match.
+        geom = build_arrow_geometry(mol, camera, view_pos=vpos) if mol.vector_fields else None
+        has_arrows = geom is not None and geom.shaft_a.shape[0] > 0
+
         # depth range for fog
-        zmin = float(sz.min()) if len(sz) else 0.0
-        zmax = float(sz.max()) if len(sz) else 1.0
+        z_parts = [sz]
+        if has_arrows:
+            z_parts += [geom.shaft_a[:, 2], geom.shaft_b[:, 2],
+                        geom.head_base[:, 2], geom.head_apex[:, 2]]
+        z_all = np.concatenate([np.asarray(z, np.float64).reshape(-1) for z in z_parts])
+        zmin = float(z_all.min()) if z_all.size else 0.0
+        zmax = float(z_all.max()) if z_all.size else 1.0
         zspan = max(zmax - zmin, 1e-6)
 
         def shade(normals, albedo):
@@ -152,8 +164,7 @@ class Renderer:
             shaded = shade(normals, albedo)
             self._composite(color, zbuf, x0, x1, y0, y1, mask, depth, shaded, style, cz, zmin, zspan)
 
-        if mol.vector_fields:
-            geom = build_arrow_geometry(mol, camera)
+        if has_arrows:
             self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
             self._draw_arrow_heads(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
 

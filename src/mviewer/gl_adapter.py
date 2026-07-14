@@ -80,8 +80,10 @@ def molecule_to_gl_inputs(molecule: Molecule, camera: Camera, style: Style,
         bond_r = np.zeros((0,), np.float32)
 
     # Arrow shafts are literally cylinders -- fold them into the same batch
-    # as bonds. Arrow heads (cones) need the new GL primitive.
-    geom = build_arrow_geometry(molecule, camera)
+    # as bonds. Arrow heads (cones) need the new GL primitive. Reuse the
+    # atom view positions already computed above rather than transforming
+    # them again.
+    geom = build_arrow_geometry(molecule, camera, view_pos=vpos)
     cylinders = CylinderBatch(
         a=np.concatenate([bond_a, geom.shaft_a.astype(np.float32)]),
         b=np.concatenate([bond_b, geom.shaft_b.astype(np.float32)]),

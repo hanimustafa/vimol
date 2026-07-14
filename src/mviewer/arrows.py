@@ -39,12 +39,18 @@ class ArrowGeometry:
         )
 
 
-def build_arrow_geometry(mol: Molecule, camera: Camera) -> ArrowGeometry:
-    """Convert ``mol.vector_fields`` into view-space arrow geometry under *camera*."""
+def build_arrow_geometry(mol: Molecule, camera: Camera, view_pos=None) -> ArrowGeometry:
+    """Convert ``mol.vector_fields`` into view-space arrow geometry under *camera*.
+
+    *view_pos* optionally supplies the atoms' already-computed view-space
+    positions (``camera.view_positions(mol.positions)``); the CPU renderer and
+    GL adapter both have it on hand, so passing it avoids re-running that
+    per-frame transform.
+    """
     if not mol.vector_fields or mol.n_atoms == 0:
         return ArrowGeometry.empty()
 
-    view_pos = camera.view_positions(mol.positions)
+    view_pos = camera.view_positions(mol.positions) if view_pos is None else np.asarray(view_pos, float)
     shaft_a, shaft_b, shaft_r, shaft_c = [], [], [], []
     head_base, head_apex, head_r, head_c = [], [], [], []
 

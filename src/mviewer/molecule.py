@@ -103,8 +103,15 @@ class Molecule:
         c = self.centroid()
         best = 0.0
         for vf in self.vector_fields:
+            # A field can go stale if atoms are added after it was attached;
+            # skip it here exactly as build_arrow_geometry does (rather than
+            # letting the (N+1,3)+(N,3) broadcast raise mid-render).
+            if np.asarray(vf.vectors).shape != (self.n_atoms, 3):
+                continue
             tips = self.positions + vf.vectors * vf.scale
-            d = np.linalg.norm(tips - c, axis=1)
+            # pad by the cone-head base radius so a fat arrowhead at the edge
+            # of the scene isn't clipped by auto-fit.
+            d = np.linalg.norm(tips - c, axis=1) + vf.radius * vf.head_scale
             best = max(best, float(d.max()))
         return best
 

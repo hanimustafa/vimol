@@ -304,8 +304,23 @@ def test_add_vector_field_validates_length():
 def test_vector_extent_accounts_for_arrow_tips():
     mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     assert mol.vector_extent() == 0.0
-    mol.add_vector_field(np.array([[5.0, 0.0, 0.0]]))
-    assert mol.vector_extent() == pytest.approx(5.0)
+    mol.add_vector_field(np.array([[5.0, 0.0, 0.0]]), radius=0.05, head_scale=2.5)
+    # tip at 5.0 + a head-radius pad (0.05 * 2.5) so a fat arrowhead at the
+    # scene edge isn't clipped by auto-fit
+    assert mol.vector_extent() == pytest.approx(5.0 + 0.05 * 2.5)
+
+
+def test_vector_extent_survives_stale_field_after_add_atom():
+    """A vector field attached before more atoms are added goes stale
+    (its (N,3) no longer matches n_atoms). vector_extent() and the render
+    path must skip it, not raise a broadcast error mid-render."""
+    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol.add_vector_field(np.array([[2.0, 0.0, 0.0]]))
+    mol.add_atom("O", 1.2, 0.0, 0.0)   # now 2 atoms, field still has 1 row
+    assert mol.vector_extent() == 0.0   # stale field skipped, no other fields
+    # a full render must not raise
+    img = Scene(mol, 80, 80, backend="cpu", supersample=1).render()
+    assert img.shape == (80, 80, 3)
 
 
 def test_view_directions_rotates_but_does_not_translate():
