@@ -67,6 +67,26 @@ class CylinderBatch:
 
 
 @dataclass
+class ConeBatch:
+    """A batch of analytic cones (arrow heads): radius *radius* at ``base``,
+    tapering linearly to a point at ``apex``. Used for the arrowhead half of
+    a vector-field arrow; the shaft half is a plain ``CylinderBatch`` entry."""
+    base: np.ndarray    # (K, 3) float
+    apex: np.ndarray    # (K, 3) float
+    radius: np.ndarray  # (K,) float
+    color: np.ndarray   # (K, 3) float
+
+    @staticmethod
+    def empty() -> "ConeBatch":
+        return ConeBatch(
+            base=np.zeros((0, 3), np.float32),
+            apex=np.zeros((0, 3), np.float32),
+            radius=np.zeros((0,), np.float32),
+            color=np.zeros((0, 3), np.float32),
+        )
+
+
+@dataclass
 class ShadingParams:
     """Plain Phong/fog shading parameters — no representation/chemistry
     concepts, unlike ``render.Style``."""
@@ -274,6 +294,157 @@ void main() {
 }
 """
 
+_CONE_VERT = """
+#version 410 core
+layout(location = 0) in vec2 in_corner;
+layout(location = 1) in vec3 in_base;
+layout(location = 2) in vec3 in_apex;
+layout(location = 3) in float in_radius;
+layout(location = 4) in vec3 in_color;
+
+uniform mat4 u_proj;
+
+out vec2 v_pixel;
+out vec3 v_base;
+out vec3 v_apex;
+out float v_radius;
+out vec3 v_color;
+
+void main() {
+    // Only the base has nonzero radius (the apex tapers to a point), but
+    // padding the bbox by in_radius at both corners is still a safe
+    // (slightly generous near the apex) bound -- same approach _BOND_VERT
+    // uses for a cylinder's uniform radius.
+    vec2 lo = min(in_base.xy, in_apex.xy) - vec2(in_radius);
+    vec2 hi = max(in_base.xy, in_apex.xy) + vec2(in_radius);
+    vec2 center = 0.5 * (lo + hi);
+    vec2 half_extent = max(0.5 * (hi - lo), vec2(1e-4));
+    vec2 pos = center + in_corner * half_extent;
+
+    v_pixel = pos;
+    v_base = in_base;
+    v_apex = in_apex;
+    v_radius = in_radius;
+    v_color = in_color;
+
+    float z_mid = 0.5 * (in_base.z + in_apex.z);
+    gl_Position = u_proj * vec4(pos, z_mid, 1.0);
+}
+"""
+
+_CONE_FRAG = """
+#version 410 core
+in vec2 v_pixel;
+in vec3 v_base;
+in vec3 v_apex;
+in float v_radius;
+in vec3 v_color;
+
+uniform float u_proj_z_scale;
+uniform float u_proj_z_bias;
+uniform vec3 u_light_dir;
+uniform vec3 u_half_vec;
+uniform vec3 u_fill_dir;
+uniform float u_ambient;
+uniform float u_fill_light;
+uniform float u_specular_strength;
+uniform float u_shininess;
+uniform float u_depth_cue;
+uniform float u_zmin;
+uniform float u_zspan;
+
+out vec4 frag_color;
+
+// GLSL port of render.Renderer._draw_cone_segment's math -- see that
+// docstring for the derivation. Target radius at axial offset s is
+// C + D*s (linear from R at the base to 0 at the apex); this folds an
+// extra (C+D*s)^2 term into the cylinder's usual quadratic, so unlike the
+// cylinder shader the leading coefficient a2p isn't sign-guaranteed and
+// both roots must be checked, picking the nearer-camera (larger s) one
+// that lies on the finite cone (0<=t<=L) with non-negative radius
+// (rejecting the mirror nappe beyond the apex that squaring introduces).
+void main() {
+    vec3 axis = v_apex - v_base;
+    float L = length(axis);
+    if (L < 1e-6 || v_radius <= 0.0) discard;
+    vec3 u = axis / L;
+    float R = v_radius;
+
+    float ex = v_pixel.x - v_base.x;
+    float ey = v_pixel.y - v_base.y;
+    float uz = u.z;
+    float A0 = ex * u.x + ey * u.y;
+    float a2 = 1.0 - uz * uz;
+    float b2 = -2.0 * A0 * uz;
+    float c2 = ex * ex + ey * ey - A0 * A0;
+
+    float k = R / L;
+    float C = R - k * A0;
+    float D = -k * uz;
+    float a2p = a2 - D * D;
+    float b2p = b2 - 2.0 * C * D;
+    float c2p = c2 - C * C;
+
+    bool near_parallel = abs(a2p) < 1e-9;
+    float safe_a2p = near_parallel ? 1.0 : a2p;
+    float disc = b2p * b2p - 4.0 * a2p * c2p;
+    bool has_root = disc >= 0.0;
+    float sq = sqrt(max(disc, 0.0));
+    float s_plus = (-b2p + sq) / (2.0 * safe_a2p);
+    float s_minus = (-b2p - sq) / (2.0 * safe_a2p);
+
+    bool b2p_nonzero = abs(b2p) >= 1e-12;
+    float safe_b2p = b2p_nonzero ? b2p : 1.0;
+    float s_lin = -c2p / safe_b2p;
+    bool lin_valid = near_parallel && b2p_nonzero;
+
+    float t_plus = A0 + uz * s_plus;
+    float r_plus = C + D * s_plus;
+    bool v_plus = has_root && !near_parallel && (t_plus >= 0.0) && (t_plus <= L) && (r_plus >= -1e-6);
+
+    float t_minus = A0 + uz * s_minus;
+    float r_minus = C + D * s_minus;
+    bool v_minus = has_root && !near_parallel && (t_minus >= 0.0) && (t_minus <= L) && (r_minus >= -1e-6);
+
+    float t_lin = A0 + uz * s_lin;
+    float r_lin = C + D * s_lin;
+    bool v_lin = lin_valid && (t_lin >= 0.0) && (t_lin <= L) && (r_lin >= -1e-6);
+
+    const float NEG_INF = -1e30;
+    float s = NEG_INF;
+    if (v_plus) s = max(s, s_plus);
+    if (v_minus) s = max(s, s_minus);
+    if (v_lin) s = max(s, s_lin);
+    if (s <= NEG_INF * 0.5) discard;
+
+    float t = A0 + uz * s;
+    float depth_view = v_base.z + s;
+
+    float wx = ex - t * u.x;
+    float wy = ey - t * u.y;
+    float wz = s - t * u.z;
+    float r_t = max(C + D * s, 1e-6);
+    vec3 normal = normalize(vec3(wx / r_t, wy / r_t, wz / r_t) * L + u * R);
+
+    float nl = clamp(dot(normal, u_light_dir), 0.0, 1.0);
+    float nf = clamp(dot(normal, u_fill_dir), 0.0, 1.0) * u_fill_light;
+    float nh = clamp(dot(normal, u_half_vec), 0.0, 1.0);
+    float spec = pow(nh, u_shininess) * u_specular_strength;
+    float diff = u_ambient + nl + nf;
+    vec3 shaded = v_color * diff + vec3(spec);
+
+    if (u_depth_cue > 0.0) {
+        float f = clamp((depth_view - u_zmin) / u_zspan, 0.0, 1.0);
+        float fog = 1.0 - u_depth_cue * (1.0 - f);
+        shaded *= fog;
+    }
+
+    frag_color = vec4(shaded, 1.0);
+    float nz = u_proj_z_scale * depth_view + u_proj_z_bias;
+    gl_FragDepth = nz * 0.5 + 0.5;
+}
+"""
+
 _QUAD_CORNERS = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype=np.float32)
 
 # Fullscreen-quad box-average downsample: for each output pixel, average the
@@ -322,6 +493,7 @@ class GLRenderer:
         self._quad_vbo = self.ctx.buffer(_QUAD_CORNERS.tobytes())
         self._atom_program = self.ctx.program(vertex_shader=_ATOM_VERT, fragment_shader=_ATOM_FRAG)
         self._bond_program = self.ctx.program(vertex_shader=_BOND_VERT, fragment_shader=_BOND_FRAG)
+        self._cone_program = self.ctx.program(vertex_shader=_CONE_VERT, fragment_shader=_CONE_FRAG)
         self._downsample_program = self.ctx.program(
             vertex_shader=_DOWNSAMPLE_VERT, fragment_shader=_DOWNSAMPLE_FRAG)
         self._downsample_vao = self.ctx.vertex_array(
@@ -364,8 +536,11 @@ class GLRenderer:
     # ------------------------------------------------------------------
     def render(self, spheres: SphereBatch, cylinders: CylinderBatch,
                proj: np.ndarray, shading: ShadingParams | None = None,
-               downsample: int = 1) -> np.ndarray:
-        """Render *spheres* and *cylinders* under projection *proj*.
+               downsample: int = 1, cones: ConeBatch | None = None) -> np.ndarray:
+        """Render *spheres*, *cylinders* and *cones* under projection *proj*.
+
+        *cones* defaults to empty so existing call sites that only know about
+        spheres/cylinders keep working unchanged.
 
         *proj* is a 4x4 matrix in the usual mathematical convention
         (``[nx,ny,nz,1] = proj @ [vx,vy,vz,1]``, row-major indexing) mapping
@@ -382,6 +557,7 @@ class GLRenderer:
         renderer to display-size*factor and passes the same factor here.
         """
         shading = shading or ShadingParams()
+        cones = cones or ConeBatch.empty()
         W, H = self.width, self.height
         downsample = max(1, int(downsample))
 
@@ -406,8 +582,17 @@ class GLRenderer:
             ca[keep_c], cb[keep_c], radii_c[keep_c], colors_a[keep_c], colors_b[keep_c],
         )
 
-        if len(centers) or len(ca):
-            depths = np.concatenate([centers[:, 2], ca[:, 2], cb[:, 2]])
+        cone_base = np.asarray(cones.base, dtype=np.float32).reshape(-1, 3)
+        cone_apex = np.asarray(cones.apex, dtype=np.float32).reshape(-1, 3)
+        radii_h = np.asarray(cones.radius, dtype=np.float32).reshape(-1)
+        colors_h = np.asarray(cones.color, dtype=np.float32).reshape(-1, 3)
+        keep_h = radii_h > 0
+        cone_base, cone_apex, radii_h, colors_h = (
+            cone_base[keep_h], cone_apex[keep_h], radii_h[keep_h], colors_h[keep_h],
+        )
+
+        if len(centers) or len(ca) or len(cone_base):
+            depths = np.concatenate([centers[:, 2], ca[:, 2], cb[:, 2], cone_base[:, 2], cone_apex[:, 2]])
             zmin = float(depths.min())
             zspan = max(float(depths.max()) - zmin, 1e-6)
         else:
@@ -440,6 +625,8 @@ class GLRenderer:
             self._draw_bonds(ca, cb, radii_c, colors_a, colors_b, proj_gl, common)
         if len(centers):
             self._draw_atoms(centers, radii_s, colors_s, proj_gl, common)
+        if len(cone_base):
+            self._draw_cones(cone_base, cone_apex, radii_h, colors_h, proj_gl, common)
 
         if downsample > 1:
             tw, th = W // downsample, H // downsample
@@ -506,6 +693,26 @@ class GLRenderer:
             ],
         )
         self._set_uniforms(self._bond_program, proj_gl, common)
+        vao.render(moderngl.TRIANGLE_STRIP, instances=n)
+        vao.release()
+        inst_vbo.release()
+
+    def _draw_cones(self, base, apex, radii, colors, proj_gl, common) -> None:
+        n = base.shape[0]
+        data = np.empty((n, 10), dtype=np.float32)
+        data[:, 0:3] = base
+        data[:, 3:6] = apex
+        data[:, 6] = radii
+        data[:, 7:10] = colors
+        inst_vbo = self.ctx.buffer(data.tobytes())
+        vao = self.ctx.vertex_array(
+            self._cone_program,
+            [
+                (self._quad_vbo, "2f", "in_corner"),
+                (inst_vbo, "3f 3f 1f 3f/i", "in_base", "in_apex", "in_radius", "in_color"),
+            ],
+        )
+        self._set_uniforms(self._cone_program, proj_gl, common)
         vao.render(moderngl.TRIANGLE_STRIP, instances=n)
         vao.release()
         inst_vbo.release()

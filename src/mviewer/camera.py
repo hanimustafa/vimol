@@ -71,3 +71,7 @@ class Camera:
     def view_positions(self, positions: np.ndarray) -> np.ndarray:
         """World coordinates -> view-space coordinates (angstrom)."""
         return (positions - self.center) @ self.rotation.T
+
+    def view_directions(self, directions: np.ndarray) -> np.ndarray:
+        """World -> view space for free vectors (rotation only, no translation)."""
+        return np.asarray(directions, float) @ self.rotation.T

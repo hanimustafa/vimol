@@ -20,7 +20,7 @@ Everything here is pure Python + numpy, no GPU or windowing system required.
 """
 from __future__ import annotations
 
-from .molecule import Molecule
+from .molecule import Molecule, VectorField
 from .camera import Camera
 from .render import Renderer, Style
 from .scene import Scene
@@ -34,7 +34,7 @@ from . import elements
 __version__ = "0.1.0"
 
 __all__ = [
-    "Molecule", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
+    "Molecule", "VectorField", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
     "InputDecoder", "MouseEvent", "KeyEvent", "enable_mouse", "disable_mouse",
     "load", "load_all", "loads", "SUPPORTED_EXTENSIONS",
     "perceive_bonds", "ensure_bonds", "kitty", "elements",

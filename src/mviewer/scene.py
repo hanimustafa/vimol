@@ -131,7 +131,10 @@ class Scene:
         pan = self.camera.pan.copy()
         zoom = self.camera.zoom
         self.camera.center = self.molecule.centroid()
-        ext = self.molecule.radius_of_gyration_extent() + self._max_atom_radius()
+        ext = max(
+            self.molecule.radius_of_gyration_extent() + self._max_atom_radius(),
+            self.molecule.vector_extent(),
+        )
         self.camera.fit(self._renderer.width, self._renderer.height, ext)
         if keep_orientation:
             self.camera.rotation = rot
@@ -161,12 +164,12 @@ class Scene:
         if self._backend_name == "gl":
             from .gl_adapter import molecule_to_gl_inputs
             w, h = self._renderer.width, self._renderer.height
-            spheres, cylinders, proj, shading = molecule_to_gl_inputs(
+            spheres, cylinders, cones, proj, shading = molecule_to_gl_inputs(
                 self.molecule, self.camera, self.style, w, h)
             # the GL renderer supersamples/downsamples on the GPU, so it returns
             # a display-size image directly -- no CPU _downsample pass.
             return self._renderer.render(spheres, cylinders, proj, shading,
-                                         downsample=self.supersample)
+                                         downsample=self.supersample, cones=cones)
         img = self._renderer.render(self.molecule, self.camera, self.style)
         return _downsample(img, self.supersample)
 

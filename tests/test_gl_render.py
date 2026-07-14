@@ -20,7 +20,7 @@ import mviewer
 from mviewer.bonds import ensure_bonds
 from mviewer.render import Style
 from mviewer.scene import Scene
-from mviewer.gl_render import GLRenderer, SphereBatch, CylinderBatch, ShadingParams
+from mviewer.gl_render import GLRenderer, SphereBatch, CylinderBatch, ConeBatch, ShadingParams
 from mviewer.gl_adapter import _build_projection
 
 EX = os.path.join(os.path.dirname(__file__), "..", "examples")
@@ -70,6 +70,24 @@ def test_gl_renderer_cylinder_only_scene(gl_available):
     assert img.shape == (64, 64, 3)
     bg = np.array(ShadingParams().background) * 255
     assert np.abs(img[32, 32].astype(float) - bg).sum() > 30  # bond drawn at center
+
+
+def test_gl_renderer_cone_only_scene(gl_available):
+    """A cone-only scene (the arrow-head primitive, no spheres/cylinders)
+    must render and not crash computing fog range -- mirrors
+    test_gl_renderer_cylinder_only_scene for the new primitive."""
+    cone = ConeBatch(
+        base=np.array([[0.0, 0.0, 0.0]], np.float32),
+        apex=np.array([[0.0, 0.0, 3.0]], np.float32),
+        radius=np.array([1.5], np.float32),
+        color=np.array([[1.0, 0.5, 0.0]], np.float32),
+    )
+    r = GLRenderer(64, 64)
+    img = r.render(SphereBatch.empty(), CylinderBatch.empty(), _proj(w=64, h=64),
+                   ShadingParams(), cones=cone)
+    assert img.shape == (64, 64, 3)
+    bg = np.array(ShadingParams().background) * 255
+    assert np.abs(img[32, 32].astype(float) - bg).sum() > 30  # cone base fills the center
 
 
 def test_gl_renderer_empty_scene_is_background_only(gl_available):
@@ -191,6 +209,34 @@ def test_gl_vs_cpu_similar_coverage(gl_available):
     drawn_gl = (np.abs(img_gl.astype(np.float32) - bg).sum(axis=-1) > 30).sum()
     assert drawn_cpu > 0 and drawn_gl > 0
     assert 0.5 < drawn_gl / drawn_cpu < 2.0
+
+
+def test_gl_vs_cpu_vector_field_parity(gl_available):
+    """Same spirit as test_gl_vs_cpu_similar_coverage, but exercising the new
+    arrow (shaft + cone head) primitive: both backends should broadly agree
+    on drawn footprint, and both must actually draw the arrow in its
+    assigned (magenta) color, not just background/element colors."""
+    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    ensure_bonds(mol)
+    vectors = np.zeros((mol.n_atoms, 3))
+    vectors[0] = [2.5, 0.0, 0.0]
+    mol.add_vector_field(vectors, color=(1.0, 0.0, 1.0), radius=0.08, head_scale=3.0)
+    cpu = Scene(mol, 160, 160, backend="cpu")
+    gl = Scene(mol, 160, 160, backend="gl")
+    img_cpu = cpu.render()
+    img_gl = gl.render()
+    bg = np.array(Style().background) * 255
+    drawn_cpu = (np.abs(img_cpu.astype(np.float32) - bg).sum(axis=-1) > 30).sum()
+    drawn_gl = (np.abs(img_gl.astype(np.float32) - bg).sum(axis=-1) > 30).sum()
+    assert drawn_cpu > 0 and drawn_gl > 0
+    assert 0.5 < drawn_gl / drawn_cpu < 2.0
+
+    def magenta_count(img):
+        return int(((img[..., 0].astype(int) > 150) & (img[..., 2].astype(int) > 100) &
+                    (img[..., 1].astype(int) < 120)).sum())
+
+    assert magenta_count(img_cpu) > 0
+    assert magenta_count(img_gl) > 0
 
 
 def test_gl_scene_picking_unaffected_by_backend(gl_available):

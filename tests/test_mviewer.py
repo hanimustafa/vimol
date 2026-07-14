@@ -295,6 +295,65 @@ def test_camera_orbit_changes_view():
     assert not np.array_equal(before, after)
 
 
+def test_add_vector_field_validates_length():
+    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    with pytest.raises(ValueError):
+        mol.add_vector_field(np.zeros((mol.n_atoms - 1, 3)))
+
+
+def test_vector_extent_accounts_for_arrow_tips():
+    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    assert mol.vector_extent() == 0.0
+    mol.add_vector_field(np.array([[5.0, 0.0, 0.0]]))
+    assert mol.vector_extent() == pytest.approx(5.0)
+
+
+def test_view_directions_rotates_but_does_not_translate():
+    from mviewer.camera import Camera
+
+    cam = Camera(center=np.array([3.0, -2.0, 1.0]))
+    cam.orbit(40, 20)
+    v = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    rotated = cam.view_directions(v)
+    assert np.allclose(rotated, v @ cam.rotation.T)
+    # view_positions on the same numbers (treated as a position, not a free
+    # vector) would incorrectly subtract the camera center first
+    assert not np.allclose(cam.view_positions(v), rotated)
+
+
+def test_fit_zooms_out_to_fit_long_vector():
+    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    small_zoom = Scene(mol, 200, 200).camera.zoom
+    mol.add_vector_field(np.array([[10.0, 0.0, 0.0]]))
+    big_vector_zoom = Scene(mol, 200, 200).camera.zoom
+    assert big_vector_zoom < small_zoom
+
+
+def test_render_draws_arrow_in_its_assigned_color():
+    """Color is the semantic key -- the arrow must render in the vector
+    field's own color, not the parent atom's element color."""
+    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol.add_vector_field(np.array([[2.0, 0.0, 0.0]]), color=(1.0, 0.0, 1.0),
+                         radius=0.08, head_scale=3.0)
+    scene = Scene(mol, 200, 200, backend="cpu", supersample=1)
+    img = scene.render()
+    cam = scene.camera
+    ox_s = scene.render_size[0] * 0.5 + cam.pan[0]
+    oy_s = scene.render_size[1] * 0.5 - cam.pan[1]
+    tip_x = int(round(ox_s + 2.0 * cam.zoom))
+    tip_y = int(round(oy_s))
+
+    def is_magenta(px):
+        return px[0] > 150 and px[2] > 100 and px[1] < 120
+
+    region = img[max(tip_y - 4, 0):tip_y + 5, max(tip_x - 4, 0):tip_x + 5]
+    magenta = (region[..., 0].astype(int) > 150) & (region[..., 2].astype(int) > 100) & \
+              (region[..., 1].astype(int) < 120)
+    assert magenta.any()
+    center = img[int(round(oy_s)), int(round(ox_s))]
+    assert not is_magenta(center)  # the atom itself keeps its element color
+
+
 def test_input_decoder_keys_and_arrows():
     from mviewer.input import InputDecoder, KeyEvent, MouseEvent
 

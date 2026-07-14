@@ -15,6 +15,7 @@ from typing import Tuple
 
 import numpy as np
 
+from .arrows import ArrowGeometry, build_arrow_geometry
 from .camera import Camera
 from .molecule import Molecule
 
@@ -111,10 +112,8 @@ class Renderer:
 
         draw_bonds = style.representation in ("ball_and_stick", "wireframe", "licorice")
         if draw_bonds and mol.bonds:
-            self._draw_bonds(
-                mol, vpos, sx, sy, sz, zoom, ox_s, oy_s, style, base_colors,
-                color, zbuf, shade,
-            )
+            self._draw_bonds(mol, vpos, zoom, ox_s, oy_s, style, base_colors,
+                             color, zbuf, shade, zmin, zspan)
 
         # atoms drawn after bonds; z-buffer keeps whichever is nearer
         order = np.argsort(sz)  # far to near so specular highlights aren't clobbered oddly
@@ -153,6 +152,11 @@ class Renderer:
             shaded = shade(normals, albedo)
             self._composite(color, zbuf, x0, x1, y0, y1, mask, depth, shaded, style, cz, zmin, zspan)
 
+        if mol.vector_fields:
+            geom = build_arrow_geometry(mol, camera)
+            self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
+            self._draw_arrow_heads(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
+
         return self._finish(color, zbuf, transparent)
 
     @staticmethod
@@ -165,79 +169,199 @@ class Renderer:
         return np.dstack([rgb, alpha])
 
     # ------------------------------------------------------------------
-    def _draw_bonds(self, mol, vpos, sx, sy, sz, zoom, ox_s, oy_s, style, base_colors,
-                    color, zbuf, shade):
-        W, H = self.width, self.height
+    def _draw_bonds(self, mol, vpos, zoom, ox_s, oy_s, style, base_colors,
+                    color, zbuf, shade, zmin, zspan):
         rb = style.bond_radius if style.representation != "licorice" else style.bond_radius * 1.6
-        srb = rb * zoom
         for (i, j, order) in mol.bonds:
-            ax, ay, az = vpos[i]
-            bx, by, bz = vpos[j]
-            axis = np.array([bx - ax, by - ay, bz - az])
-            L = np.linalg.norm(axis)
-            if L < 1e-6:
-                continue
-            u = axis / L
-            # screen-space bounding box
-            sax, say = sx[i], sy[i]
-            sbx, sby = sx[j], sy[j]
-            x0 = max(int(np.floor(min(sax, sbx) - srb)), 0)
-            x1 = min(int(np.ceil(max(sax, sbx) + srb)) + 1, W)
-            y0 = max(int(np.floor(min(say, sby) - srb)), 0)
-            y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
-            if x0 >= x1 or y0 >= y1:
-                continue
-            xs = np.arange(x0, x1)
-            ys = np.arange(y0, y1)
-            gx, gy = np.meshgrid(xs, ys)
-            # pixel -> view-plane coordinates (angstrom)
-            vx = (gx - ox_s) / zoom
-            vy = (oy_s - gy) / zoom
-            ex = vx - ax
-            ey = vy - ay
-            uz = u[2]
-            A0 = ex * u[0] + ey * u[1]
-            a2 = 1.0 - uz * uz
-            b2 = -2.0 * A0 * uz
-            c2 = ex * ex + ey * ey - A0 * A0 - rb * rb
-            if abs(a2) < 1e-9:
-                # cylinder axis ~ parallel to view direction: treat as disc
-                disc = -c2  # = rb^2 - (ex^2+ey^2-A0^2)
-                mask = disc >= 0
-                s = np.zeros_like(ex)
-            else:
-                disc = b2 * b2 - 4 * a2 * c2
-                mask = disc >= 0
-                sq = np.sqrt(np.clip(disc, 0, None))
-                s = (-b2 + sq) / (2 * a2)  # front (larger z) root
-            if not mask.any():
-                continue
-            zview = az + s
-            # axial coordinate to clamp to the segment and pick the color half
-            t = A0 + uz * s  # (P-a).u
-            within = (t >= 0) & (t <= L)
-            mask = mask & within
-            if not mask.any():
-                continue
-            # surface normal = (w - (w.u)u)/rb
-            wx = ex
-            wy = ey
-            wz = s  # (z-az)
-            proj = t  # w.u
-            nx = (wx - proj * u[0]) / rb
-            ny = (wy - proj * u[1]) / rb
-            nz = (wz - proj * u[2]) / rb
-            normals = np.stack([nx, ny, nz], axis=-1)
-            # split color at midpoint
-            frac = t / L
-            ca = base_colors[i]
-            cb = base_colors[j]
-            albedo = np.where((frac < 0.5)[..., None], ca, cb).astype(np.float32)
-            shaded = shade(normals, albedo)
-            zmin = float(sz.min())
-            zspan = max(float(sz.max()) - zmin, 1e-6)
-            self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
-                            shaded, style, None, zmin, zspan)
+            self._draw_cylinder_segment(vpos[i], vpos[j], rb, base_colors[i], base_colors[j],
+                                        zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
+
+    def _draw_arrow_shafts(self, geom: ArrowGeometry, zoom, ox_s, oy_s, style,
+                           color, zbuf, shade, zmin, zspan):
+        for k in range(geom.shaft_a.shape[0]):
+            c = geom.shaft_color[k].astype(np.float32)
+            self._draw_cylinder_segment(geom.shaft_a[k], geom.shaft_b[k], float(geom.shaft_radius[k]),
+                                        c, c, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
+
+    def _draw_arrow_heads(self, geom: ArrowGeometry, zoom, ox_s, oy_s, style,
+                          color, zbuf, shade, zmin, zspan):
+        for k in range(geom.head_base.shape[0]):
+            self._draw_cone_segment(geom.head_base[k], geom.head_apex[k], float(geom.head_radius[k]),
+                                    geom.head_color[k], zoom, ox_s, oy_s, style, color, zbuf, shade,
+                                    zmin, zspan)
+
+    # ------------------------------------------------------------------
+    def _draw_cylinder_segment(self, a, b, radius, color_a, color_b, zoom, ox_s, oy_s,
+                               style, color, zbuf, shade, zmin, zspan):
+        """Rasterize one capped-cylinder impostor from view-space *a* to *b*.
+
+        Shared by real bonds (``_draw_bonds``, two atom colors split at the
+        midpoint) and arrow shafts (``_draw_arrow_shafts``, one uniform color).
+        """
+        W, H = self.width, self.height
+        ax, ay, az = a
+        bx, by, bz = b
+        axis = np.array([bx - ax, by - ay, bz - az])
+        L = np.linalg.norm(axis)
+        if L < 1e-6 or radius <= 0:
+            return
+        u = axis / L
+        srb = radius * zoom
+        sax, say = ox_s + ax * zoom, oy_s - ay * zoom
+        sbx, sby = ox_s + bx * zoom, oy_s - by * zoom
+        x0 = max(int(np.floor(min(sax, sbx) - srb)), 0)
+        x1 = min(int(np.ceil(max(sax, sbx) + srb)) + 1, W)
+        y0 = max(int(np.floor(min(say, sby) - srb)), 0)
+        y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
+        if x0 >= x1 or y0 >= y1:
+            return
+        xs = np.arange(x0, x1)
+        ys = np.arange(y0, y1)
+        gx, gy = np.meshgrid(xs, ys)
+        # pixel -> view-plane coordinates (angstrom)
+        vx = (gx - ox_s) / zoom
+        vy = (oy_s - gy) / zoom
+        ex = vx - ax
+        ey = vy - ay
+        uz = u[2]
+        A0 = ex * u[0] + ey * u[1]
+        a2 = 1.0 - uz * uz
+        b2 = -2.0 * A0 * uz
+        c2 = ex * ex + ey * ey - A0 * A0 - radius * radius
+        if abs(a2) < 1e-9:
+            # cylinder axis ~ parallel to view direction: treat as disc
+            disc = -c2  # = radius^2 - (ex^2+ey^2-A0^2)
+            mask = disc >= 0
+            s = np.zeros_like(ex)
+        else:
+            disc = b2 * b2 - 4 * a2 * c2
+            mask = disc >= 0
+            sq = np.sqrt(np.clip(disc, 0, None))
+            s = (-b2 + sq) / (2 * a2)  # front (larger z) root
+        if not mask.any():
+            return
+        zview = az + s
+        # axial coordinate to clamp to the segment and pick the color half
+        t = A0 + uz * s  # (P-a).u
+        within = (t >= 0) & (t <= L)
+        mask = mask & within
+        if not mask.any():
+            return
+        # surface normal = (w - (w.u)u)/radius
+        wx = ex
+        wy = ey
+        wz = s  # (z-az)
+        proj = t  # w.u
+        nx = (wx - proj * u[0]) / radius
+        ny = (wy - proj * u[1]) / radius
+        nz = (wz - proj * u[2]) / radius
+        normals = np.stack([nx, ny, nz], axis=-1)
+        # split color at midpoint
+        frac = t / L
+        albedo = np.where((frac < 0.5)[..., None], color_a, color_b).astype(np.float32)
+        shaded = shade(normals, albedo)
+        self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
+                        shaded, style, None, zmin, zspan)
+
+    # ------------------------------------------------------------------
+    def _draw_cone_segment(self, base, apex, radius, color_rgb, zoom, ox_s, oy_s,
+                           style, color, zbuf, shade, zmin, zspan):
+        """Rasterize one cone impostor: *radius* at *base*, tapering linearly
+        to a point at *apex* (view space). Used for arrow heads.
+
+        Same analytic setup as ``_draw_cylinder_segment`` (``A0``, ``a2``,
+        ``b2`` from the axis/offset), but the target surface radius varies
+        linearly along the axis instead of being constant, which folds an
+        extra ``(C + D*s)^2`` term into the quadratic. Unlike the cylinder,
+        the resulting leading coefficient isn't sign-guaranteed, so both
+        roots are evaluated and the nearer-camera (larger ``s``) one that
+        satisfies ``0 <= t <= L`` *and* non-negative radius (rejecting the
+        mirror nappe beyond the apex that squaring introduces) wins.
+        """
+        W, H = self.width, self.height
+        ax, ay, az = base
+        bx, by, bz = apex
+        axis = np.array([bx - ax, by - ay, bz - az])
+        L = np.linalg.norm(axis)
+        if L < 1e-6 or radius <= 0:
+            return
+        u = axis / L
+        R = radius
+        srb = R * zoom
+        sax, say = ox_s + ax * zoom, oy_s - ay * zoom
+        sbx, sby = ox_s + bx * zoom, oy_s - by * zoom
+        x0 = max(int(np.floor(min(sax, sbx) - srb)), 0)
+        x1 = min(int(np.ceil(max(sax, sbx) + srb)) + 1, W)
+        y0 = max(int(np.floor(min(say, sby) - srb)), 0)
+        y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
+        if x0 >= x1 or y0 >= y1:
+            return
+        xs = np.arange(x0, x1)
+        ys = np.arange(y0, y1)
+        gx, gy = np.meshgrid(xs, ys)
+        vx = (gx - ox_s) / zoom
+        vy = (oy_s - gy) / zoom
+        ex = vx - ax
+        ey = vy - ay
+        uz = u[2]
+        A0 = ex * u[0] + ey * u[1]
+        a2 = 1.0 - uz * uz
+        b2 = -2.0 * A0 * uz
+        c2 = ex * ex + ey * ey - A0 * A0  # no -R^2 here (radius varies with t)
+
+        k = R / L
+        C = R - k * A0
+        D = -k * uz
+        a2p = a2 - D * D
+        b2p = b2 - 2.0 * C * D
+        c2p = c2 - C * C
+
+        near_parallel = np.abs(a2p) < 1e-9
+        safe_a2p = np.where(near_parallel, 1.0, a2p)
+        disc = b2p * b2p - 4.0 * a2p * c2p
+        has_root = disc >= 0
+        sq = np.sqrt(np.clip(disc, 0, None))
+        s_plus = (-b2p + sq) / (2.0 * safe_a2p)
+        s_minus = (-b2p - sq) / (2.0 * safe_a2p)
+
+        safe_b2p = np.where(np.abs(b2p) < 1e-12, 1.0, b2p)
+        s_lin = -c2p / safe_b2p
+        lin_valid = near_parallel & (np.abs(b2p) >= 1e-12)
+
+        def _valid(s):
+            t = A0 + uz * s
+            radius_at = C + D * s
+            return (t >= 0) & (t <= L) & (radius_at >= -1e-6)
+
+        v_plus = has_root & ~near_parallel & _valid(s_plus)
+        v_minus = has_root & ~near_parallel & _valid(s_minus)
+        v_lin = lin_valid & _valid(s_lin)
+
+        neg_inf = -1e30
+        s = np.maximum(np.maximum(
+            np.where(v_plus, s_plus, neg_inf),
+            np.where(v_minus, s_minus, neg_inf)),
+            np.where(v_lin, s_lin, neg_inf))
+        mask = s > neg_inf / 2
+        if not mask.any():
+            return
+
+        t = A0 + uz * s
+        zview = az + s
+        wx = ex - t * u[0]
+        wy = ey - t * u[1]
+        wz = s - t * u[2]
+        r_t = np.clip(C + D * s, 1e-6, None)
+        nx = (wx / r_t) * L + u[0] * R
+        ny = (wy / r_t) * L + u[1] * R
+        nz = (wz / r_t) * L + u[2] * R
+        nlen = np.sqrt(nx * nx + ny * ny + nz * nz)
+        nlen = np.where(nlen < 1e-9, 1.0, nlen)
+        normals = np.stack([nx / nlen, ny / nlen, nz / nlen], axis=-1)
+        albedo = np.broadcast_to(np.asarray(color_rgb, np.float32), normals.shape)
+        shaded = shade(normals, albedo)
+        self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
+                        shaded, style, None, zmin, zspan)
 
     # ------------------------------------------------------------------
     @staticmethod
