@@ -5,14 +5,17 @@ its bonds. Geometry (which directions to place neighbors in) comes from
 :mod:`vimol.templates`; bond *lengths* are the sum of covalent radii, matching
 how :mod:`vimol.bonds` perceives connectivity.
 
-The three public operations mirror the interactive gestures:
+The public operations mirror the interactive gestures:
 
 * :func:`birth_molecule` -- click empty space -> a fresh capped atom (methane).
-* :func:`grow_at_atom`   -- click an atom     -> extend the structure there.
+* :func:`grow_at_atom`   -- click an atom     -> edit the structure there.
+* :func:`replace_atom`   -- the heavy-atom half of ``grow_at_atom``.
 
-``grow_at_atom`` special-cases hydrogen exactly as the spec describes: the H is
-promoted to the building element (carbon) and its freed valences are capped, so
-"click an H, it becomes a carbon with three new hydrogens".
+``grow_at_atom`` splits on what was clicked: a hydrogen is *promoted* to the
+building element and its freed valences capped ("click an H, it becomes a
+carbon with three new hydrogens"); a heavier atom is *replaced* in place by
+the building element, snapping its terminal hydrogens and topping up its
+valency with new ones.
 """
 from __future__ import annotations
 
@@ -134,25 +137,6 @@ def birth_molecule(mol: Molecule, position, element: str = "C",
     return center
 
 
-def _grow_onto(mol: Molecule, parent_idx: int, element: str,
-               template: AtomTemplate) -> int:
-    """Attach a new *element* atom to an existing parent atom, capped."""
-    parent_pos = mol.positions[parent_idx].copy()
-    parent_elem = mol.symbols[parent_idx]
-    neigh = _neighbors(mol, parent_idx)
-    neighbor_dirs = [
-        templates._normalize(mol.positions[j] - parent_pos) for j in neigh
-    ]
-    site = templates.free_direction(neighbor_dirs)
-    center = parent_pos + site * _bond_length(parent_elem, element)
-    new_idx = mol.add_atom(element, center[0], center[1], center[2])
-    # cap the new atom's remaining valences, its attachment slot facing back
-    opens = template.open_directions(-site)
-    _cap(mol, center, opens, element, template.cap)
-    _reperceive(mol)
-    return new_idx
-
-
 def _promote_hydrogen(mol: Molecule, h_idx: int, element: str,
                       template: AtomTemplate) -> int:
     """Turn a hydrogen into *element*, repositioned and capped.
@@ -185,16 +169,16 @@ def _promote_hydrogen(mol: Molecule, h_idx: int, element: str,
 
 def grow_at_atom(mol: Molecule, idx: int, element: str = "C",
                  template: Optional[AtomTemplate] = None) -> int:
-    """Extend the structure at atom *idx* with a fragment of *element*.
+    """Edit the structure at atom *idx* with the selected *element*.
 
     * A hydrogen is *promoted*: it becomes the new element (moved to the right
       bond length) and its freed valences are capped -- "click an H, it turns
       into a carbon with three new hydrogens".
-    * Any heavier atom gets a new capped *element* atom bonded to a free site.
+    * Any heavier atom is *replaced* in place -- see :func:`replace_atom`.
 
     Returns the index of the resulting central atom.
     """
     tmpl = template or templates.default_template(element)
     if mol.symbols[idx] == "H":
         return _promote_hydrogen(mol, idx, element, tmpl)
-    return _grow_onto(mol, idx, element, tmpl)
+    return replace_atom(mol, idx, element, tmpl)

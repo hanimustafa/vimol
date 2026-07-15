@@ -106,11 +106,12 @@ def test_grow_promotes_hydrogen_to_methyl():
     assert (0, 1, 1) in mol.bonds
 
 
-def test_grow_on_heavy_atom_attaches_methyl():
+def test_click_heavy_atom_replaces_it():
+    # lone carbon, oxygen selected -> the C itself becomes a capped O (water)
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
-    editor.grow_at_atom(mol, 0)          # click the lone carbon
-    assert mol.symbols.count("C") == 2
-    assert mol.symbols.count("H") == 3   # new carbon capped with 3 H
+    editor.grow_at_atom(mol, 0, element="O")
+    assert mol.formula() == "H2O"
+    assert mol.symbols[0] == "O"          # replaced in place, not grown onto
 
 
 def test_lone_hydrogen_becomes_methane():
@@ -242,7 +243,7 @@ def test_widget_undo_reverts_edits():
     w.set_append_mode(True)
     _click(w, 100, 100)                     # birth CH4
     n1 = w.molecule.n_atoms
-    _click(w, 100, 100)                     # second click grows onto the methane
+    _click(w, 180, 20)                      # second click: empty corner, new methane
     n2 = w.molecule.n_atoms
     assert n2 > n1 and w.dirty
     assert w.undo()                         # back to one methane
