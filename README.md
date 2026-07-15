@@ -1,4 +1,4 @@
-# mviewer
+# vimol
 
 A **fully-featured molecular viewer that runs in the terminal**, using the
 [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
@@ -8,7 +8,7 @@ depth buffer, specular highlights and depth cueing — entirely in software
 
 It is built as **two layers**:
 
-* **`mviewer` — an embeddable library.** Drop it into any terminal application
+* **`vimol` — an embeddable library.** Drop it into any terminal application
   to render molecules to pixels or a Kitty escape stream, and forward
   intercepted mouse/key events to it to make them interactive.
 * **`main.py` (a.k.a. *main.app*) — the driver application.** Deliberately
@@ -20,19 +20,19 @@ It is built as **two layers**:
 ./main.py examples/benzene.xyz        # drag to rotate, right-drag to pan, wheel to zoom
 ```
 
-`main.py` really is this small — everything else is in `src/mviewer/`:
+`main.py` really is this small — everything else is in `src/vimol/`:
 
 ```python
-import sys, mviewer
-mviewer.view(sys.argv[1])   # full-screen: mouse rotate/pan/zoom + hover-to-identify
+import sys, vimol
+vimol.view(sys.argv[1])   # full-screen: mouse rotate/pan/zoom + hover-to-identify
 ```
 
-For batch rendering and flags (stills, styles, PNG), use the `mviewer` CLI
-(`python -m mviewer` / the installed console script):
+For batch rendering and flags (stills, styles, PNG), use the `vimol` CLI
+(`python -m vimol` / the installed console script):
 
 ```
-mviewer examples/c60.xyz --spin --style spacefill
-mviewer protein.pdb --render out.png --size 1200x900
+vimol examples/c60.xyz --spin --style spacefill
+vimol protein.pdb --render out.png --size 1200x900
 ```
 
 ## Why impostor raycasting?
@@ -70,7 +70,7 @@ NGL) use — just done on the CPU.
 ## Install
 
 ```bash
-pip install -e .          # then: mviewer examples/c60.xyz
+pip install -e .          # then: vimol examples/c60.xyz
 # or run straight from the checkout with no install:
 ./main.py examples/c60.xyz
 ```
@@ -82,17 +82,17 @@ to PNG works anywhere.
 ## Library usage
 
 ```python
-import mviewer
+import vimol
 
-mol = mviewer.load("caffeine.sdf")     # parse (bonds perceived if absent)
-scene = mviewer.Scene(mol, 640, 480)   # bind camera + renderer, own the size
+mol = vimol.load("caffeine.sdf")     # parse (bonds perceived if absent)
+scene = vimol.Scene(mol, 640, 480)   # bind camera + renderer, own the size
 scene.camera.orbit(30, -15)            # rotate (degrees)
 
 img = scene.render()                   # -> (H, W, 3) uint8 numpy array
 os.write(1, scene.to_kitty())          # ...or paint it in a Kitty terminal
 scene.to_png("out.png")                # ...or save a PNG
 
-mviewer.view(mol)                      # ...or launch the full interactive widget
+vimol.view(mol)                      # ...or launch the full interactive widget
 ```
 
 ### Embedding with your own input loop
@@ -102,7 +102,7 @@ the two building blocks directly and forward only the events you want — so you
 can **intercept the mouse in your own region** and hand it to the molecule:
 
 ```python
-from mviewer import MoleculeWidget, InputDecoder, MouseEvent
+from vimol import MoleculeWidget, InputDecoder, MouseEvent
 
 widget = MoleculeWidget(mol, width_px, height_px)   # no terminal, no input loop
 decoder = InputDecoder(pixel=True)
@@ -141,8 +141,8 @@ host app that puts its own chrome above the molecule and routes the mouse.
 ### Editing
 
 `./main.py` — the standalone app — always opens with editing on. Everywhere
-else, editing is **off by default**: the `mviewer` CLI needs `--edit`
-(`mviewer --edit mol.xyz`), and the Python API (`mviewer.view()`, `Viewer`,
+else, editing is **off by default**: the `vimol` CLI needs `--edit`
+(`vimol --edit mol.xyz`), and the Python API (`vimol.view()`, `Viewer`,
 `MoleculeWidget`) needs `editable=True`. That way a host application that
 embeds the widget doesn't inherit these keybindings unless it opts in. When
 editing is on, a few keys change meaning from the classic bindings above
@@ -197,12 +197,12 @@ one-line addition.
 
 ```
 main.py                     # main.app — very thin full-screen launcher
-src/mviewer/
+src/vimol/
 ├── __init__.py             # public library API
 ├── widget.py               # MoleculeWidget: embeddable interaction core (+ picking)
 ├── input.py                # InputDecoder + MouseEvent/KeyEvent, SGR/pixel mouse
 ├── viewer.py               # full-screen driver (thin wrapper over widget + input)
-├── app.py                  # batch/CLI implementation (mviewer command)
+├── app.py                  # batch/CLI implementation (vimol command)
 ├── scene.py                # Scene: molecule + camera + renderer + supersampling
 ├── render.py               # numpy impostor raycaster (spheres + cylinders)
 ├── camera.py               # orthographic trackball camera

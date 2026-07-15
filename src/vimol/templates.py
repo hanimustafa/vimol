@@ -11,7 +11,7 @@ atom, orient its first direction toward the atom it attaches to, and cap the
 remaining directions with hydrogens.
 
 Everything here is pure geometry (unit vectors and rotations); actual atom
-placement, bond lengths and molecule mutation live in :mod:`mviewer.editor`.
+placement, bond lengths and molecule mutation live in :mod:`vimol.editor`.
 """
 from __future__ import annotations
 

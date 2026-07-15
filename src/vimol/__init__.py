@@ -1,11 +1,11 @@
-"""mviewer — an embeddable terminal molecular viewer using the Kitty graphics protocol.
+"""vimol — an embeddable terminal molecular viewer using the Kitty graphics protocol.
 
 Quick start
 -----------
-    import mviewer
+    import vimol
 
-    mol = mviewer.load("caffeine.pdb")     # parse a structure
-    scene = mviewer.Scene(mol, 640, 480)    # bind camera + renderer
+    mol = vimol.load("caffeine.pdb")     # parse a structure
+    scene = vimol.Scene(mol, 640, 480)    # bind camera + renderer
     scene.camera.orbit(30, 15)              # rotate
     img = scene.render()                    # (H, W, 3) uint8 numpy array
 
@@ -14,7 +14,7 @@ Quick start
     os.write(1, scene.to_kitty())
 
     # or run the full interactive viewer:
-    mviewer.view(mol)
+    vimol.view(mol)
 
 Everything here is pure Python + numpy, no GPU or windowing system required.
 """
@@ -48,7 +48,7 @@ def view(molecule_or_path, **kwargs):
     """Launch the interactive terminal viewer.
 
     Accepts a :class:`Molecule` or a path to a structure file. Extra keyword
-    arguments are forwarded to :class:`mviewer.viewer.Viewer`.
+    arguments are forwarded to :class:`vimol.viewer.Viewer`.
     """
     from .viewer import Viewer
 

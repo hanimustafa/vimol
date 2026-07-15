@@ -1,4 +1,4 @@
-"""Standard 18-column periodic-table layout, derived from mviewer.elements.
+"""Standard 18-column periodic-table layout, derived from vimol.elements.
 
 Grid coordinates here drive the interactive element picker in the viewer:
 cursor navigation, click hit-testing, and rendering all key off :data:`GRID`.
@@ -7,7 +7,7 @@ actinides out of the main table into two extra rows below, leaving a
 non-selectable placeholder cell in the gap each leaves behind.
 
 Element placement is computed from atomic-number ranges against
-:data:`mviewer.elements.SYMBOLS` rather than typed out by hand, so it can't
+:data:`vimol.elements.SYMBOLS` rather than typed out by hand, so it can't
 drift out of sync with that table.
 """
 from __future__ import annotations

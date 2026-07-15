@@ -7,12 +7,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import mviewer
-from mviewer import elements, kitty
-from mviewer.bonds import ensure_bonds, perceive_bonds
-from mviewer.render import Renderer, Style
-from mviewer.scene import Scene
-from mviewer.parsers import loads
+import vimol
+from vimol import elements, kitty
+from vimol.bonds import ensure_bonds, perceive_bonds
+from vimol.render import Renderer, Style
+from vimol.scene import Scene
+from vimol.parsers import loads
 
 EX = os.path.join(os.path.dirname(__file__), "..", "examples")
 
@@ -34,7 +34,7 @@ def test_element_data():
 
 
 def test_xyz_roundtrip_and_bonds():
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     assert mol.n_atoms == 12
     ensure_bonds(mol)
     # benzene: 6 ring bonds + 6 C-H = 12 bonds
@@ -43,7 +43,7 @@ def test_xyz_roundtrip_and_bonds():
 
 
 def test_c60_topology():
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
     ensure_bonds(mol)
     assert mol.n_atoms == 60
     assert len(mol.bonds) == 90  # V - E + F = 2  =>  60 - 90 + 32 = 2
@@ -57,7 +57,7 @@ def test_pdb_conect():
 
 
 def test_render_produces_image():
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 120, 120, supersample=1)
     img = scene.render()
@@ -70,7 +70,7 @@ def test_render_produces_image():
 
 
 def test_transparent_render_is_rgba_with_cutout():
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 120, 120, style=Style(transparent=True), supersample=1)
     img = scene.render()
@@ -82,7 +82,7 @@ def test_transparent_render_is_rgba_with_cutout():
 
 def test_transparent_supersample_no_black_fringe():
     """Premultiplied downsampling: edge pixels must not fringe toward black."""
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 100, 100, style=Style(transparent=True), supersample=3)
     img = scene.render()
@@ -96,8 +96,8 @@ def test_transparent_supersample_no_black_fringe():
 
 def test_hydrogen_ball_bigger_than_bond():
     """Ball-and-stick must scale atoms by vdW radius so H stays visible."""
-    from mviewer.render import _atom_radii
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    from vimol.render import _atom_radii
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     st = Style(representation="ball_and_stick")
     radii = _atom_radii(mol, st)
     h_idx = [i for i, s in enumerate(mol.symbols) if s == "H"]
@@ -105,7 +105,7 @@ def test_hydrogen_ball_bigger_than_bond():
 
 
 def test_all_representations_render():
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     for rep in ("ball_and_stick", "spacefill", "licorice", "wireframe"):
         scene = Scene(mol, 80, 80, style=Style(representation=rep))
@@ -136,13 +136,13 @@ def test_png_roundtrip_header():
 def test_backend_auto_never_raises():
     """`backend="auto"` must silently fall back to CPU with zero GL deps
     installed -- the "never breaks the zero-dependency default" guarantee."""
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
     scene = Scene(mol, 80, 80, backend="auto")
     assert scene.backend in ("cpu", "gl")
 
 
 def test_backend_cpu_explicit():
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
     scene = Scene(mol, 80, 80, backend="cpu")
     assert scene.backend == "cpu"
     img = scene.render()
@@ -150,7 +150,7 @@ def test_backend_cpu_explicit():
 
 
 def test_backend_invalid_name_raises():
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
     with pytest.raises(ValueError):
         Scene(mol, 80, 80, backend="not-a-backend")
 
@@ -160,8 +160,8 @@ def test_backend_gl_explicit_raises_if_unavailable(monkeypatch):
     CPU -- force the GL import to fail regardless of whether moderngl is
     actually installed in this environment, and assert it raises."""
     monkeypatch.setitem(sys.modules, "moderngl", None)
-    monkeypatch.setitem(sys.modules, "mviewer.gl_render", None)
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    monkeypatch.setitem(sys.modules, "vimol.gl_render", None)
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
     with pytest.raises(Exception):
         Scene(mol, 80, 80, backend="gl")
 
@@ -176,7 +176,7 @@ def test_resize_preserves_framing_and_rotation():
     changed the on-screen fraction on resize and froze the startup framing at
     an early, slightly-wrong terminal size -- see
     test_resize_self_heals_two_step_geometry.)"""
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 400, 300)
     scene.camera.orbit(30, 20)
@@ -205,7 +205,7 @@ def test_supersample_change_preserves_manual_zoom_and_pan():
     time the interactive quality switch fired (fast while scrolling/dragging,
     crisp ~0.25s after stopping). Zoom/pan must instead rescale by the exact
     supersample ratio, preserving whatever the user had zoomed/panned to."""
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 400, 300)
     scene.set_supersample(2)
@@ -228,9 +228,9 @@ def test_supersample_change_preserves_manual_zoom_and_pan():
 
 def test_z_key_resets_view_like_r():
     """'z' is an alias for 'r': full reset of rotation, pan, and zoom."""
-    from mviewer.widget import MoleculeWidget
+    from vimol.widget import MoleculeWidget
 
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     w = MoleculeWidget(mol, 200, 200)
     fitted_zoom = w.scene.camera.zoom
@@ -252,7 +252,7 @@ def test_set_size_refit_vs_preserve():
     fit for the placeholder. Later resizes (refit=False, the default) preserve
     the user's manual zoom by keeping its *apparent framing*: zoom scales by
     the min-dimension ratio so the molecule stays the same on-screen fraction."""
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 320, 240)  # placeholder-sized, as Viewer.__init__ does
     placeholder_zoom = scene.camera.zoom
@@ -277,7 +277,7 @@ def test_resize_self_heals_two_step_geometry():
     at the first size's zoom. Proportional rescaling makes a fit-derived zoom
     land exactly where a fresh fit for the settled size would, so it self-heals
     without any keypress."""
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 320, 240)
     scene.set_size(900, 700, refit=True)     # early, slightly-wrong size
@@ -287,7 +287,7 @@ def test_resize_self_heals_two_step_geometry():
 
 
 def test_camera_orbit_changes_view():
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
     scene = Scene(mol, 60, 60)
     before = scene.render().copy()
     scene.camera.orbit(90, 45)
@@ -296,13 +296,13 @@ def test_camera_orbit_changes_view():
 
 
 def test_add_vector_field_validates_length():
-    mol = mviewer.load(os.path.join(EX, "water.xyz"))
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
     with pytest.raises(ValueError):
         mol.add_vector_field(np.zeros((mol.n_atoms - 1, 3)))
 
 
 def test_vector_extent_accounts_for_arrow_tips():
-    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol = vimol.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     assert mol.vector_extent() == 0.0
     mol.add_vector_field(np.array([[5.0, 0.0, 0.0]]), radius=0.05, head_scale=2.5)
     # tip at 5.0 + a head-radius pad (0.05 * 2.5) so a fat arrowhead at the
@@ -314,7 +314,7 @@ def test_vector_extent_survives_stale_field_after_add_atom():
     """A vector field attached before more atoms are added goes stale
     (its (N,3) no longer matches n_atoms). vector_extent() and the render
     path must skip it, not raise a broadcast error mid-render."""
-    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol = vimol.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     mol.add_vector_field(np.array([[2.0, 0.0, 0.0]]))
     mol.add_atom("O", 1.2, 0.0, 0.0)   # now 2 atoms, field still has 1 row
     assert mol.vector_extent() == 0.0   # stale field skipped, no other fields
@@ -324,7 +324,7 @@ def test_vector_extent_survives_stale_field_after_add_atom():
 
 
 def test_view_directions_rotates_but_does_not_translate():
-    from mviewer.camera import Camera
+    from vimol.camera import Camera
 
     cam = Camera(center=np.array([3.0, -2.0, 1.0]))
     cam.orbit(40, 20)
@@ -337,7 +337,7 @@ def test_view_directions_rotates_but_does_not_translate():
 
 
 def test_fit_zooms_out_to_fit_long_vector():
-    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol = vimol.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     small_zoom = Scene(mol, 200, 200).camera.zoom
     mol.add_vector_field(np.array([[10.0, 0.0, 0.0]]))
     big_vector_zoom = Scene(mol, 200, 200).camera.zoom
@@ -347,7 +347,7 @@ def test_fit_zooms_out_to_fit_long_vector():
 def test_render_draws_arrow_in_its_assigned_color():
     """Color is the semantic key -- the arrow must render in the vector
     field's own color, not the parent atom's element color."""
-    mol = mviewer.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol = vimol.Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     mol.add_vector_field(np.array([[2.0, 0.0, 0.0]]), color=(1.0, 0.0, 1.0),
                          radius=0.08, head_scale=3.0)
     scene = Scene(mol, 200, 200, backend="cpu", supersample=1)
@@ -370,7 +370,7 @@ def test_render_draws_arrow_in_its_assigned_color():
 
 
 def test_input_decoder_keys_and_arrows():
-    from mviewer.input import InputDecoder, KeyEvent, MouseEvent
+    from vimol.input import InputDecoder, KeyEvent, MouseEvent
 
     dec = InputDecoder(pixel=False)
     evs = dec.feed(b"a\x1b[C")  # 'a' then right-arrow
@@ -383,7 +383,7 @@ def test_input_decoder_keys_and_arrows():
 
 def test_input_decoder_split_sequence():
     """An escape sequence split across two feeds must still decode once."""
-    from mviewer.input import InputDecoder, MouseEvent
+    from vimol.input import InputDecoder, MouseEvent
 
     dec = InputDecoder(pixel=True)
     assert dec.feed(b"\x1b[<0;100;2") == []  # incomplete: buffered
@@ -395,7 +395,7 @@ def test_input_decoder_split_sequence():
 
 
 def test_input_decoder_mouse_actions():
-    from mviewer.input import InputDecoder, MouseEvent
+    from vimol.input import InputDecoder, MouseEvent
 
     dec = InputDecoder(pixel=False)
     (down,) = dec.feed(b"\x1b[<0;5;5M")
@@ -411,10 +411,10 @@ def test_input_decoder_mouse_actions():
 
 
 def test_widget_mouse_rotate_pan_zoom():
-    from mviewer.widget import MoleculeWidget
-    from mviewer.input import MouseEvent
+    from vimol.widget import MoleculeWidget
+    from vimol.input import MouseEvent
 
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
     ensure_bonds(mol)
     w = MoleculeWidget(mol, 200, 200, supersample=1)
 
@@ -435,9 +435,9 @@ def test_widget_mouse_rotate_pan_zoom():
 
 def test_widget_pick_center_atom():
     """Hovering the projected center of an atom should pick that atom."""
-    from mviewer.widget import MoleculeWidget
+    from vimol.widget import MoleculeWidget
 
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
     ensure_bonds(mol)
     w = MoleculeWidget(mol, 200, 200, supersample=1)
     cam = w.scene.camera
@@ -453,9 +453,9 @@ def test_widget_pick_center_atom():
 
 
 def test_widget_hover_highlight_changes_render():
-    from mviewer.widget import MoleculeWidget
+    from vimol.widget import MoleculeWidget
 
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     w = MoleculeWidget(mol, 120, 120)
     plain = w.render().copy()
@@ -467,10 +467,10 @@ def test_handle_event_reports_change():
     """handle_event must return whether the view changed -- the interactive
     loop gates redraws on this, so a wrong return means either no redraw on
     input or a redraw every idle frame (terminal flood)."""
-    from mviewer.widget import MoleculeWidget
-    from mviewer.input import KeyEvent
+    from vimol.widget import MoleculeWidget
+    from vimol.input import KeyEvent
 
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     w = MoleculeWidget(mol, 120, 120)
     assert w.handle_event(KeyEvent("left")) is True     # rotate
@@ -482,11 +482,11 @@ def test_viewer_only_redraws_on_change(tmp_path):
     """An idle viewer must not redraw every loop iteration (that floods the
     terminal with full-frame images); input and the post-settle quality bump
     must still trigger exactly one redraw each."""
-    from mviewer.viewer import Viewer
-    from mviewer.input import KeyEvent
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
     import time
 
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
     try:
@@ -524,7 +524,7 @@ def test_viewer_only_redraws_on_change(tmp_path):
 
 
 def test_mouse_enable_sequences():
-    from mviewer.input import enable_mouse
+    from vimol.input import enable_mouse
     seq = enable_mouse(pixel=True, hover=True)
     assert b"1003" in seq and b"1006" in seq and b"1016" in seq
     seq2 = enable_mouse(pixel=False, hover=False)
@@ -533,9 +533,9 @@ def test_mouse_enable_sequences():
 
 def test_viewer_draw_writes_bytes(tmp_path):
     """_draw should emit Kitty bytes to the output fd."""
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
 
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     out = tmp_path / "out.bin"
     fd = os.open(str(out), os.O_WRONLY | os.O_CREAT, 0o644)
     try:

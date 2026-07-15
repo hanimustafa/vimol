@@ -123,7 +123,7 @@ def unique_id_base(stride: int = 4) -> int:
     across all its panes/tabs), not per-window — see the graphics protocol
     spec's note that "IDs are in a global namespace [so] there can easily be
     collisions." Hardcoding small ids like 1/2 means two independent
-    mviewer instances sharing a kitty process (e.g. two panes) can delete or
+    vimol instances sharing a kitty process (e.g. two panes) can delete or
     overwrite each other's frames. Deriving the base from the pid keeps
     concurrent instances apart; the stride ensures that even OS-assigned
     sequential pids (common right after spawning several processes) don't
@@ -135,7 +135,7 @@ def unique_id_base(stride: int = 4) -> int:
 
 def supports_kitty() -> bool:
     """Best-effort detection of Kitty graphics support via environment."""
-    if os.environ.get("MVIEWER_FORCE_KITTY"):
+    if os.environ.get("VIMOL_FORCE_KITTY"):
         return True
     if os.environ.get("KITTY_WINDOW_ID"):
         return True

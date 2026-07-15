@@ -1,7 +1,7 @@
 """Full-screen interactive viewer — a thin driver around MoleculeWidget.
 
-All the interaction logic lives in :class:`mviewer.widget.MoleculeWidget` and
-input decoding in :class:`mviewer.input.InputDecoder`. This class only does the
+All the interaction logic lives in :class:`vimol.widget.MoleculeWidget` and
+input decoding in :class:`vimol.input.InputDecoder`. This class only does the
 terminal-owning parts: raw mode, the alternate screen, enabling mouse
 reporting, the render/input loop, and a status bar. Embedders who want to
 capture the mouse in their own region should use the widget + decoder directly
@@ -52,7 +52,7 @@ _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 _LEFT_WIDTH = 24
 
 _HELP_HEAD = [
-    "  mviewer — terminal molecular viewer",
+    "  vimol — terminal molecular viewer",
     "",
     "  Mouse drag ......... rotate            Wheel / + - ........ zoom",
     "  Right / mid drag ... pan               [ / ] .............. roll",
@@ -911,7 +911,7 @@ class Viewer:
     # -- main loop --------------------------------------------------------
     def run(self):
         if not os.isatty(self.fd_out):
-            raise RuntimeError("mviewer.Viewer requires a terminal on stdout")
+            raise RuntimeError("vimol.Viewer requires a terminal on stdout")
         self._enter()
         self._running = True
         try:

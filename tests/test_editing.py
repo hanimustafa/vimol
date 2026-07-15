@@ -8,14 +8,14 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import mviewer
-from mviewer import elements, templates, editor, periodic_table as pt
-from mviewer.molecule import Molecule
-from mviewer.bonds import ensure_bonds
-from mviewer.parsers import xyz as xyz_parser
-from mviewer.parsers import save, loads
-from mviewer.widget import MoleculeWidget
-from mviewer.input import MouseEvent, KeyEvent
+import vimol
+from vimol import elements, templates, editor, periodic_table as pt
+from vimol.molecule import Molecule
+from vimol.bonds import ensure_bonds
+from vimol.parsers import xyz as xyz_parser
+from vimol.parsers import save, loads
+from vimol.widget import MoleculeWidget
+from vimol.input import MouseEvent, KeyEvent
 
 EX = os.path.join(os.path.dirname(__file__), "..", "examples")
 
@@ -138,7 +138,7 @@ def test_save_dispatch_and_bad_format(tmp_path):
     p = tmp_path / "out.xyz"
     save(mol, str(p))
     assert p.exists()
-    assert mviewer.load(str(p)).formula() == "CH4"
+    assert vimol.load(str(p)).formula() == "CH4"
     with pytest.raises(ValueError):
         save(mol, str(tmp_path / "out.pdb"))    # writing PDB is unsupported
 
@@ -215,7 +215,7 @@ def test_widget_unproject_matches_pick_center():
 
 # -- viewer save prompt ----------------------------------------------------
 def _new_viewer(tmp_path, source=None):
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     mol = Molecule()
     editor.birth_molecule(mol, [0.0, 0.0, 0.0])
     return Viewer(mol, backend="cpu", source_path=source, editable=True)
@@ -254,7 +254,7 @@ def test_save_prompt_existing_file_asks_to_replace(tmp_path):
     v._handle_prompt_key("enter")
     v._handle_prompt_key("y")             # confirm replace
     assert v._mode == "normal"
-    assert mviewer.load(str(target)).formula() == "CH4"
+    assert vimol.load(str(target)).formula() == "CH4"
 
 
 def test_save_prompt_default_path_uses_source(tmp_path):
@@ -273,7 +273,7 @@ def test_save_prompt_escape_cancels(tmp_path):
 
 
 def test_viewer_dispatch_routes_edit_keys(tmp_path):
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(200, 200)
@@ -294,8 +294,8 @@ def test_viewer_dispatch_routes_edit_keys(tmp_path):
 
 
 def test_viewer_readonly_keeps_classic_bindings():
-    from mviewer.viewer import Viewer
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    from vimol.viewer import Viewer
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     v = Viewer(mol, backend="cpu")               # editable defaults False
     # 'a' is autospin (classic), NOT append
     v._dispatch([KeyEvent("a")])
@@ -310,7 +310,7 @@ def test_viewer_readonly_keeps_classic_bindings():
 
 
 def test_viewer_edit_buttons_render_element_and_geometry():
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_append_mode(True)
@@ -378,7 +378,7 @@ def test_element_name():
 
 # -- periodic-table picker (Viewer) -----------------------------------------
 def _viewer_in_append_mode(cols=100, rows=30):
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     mol = Molecule()
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(240, 200)
@@ -395,7 +395,7 @@ def test_status_bar_element_button_span_only_in_append_mode():
     assert row == v._rows - 1
     assert c1 - c0 == len(f" {v.widget.build_element} ")
 
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     v2 = Viewer(Molecule(), backend="cpu", editable=True)
     v2.widget.set_pixel_size(240, 200)
     v2._cols, v2._rows = 100, 30
@@ -503,7 +503,7 @@ def test_picker_anchors_above_the_button_not_screen_center():
 
 
 def test_status_bar_button_column_stable_across_hover_and_name_changes():
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     mol = Molecule(symbols=["C", "O"], positions=np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]))
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(240, 200)
@@ -602,7 +602,7 @@ def test_pill_toggle_full_cycle_and_row_tolerance():
 
 
 def test_cell_size_px_rounds_to_whole_pixels(monkeypatch):
-    import mviewer.kitty as kitty
+    import vimol.kitty as kitty
     # a window size that would otherwise produce a fractional cell height
     monkeypatch.setattr(kitty, "terminal_size_px", lambda fd=1: (80, 24, 726, 434))
     cw, ch = kitty.cell_size_px()
@@ -612,7 +612,7 @@ def test_cell_size_px_rounds_to_whole_pixels(monkeypatch):
 
 
 def test_query_cell_size_px_parses_csi_16t_reply(monkeypatch):
-    import mviewer.kitty as kitty
+    import vimol.kitty as kitty
     import os as _os
     import select as _select
     reply = {"data": b"\x1b[6;38;19t"}
@@ -629,7 +629,7 @@ def test_query_cell_size_px_parses_csi_16t_reply(monkeypatch):
 
 
 def test_query_cell_size_px_returns_none_without_reply(monkeypatch):
-    import mviewer.kitty as kitty
+    import vimol.kitty as kitty
     import os as _os
     import select as _select
     monkeypatch.setattr(_os, "write", lambda fd, data: len(data))
@@ -639,7 +639,7 @@ def test_query_cell_size_px_returns_none_without_reply(monkeypatch):
 
 # -- taller status-bar dead zone (guard pushed higher) ----------------------
 def test_status_zone_guard_blocks_several_rows_above_status():
-    from mviewer.viewer import _STATUS_ZONE_ROWS
+    from vimol.viewer import _STATUS_ZONE_ROWS
     v = _viewer_in_append_mode()
     row, c0, c1 = v._elem_button_span
     for dr in range(_STATUS_ZONE_ROWS):
@@ -650,7 +650,7 @@ def test_status_zone_guard_blocks_several_rows_above_status():
 
 
 def test_click_just_above_the_zone_still_builds():
-    from mviewer.viewer import _STATUS_ZONE_ROWS
+    from vimol.viewer import _STATUS_ZONE_ROWS
     v = _viewer_in_append_mode()
     click_row = v._rows - 1 - _STATUS_ZONE_ROWS   # first row outside the guard
     v._dispatch([MouseEvent("down", 20, click_row, button=0, pixel=False)])
@@ -660,7 +660,7 @@ def test_click_just_above_the_zone_still_builds():
 
 # -- closing the picker lifts only its rows (no full-screen repaint) --------
 def test_update_geometry_prefers_queried_cell_size():
-    from mviewer.viewer import Viewer
+    from vimol.viewer import Viewer
     v = Viewer(Molecule(), backend="cpu", editable=True)
     v._cell_px = (11.0, 23.0)          # as if the terminal answered CSI 16 t
     v._update_geometry()
@@ -668,7 +668,7 @@ def test_update_geometry_prefers_queried_cell_size():
 
 
 def test_closing_picker_erases_only_panel_rows(monkeypatch):
-    import mviewer.kitty as kitty
+    import vimol.kitty as kitty
     v = _viewer_in_append_mode()
     row, c0, c1 = v._elem_button_span
     v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])

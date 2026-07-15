@@ -3,11 +3,11 @@
 
 The point of this file: when you embed the viewer, *your* app owns the terminal
 and the input loop. You decode input yourself and forward only the events you
-want into the molecule region — everything else stays yours. mviewer exposes
+want into the molecule region — everything else stays yours. vimol exposes
 exactly the two pieces you need for that:
 
-    mviewer.MoleculeWidget   # the interaction core (no terminal, no input loop)
-    mviewer.InputDecoder     # bytes -> MouseEvent / KeyEvent
+    vimol.MoleculeWidget   # the interaction core (no terminal, no input loop)
+    vimol.InputDecoder     # bytes -> MouseEvent / KeyEvent
 
 Here the top two rows are the host app's own chrome; the molecule lives below
 them in a sub-region. Mouse events are routed to the widget ONLY when the
@@ -27,36 +27,36 @@ import tty
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import mviewer  # noqa: E402
-from mviewer import kitty, input as minput  # noqa: E402
+import vimol  # noqa: E402
+from vimol import kitty, input as minput  # noqa: E402
 
 EX = os.path.dirname(os.path.abspath(__file__))
 HEADER_ROWS = 2  # the host app's own top chrome
 
 
 def static_frame():
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
-    mviewer.ensure_bonds(mol)
-    scene = mviewer.Scene(mol, 480, 360, supersample=2)
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
+    vimol.ensure_bonds(mol)
+    scene = vimol.Scene(mol, 480, 360, supersample=2)
     scene.camera.orbit(30, -20)
     print("\x1b[1m┌─ my terminal app ─────────────────────────────┐\x1b[0m")
     print(f"  {mol.name}  ({mol.formula()}, {mol.n_atoms} atoms)\n")
     sys.stdout.flush()
     os.write(1, scene.to_kitty(move_cursor=True))
-    print("\n\x1b[2m(rendered with mviewer)\x1b[0m")
+    print("\n\x1b[2m(rendered with vimol)\x1b[0m")
 
 
 def interactive_host():
     fd = 0
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
-    mviewer.ensure_bonds(mol)
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
+    vimol.ensure_bonds(mol)
 
     cols, rows, xpx, ypx = kitty.terminal_size_px(1)
     cw, ch = kitty.cell_size_px(1)
     region_rows = max(rows - HEADER_ROWS - 1, 1)
     region_y0_px = HEADER_ROWS * ch                 # widget origin (pixels)
 
-    widget = mviewer.MoleculeWidget(mol, int(cols * cw), int(region_rows * ch),
+    widget = vimol.MoleculeWidget(mol, int(cols * cw), int(region_rows * ch),
                                     supersample=1)
     widget.set_cell_metrics(cw, ch)
     widget.scene.camera.orbit(25, -18)

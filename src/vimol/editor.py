@@ -1,9 +1,9 @@
 """In-place structure editing: grow fragments and birth new molecules.
 
-These operations mutate a :class:`~mviewer.molecule.Molecule` and re-perceive
+These operations mutate a :class:`~vimol.molecule.Molecule` and re-perceive
 its bonds. Geometry (which directions to place neighbors in) comes from
-:mod:`mviewer.templates`; bond *lengths* are the sum of covalent radii, matching
-how :mod:`mviewer.bonds` perceives connectivity.
+:mod:`vimol.templates`; bond *lengths* are the sum of covalent radii, matching
+how :mod:`vimol.bonds` perceives connectivity.
 
 The three public operations mirror the interactive gestures:
 

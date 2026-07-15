@@ -1,8 +1,8 @@
-"""Bridges mviewer's molecule-aware types to the generic GL renderer.
+"""Bridges vimol's molecule-aware types to the generic GL renderer.
 
 This is the only module that knows about both ``Molecule``/``Camera``/
-``Style`` (mviewer) and ``SphereBatch``/``CylinderBatch``/``ConeBatch``/
-``ShadingParams`` (``gl_render.py``, which otherwise has zero mviewer imports).
+``Style`` (vimol) and ``SphereBatch``/``CylinderBatch``/``ConeBatch``/
+``ShadingParams`` (``gl_render.py``, which otherwise has zero vimol imports).
 """
 from __future__ import annotations
 

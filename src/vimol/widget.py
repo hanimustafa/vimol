@@ -1,12 +1,12 @@
 """MoleculeWidget — the embeddable interaction core.
 
-This is the reusable piece: it owns a :class:`~mviewer.scene.Scene` and turns
+This is the reusable piece: it owns a :class:`~vimol.scene.Scene` and turns
 input events into camera motion. It does *not* touch the terminal, own an input
 loop, or read stdin — so you can drop it into any terminal UI, intercept mouse
 events in your own region, and forward them here:
 
-    from mviewer.widget import MoleculeWidget
-    from mviewer.input import InputDecoder
+    from vimol.widget import MoleculeWidget
+    from vimol.input import InputDecoder
 
     w = MoleculeWidget(mol, width_px, height_px)
     dec = InputDecoder(pixel=True)
@@ -14,7 +14,7 @@ events in your own region, and forward them here:
         w.handle_event(ev, origin=(region_x_px, region_y_px))
     os.write(1, w.to_kitty(cols=region_cols, rows=region_rows))
 
-The full-screen :class:`mviewer.viewer.Viewer` is just a thin driver around
+The full-screen :class:`vimol.viewer.Viewer` is just a thin driver around
 this class.
 """
 from __future__ import annotations

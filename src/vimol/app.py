@@ -1,10 +1,10 @@
-"""Command-line driver for mviewer.
+"""Command-line driver for vimol.
 
-    mviewer file.pdb                 # interactive viewer
-    mviewer file.xyz --spin          # autospinning
-    mviewer file.mol --render out.png --size 800x800
-    mviewer file.pdb --kitty         # emit one frame to stdout (for pipes/embeds)
-    mviewer file.xyz --info          # print structure info and exit
+    vimol file.pdb                 # interactive viewer
+    vimol file.xyz --spin          # autospinning
+    vimol file.mol --render out.png --size 800x800
+    vimol file.pdb --kitty         # emit one frame to stdout (for pipes/embeds)
+    vimol file.xyz --info          # print structure info and exit
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def _parse_color(s: str):
 
 def make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="mviewer",
+        prog="vimol",
         description="A terminal molecular viewer using the Kitty graphics protocol.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Supported formats: " + ", ".join(SUPPORTED_EXTENSIONS),
@@ -69,7 +69,7 @@ def make_parser() -> argparse.ArgumentParser:
                    choices=["ball_and_stick", "spacefill", "licorice", "wireframe"])
     p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
                    help="rendering backend: numpy CPU raycaster, GPU (OpenGL, needs "
-                        "mviewer[gl]), or auto (GPU if available, else CPU)")
+                        "vimol[gl]), or auto (GPU if available, else CPU)")
     p.add_argument("--size", default="0x0", help="pixel size WxH for --render/--kitty (0=auto)")
     p.add_argument("--supersample", type=int, default=2, help="anti-aliasing factor for stills")
     p.add_argument("--rotate", nargs=2, type=float, metavar=("YAW", "PITCH"),
@@ -111,7 +111,7 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.version:
         from . import __version__
-        print(f"mviewer {__version__}")
+        print(f"vimol {__version__}")
         return 0
     if args.list_formats:
         print("Supported formats: " + ", ".join(SUPPORTED_EXTENSIONS))
@@ -183,7 +183,7 @@ def main(argv: List[str] | None = None) -> int:
     if not kitty.supports_kitty():
         print("warning: this terminal may not support the Kitty graphics protocol.",
               file=sys.stderr)
-        print("         Set MVIEWER_FORCE_KITTY=1 to try anyway, or use --render out.png.",
+        print("         Set VIMOL_FORCE_KITTY=1 to try anyway, or use --render out.png.",
               file=sys.stderr)
         return 5
 

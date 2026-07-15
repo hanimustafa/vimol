@@ -16,12 +16,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 moderngl = pytest.importorskip("moderngl")
 
-import mviewer
-from mviewer.bonds import ensure_bonds
-from mviewer.render import Style
-from mviewer.scene import Scene
-from mviewer.gl_render import GLRenderer, SphereBatch, CylinderBatch, ConeBatch, ShadingParams
-from mviewer.gl_adapter import _build_projection
+import vimol
+from vimol.bonds import ensure_bonds
+from vimol.render import Style
+from vimol.scene import Scene
+from vimol.gl_render import GLRenderer, SphereBatch, CylinderBatch, ConeBatch, ShadingParams
+from vimol.gl_adapter import _build_projection
 
 EX = os.path.join(os.path.dirname(__file__), "..", "examples")
 
@@ -42,7 +42,7 @@ def _proj(zoom=20.0, pan=(0.0, 0.0), w=200, h=200, extent=5.0):
 # -- renderer-only: no Molecule/Camera/Style involved at all -----------------
 
 def test_gl_renderer_is_generic_sphere_only(gl_available):
-    """Proves the renderer works from hand-built primitives, no mviewer
+    """Proves the renderer works from hand-built primitives, no vimol
     molecule types involved -- the actual test of "generic"."""
     r = GLRenderer(64, 64)
     spheres = SphereBatch(
@@ -168,10 +168,10 @@ def test_gl_renderer_transparent_cutout(gl_available):
     assert img[32, 32, 3] == 255
 
 
-# -- through the mviewer Scene/adapter pipeline, vs the CPU renderer ---------
+# -- through the vimol Scene/adapter pipeline, vs the CPU renderer ---------
 
 def test_gl_scene_shape_dtype_parity(gl_available):
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 120, 120, style=Style(), backend="gl")
     assert scene.backend == "gl"
@@ -181,7 +181,7 @@ def test_gl_scene_shape_dtype_parity(gl_available):
 
 
 def test_gl_scene_transparent_rgba_cutout(gl_available):
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     ensure_bonds(mol)
     scene = Scene(mol, 120, 120, style=Style(transparent=True), backend="gl")
     img = scene.render()
@@ -196,7 +196,7 @@ def test_gl_vs_cpu_similar_coverage(gl_available):
     threshold-based CPU tests. This is deliberately coarse -- the sharper
     orientation/depth/lighting checks above are what actually pin
     correctness; this one just confirms the two backends broadly agree."""
-    mol = mviewer.load(os.path.join(EX, "benzene.xyz"))
+    mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     ensure_bonds(mol)
     cpu = Scene(mol, 160, 160, backend="cpu")
     gl = Scene(mol, 160, 160, backend="gl")
@@ -216,7 +216,7 @@ def test_gl_vs_cpu_vector_field_parity(gl_available):
     arrow (shaft + cone head) primitive: both backends should broadly agree
     on drawn footprint, and both must actually draw the arrow in its
     assigned (magenta) color, not just background/element colors."""
-    mol = mviewer.load(os.path.join(EX, "methane.xyz"))
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
     ensure_bonds(mol)
     vectors = np.zeros((mol.n_atoms, 3))
     vectors[0] = [2.5, 0.0, 0.0]
@@ -242,9 +242,9 @@ def test_gl_vs_cpu_vector_field_parity(gl_available):
 def test_gl_scene_picking_unaffected_by_backend(gl_available):
     """Picking is pure analytic CPU math independent of the renderer -- it
     must behave identically regardless of backend."""
-    from mviewer.widget import MoleculeWidget
+    from vimol.widget import MoleculeWidget
 
-    mol = mviewer.load(os.path.join(EX, "c60.xyz"))
+    mol = vimol.load(os.path.join(EX, "c60.xyz"))
     ensure_bonds(mol)
     w = MoleculeWidget(mol, 200, 200, supersample=1, backend="gl")
     assert w.scene.backend == "gl"

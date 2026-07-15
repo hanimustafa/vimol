@@ -1,17 +1,17 @@
 """Generic GPU sphere/cylinder impostor renderer (OpenGL, via moderngl).
 
-This module knows nothing about molecules, atoms, bonds, or mviewer's
+This module knows nothing about molecules, atoms, bonds, or vimol's
 ``Camera``/``Style`` types. It renders batches of analytic spheres and
 cylinders — the same "impostor" technique as the CPU raycaster in
 ``render.py`` (each primitive is a screen-aligned billboard whose fragment
 shader solves the ray/surface intersection analytically), just executed on
 the GPU with a real depth buffer instead of a manually-maintained z-buffer
 array. Callers supply a raw 4x4 projection matrix and plain shading
-parameters; nothing here is mviewer-specific, so it's reusable outside this
-project. See ``gl_adapter.py`` for the mviewer-specific glue that turns a
+parameters; nothing here is vimol-specific, so it's reusable outside this
+project. See ``gl_adapter.py`` for the vimol-specific glue that turns a
 ``Molecule`` + ``Camera`` + ``Style`` into the inputs this module expects.
 
-Requires the optional ``moderngl`` dependency (``pip install mviewer[gl]``).
+Requires the optional ``moderngl`` dependency (``pip install vimol[gl]``).
 """
 from __future__ import annotations
 
@@ -547,7 +547,7 @@ class GLRenderer:
         the primitives' coordinate space to clip-space NDC. Its ``[2,2]``/
         ``[2,3]`` entries double as the scale/bias used to reproject each
         fragment's own analytic depth (see ``gl_adapter._build_projection``
-        for how mviewer builds one from its orthographic ``Camera``).
+        for how vimol builds one from its orthographic ``Camera``).
 
         *downsample* (>=1) supersamples: the scene is drawn at the full
         ``(width, height)`` and box-averaged down by this factor **on the GPU**

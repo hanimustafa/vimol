@@ -4,7 +4,7 @@ The decoder is stateful so it tolerates escape sequences that get split across
 reads. It is deliberately independent of the viewer: an embedding application
 can create an :class:`InputDecoder`, feed it whatever bytes it intercepts, and
 forward the resulting :class:`MouseEvent` / :class:`KeyEvent` objects to a
-:class:`mviewer.widget.MoleculeWidget` — so you can capture the mouse inside
+:class:`vimol.widget.MoleculeWidget` — so you can capture the mouse inside
 your own UI region and drive the molecule with it.
 
 Mouse coordinates come back in *pixels* when the terminal supports SGR-Pixels
