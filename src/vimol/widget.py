@@ -23,13 +23,19 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .molecule import Molecule
+from .molecule import Molecule, VectorField
 from .render import Style, _atom_radii
 from .scene import Scene
 from .input import MouseEvent, KeyEvent, Event
 from . import editor
 
 REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
+
+# Rubber-band preview for the option/alt-drag manual-bond gesture: a thin,
+# distinctive-colored arrow that grows from the anchor atom toward the cursor
+# (matches the yellow hover highlight, see `_apply_highlight`).
+_BOND_PREVIEW_COLOR = (1.0, 0.85, 0.3)
+_BOND_PREVIEW_RADIUS = 0.06
 
 
 class MoleculeWidget:
@@ -54,6 +60,10 @@ class MoleculeWidget:
         self._undo_stack: list = []             # snapshots for 'u'
         self._undo_limit = 200
         self._saved_sig = self._signature()     # model state considered "on disk"
+        # option/alt-drag manual-bond gesture: the anchor atom (None when idle)
+        # and the widget's own rubber-band preview VectorField, if installed.
+        self._bond_anchor: Optional[int] = None
+        self._bond_field: Optional[VectorField] = None
         # cell metrics used only to convert cell-based events to pixels
         self.cell_w = 9.0
         self.cell_h = 18.0
@@ -140,6 +150,16 @@ class MoleculeWidget:
             self.zoom(self.zoom_step if ev.scroll == "up" else 1 / self.zoom_step)
             return True
         if ev.action == "down":
+            if ev.button == 0 and ev.alt and self.editable:
+                idx = self.pick(x, y) if self.molecule.n_atoms else None
+                if idx is not None:
+                    # Start a bond gesture -- and deliberately do NOT set
+                    # _drag_button, so the drag branch below won't rotate the
+                    # camera while the gesture is live.
+                    self._bond_anchor = idx
+                    self._start_bond_preview(idx)
+                    return False
+                # alt+down over empty space: fall through to a normal press.
             self._drag_button = ev.button
             self._drag_shift = ev.shift
             self._last = (x, y)
@@ -148,6 +168,8 @@ class MoleculeWidget:
                 self.selected = self.pick(x, y)
             return False
         if ev.action == "up":
+            if self._bond_anchor is not None:
+                return self._end_bond_gesture(x, y)
             was_left = self._drag_button == 0
             self._drag_button = None
             # A left click (no meaningful drag) in append mode edits the model.
@@ -162,17 +184,25 @@ class MoleculeWidget:
                 if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
                     return self._delete_at(x, y)
             return False
-        if ev.action == "drag" and self._drag_button is not None:
-            dx = x - self._last[0]
-            dy = y - self._last[1]
-            self._last = (x, y)
-            # left = rotate, right or shift+left = pan, middle = pan
-            if self._drag_button == 2 or self._drag_button == 1 or self._drag_shift:
-                self.pan(dx, dy)
-            else:
-                self.orbit(dx, dy)
-            return True
+        if ev.action == "drag":
+            if self._bond_anchor is not None:
+                self._update_bond_preview(x, y)
+                return True
+            if self._drag_button is not None:
+                dx = x - self._last[0]
+                dy = y - self._last[1]
+                self._last = (x, y)
+                # left = rotate, right or shift+left = pan, middle = pan
+                if self._drag_button == 2 or self._drag_button == 1 or self._drag_shift:
+                    self.pan(dx, dy)
+                else:
+                    self.orbit(dx, dy)
+                return True
+            return False
         if ev.action == "move":
+            if self._bond_anchor is not None:
+                self._update_bond_preview(x, y)
+                return True
             if self.picking:
                 prev = self.hovered
                 self.hovered = self.pick(x, y)
@@ -231,7 +261,7 @@ class MoleculeWidget:
     def _signature(self):
         """A cheap hashable snapshot of model identity (for the dirty flag)."""
         mol = self.scene.molecule
-        return (tuple(mol.symbols), mol.positions.tobytes())
+        return (tuple(mol.symbols), mol.positions.tobytes(), tuple(mol.manual_bonds))
 
     def _refresh_dirty(self) -> None:
         self.dirty = self._signature() != self._saved_sig
@@ -241,22 +271,29 @@ class MoleculeWidget:
         self._saved_sig = self._signature()
         self.dirty = False
 
-    def _push_undo(self) -> None:
+    def _snapshot(self):
         mol = self.scene.molecule
-        self._undo_stack.append((list(mol.symbols), mol.positions.copy(), list(mol.bonds)))
+        return (list(mol.symbols), mol.positions.copy(), list(mol.bonds), list(mol.manual_bonds))
+
+    def _commit_undo(self, snapshot) -> None:
+        self._undo_stack.append(snapshot)
         if len(self._undo_stack) > self._undo_limit:
             self._undo_stack.pop(0)
+
+    def _push_undo(self) -> None:
+        self._commit_undo(self._snapshot())
 
     def undo(self) -> bool:
         """Revert the most recent edit. Returns True if anything changed."""
         if not self._undo_stack:
             return False
-        symbols, positions, bonds = self._undo_stack.pop()
+        symbols, positions, bonds, manual_bonds = self._undo_stack.pop()
         mol = self.scene.molecule
         # restore in place so the Scene keeps referencing the same object
         mol.symbols = list(symbols)
         mol.positions = positions.copy()
         mol.bonds = list(bonds)
+        mol.manual_bonds = list(manual_bonds)
         self._base_colors = mol.element_colors()
         self.hovered = self.selected = None
         self._refresh_dirty()
@@ -312,6 +349,44 @@ class MoleculeWidget:
         self._base_colors = mol.element_colors()
         self.hovered = self.selected = None
         self._refresh_dirty()
+        return True
+
+    # -- manual-bond gesture (option/alt-drag) -----------------------------
+    def _start_bond_preview(self, anchor: int) -> None:
+        """Install the widget's own rubber-band preview field at gesture start."""
+        mol = self.scene.molecule
+        vectors = np.zeros((mol.n_atoms, 3))
+        self._bond_field = mol.add_vector_field(
+            vectors, color=_BOND_PREVIEW_COLOR, scale=1.0, radius=_BOND_PREVIEW_RADIUS)
+
+    def _update_bond_preview(self, px: float, py: float) -> None:
+        """Rewrite the anchor row to point from the anchor atom to the cursor."""
+        mol = self.scene.molecule
+        anchor = self._bond_anchor
+        target = self.unproject(px, py)
+        self._bond_field.vectors[anchor] = target - mol.positions[anchor]
+
+    def _remove_bond_preview(self) -> None:
+        """Drop exactly the widget's own preview field; never touch user fields."""
+        if self._bond_field is not None:
+            fields = self.scene.molecule.vector_fields
+            if self._bond_field in fields:
+                fields.remove(self._bond_field)
+            self._bond_field = None
+
+    def _end_bond_gesture(self, px: float, py: float) -> bool:
+        """Finish an option/alt-drag: bond the release atom to the anchor, or cancel."""
+        mol = self.scene.molecule
+        anchor = self._bond_anchor
+        self._remove_bond_preview()
+        self._bond_anchor = None
+        target = self.pick(px, py) if mol.n_atoms else None
+        if target is not None and target != anchor:
+            snapshot = self._snapshot()          # taken before mutating
+            if editor.add_manual_bond(mol, anchor, target):
+                self._commit_undo(snapshot)
+                self._refresh_dirty()
+            # else: already a manual bond between this pair -- no-op, no undo entry
         return True
 
     # -- picking ----------------------------------------------------------

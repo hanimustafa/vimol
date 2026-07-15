@@ -347,6 +347,27 @@ def _click(widget, x, y):
     return widget.handle_event(MouseEvent("up", x, y, button=0, pixel=True))
 
 
+def _atom_px(widget, idx):
+    """Screen-pixel location of atom *idx*, using the same math as pick()."""
+    mol = widget.molecule
+    cam = widget.scene.camera
+    ss = widget.scene.supersample
+    Wr, Hr = widget.scene.render_size
+    v = cam.view_positions(mol.positions[idx:idx + 1])[0]
+    ox_s = Wr * 0.5 + cam.pan[0]
+    oy_s = Hr * 0.5 - cam.pan[1]
+    sx = ox_s + v[0] * cam.zoom
+    sy = oy_s - v[1] * cam.zoom
+    return sx / ss, sy / ss
+
+
+def _alt_drag(widget, x0, y0, x1, y1):
+    """Simulate an option/alt-drag gesture: alt+down -> alt+drag -> alt+up."""
+    widget.handle_event(MouseEvent("down", x0, y0, button=0, alt=True, pixel=True))
+    widget.handle_event(MouseEvent("drag", x1, y1, button=0, alt=True, pixel=True))
+    return widget.handle_event(MouseEvent("up", x1, y1, button=0, alt=True, pixel=True))
+
+
 def test_widget_click_empty_space_births_molecule():
     mol = Molecule()                      # empty scene
     w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
@@ -529,6 +550,87 @@ def test_widget_drag_does_not_edit():
     w.handle_event(MouseEvent("up", 140, 100, button=0, pixel=True))
     assert not w.dirty                    # a drag rotates, it must not build
     assert w.molecule.n_atoms == 0
+
+
+# -- widget manual bonds (option/alt-drag) ----------------------------------
+def _far_pair():
+    return Molecule(symbols=["C", "C"],
+                    positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+
+
+def test_widget_alt_drag_creates_manual_bond_undoable():
+    mol = _far_pair()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    bx, by = _atom_px(w, 1)
+    assert not w.dirty
+    changed = _alt_drag(w, ax, ay, bx, by)
+    assert changed
+    assert (0, 1, 1) in w.molecule.bonds
+    assert w.dirty
+    assert w.undo()
+    assert (0, 1, 1) not in w.molecule.bonds
+    assert w.molecule.manual_bonds == []
+    assert not w.dirty
+
+
+def test_widget_alt_drag_release_empty_space_cancels():
+    mol = _far_pair()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    assert w.pick(5, 5) is None                 # precondition: corner is empty
+    changed = _alt_drag(w, ax, ay, 5, 5)
+    assert changed                               # still redraws (preview cleared)
+    assert w.molecule.manual_bonds == []
+    assert not w.dirty
+    assert not w.undo()                          # no undo entry was pushed
+
+
+def test_widget_alt_drag_release_on_anchor_cancels():
+    mol = _far_pair()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    changed = _alt_drag(w, ax, ay, ax, ay)       # release back on the anchor
+    assert changed
+    assert w.molecule.manual_bonds == []
+    assert not w.dirty
+    assert not w.undo()
+
+
+def test_widget_alt_drag_preview_field_appears_and_disappears():
+    mol = _far_pair()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    bx, by = _atom_px(w, 1)
+    assert len(mol.vector_fields) == 0
+    w.handle_event(MouseEvent("down", ax, ay, button=0, alt=True, pixel=True))
+    assert len(mol.vector_fields) == 1           # preview installed on gesture start
+    w.handle_event(MouseEvent("drag", bx, by, button=0, alt=True, pixel=True))
+    assert len(mol.vector_fields) == 1           # still just the one preview field
+    np.testing.assert_allclose(mol.vector_fields[0].vectors[0],
+                               w.unproject(bx, by) - mol.positions[0], atol=1e-6)
+    w.handle_event(MouseEvent("up", bx, by, button=0, alt=True, pixel=True))
+    assert len(mol.vector_fields) == 0           # preview removed after release
+
+
+def test_widget_alt_down_over_empty_space_behaves_as_normal_press():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    assert w.pick(5, 5) is None
+    changed = w.handle_event(MouseEvent("down", 5, 5, button=0, alt=True, pixel=True))
+    assert not changed
+    assert w._bond_anchor is None
+    assert len(mol.vector_fields) == 0
+    assert w._drag_button == 0                   # fell through to a normal press
+
+
+def test_widget_plain_click_in_append_mode_still_builds_without_alt():
+    mol = Molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    changed = _click(w, 100, 100)
+    assert changed and w.dirty
+    assert w.molecule.formula() == "CH4"         # alt-drag wiring did not interfere
 
 
 # -- widget delete mode ----------------------------------------------------
