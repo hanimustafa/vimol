@@ -296,12 +296,11 @@ def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[in
       ``ideal + _PERCEPTION_TOLERANCE`` -- i.e. one that only exists because
       it is manual, not because the atoms are actually close.
     """
-    manual_set = {(i, j) for i, j, _order in mol.manual_bonds}
     clash_pairs: List[Tuple[int, int]] = []
     for i, j, _order in mol.bonds:
         if i not in mol.new_atoms and j not in mol.new_atoms:
             continue
-        if (i, j) in manual_set:
+        if any(mi == i and mj == j for mi, mj, _mo in mol.manual_bonds):
             continue
         ideal = _bond_length(mol.symbols[i], mol.symbols[j])
         length = float(np.linalg.norm(mol.positions[i] - mol.positions[j]))
