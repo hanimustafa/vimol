@@ -27,7 +27,13 @@ and empty-space clicks (the GaussView interaction model).
    neighbors) is less than `template.valence`, add hydrogens one at a
    time using `templates.free_direction` (VSEPR-ish placement away
    from existing neighbors) at the correct bond length, until
-   coordination equals valency.
+   coordination equals valency. `free_direction` degenerates for
+   symmetric arrangements (it can return a direction already occupied
+   by a previous cap); when its result lies within 60° of an existing
+   bond direction, fall back to the direction maximizing the minimum
+   angle to all occupied directions, searched over a unit sphere.
+   A lone (unbonded) atom skips the iteration and caps with the
+   template's full `free_directions()`, like `birth_molecule`.
    If coordination ≥ valency, add nothing — the relabel alone is the
    whole operation. Hypervalency is allowed and is the user's
    responsibility.
