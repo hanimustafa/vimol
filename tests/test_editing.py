@@ -255,6 +255,67 @@ def test_delete_last_atom_leaves_empty_molecule():
     assert mol.positions.shape == (0, 3)
 
 
+# -- editor: manual bonds ----------------------------------------------------
+def test_add_manual_bond_creates_long_bond_that_survives_reperception():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    assert editor.add_manual_bond(mol, 0, 1) is True
+    assert (0, 1, 1) in mol.bonds
+    assert (0, 1, 1) in mol.manual_bonds
+    # any later re-perceive (what every editor op ends with) must not drop it
+    editor._reperceive(mol)
+    assert (0, 1, 1) in mol.bonds
+
+
+def test_add_manual_bond_rejects_self_and_duplicate_pairs():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    assert editor.add_manual_bond(mol, 0, 0) is False
+    assert editor.add_manual_bond(mol, 0, 1) is True
+    assert editor.add_manual_bond(mol, 1, 0) is False   # order-independent duplicate
+    assert len(mol.manual_bonds) == 1
+
+
+def test_add_manual_bond_within_auto_range_does_not_duplicate_in_bonds():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    assert len(mol.bonds) == 1                          # already auto-perceived
+    assert editor.add_manual_bond(mol, 0, 1) is True
+    assert mol.bonds.count((0, 1, 1)) == 1               # not duplicated
+    assert mol.manual_bonds == [(0, 1, 1)]
+
+
+def test_manual_bond_survives_an_unrelated_subsequent_edit():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    editor.add_manual_bond(mol, 0, 1)
+    editor.birth_molecule(mol, [20.0, 0.0, 0.0])   # unrelated edit elsewhere, re-perceives
+    assert (0, 1, 1) in mol.bonds
+
+
+def test_delete_atom_remaps_manual_bond_indices():
+    # atom 0 is isolated (far away, no bonds); deleting it must shift the
+    # manual pair (1, 2) down to (0, 1).
+    mol = Molecule(symbols=["He", "C", "C"],
+                   positions=np.array([[-50.0, 0.0, 0.0], [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    editor.add_manual_bond(mol, 1, 2)
+    assert mol.manual_bonds == [(1, 2, 1)]
+    editor.delete_atom(mol, 0)
+    assert mol.n_atoms == 2
+    assert mol.manual_bonds == [(0, 1, 1)]
+    assert (0, 1, 1) in mol.bonds
+
+
+def test_delete_atom_drops_manual_bond_touching_deleted_atom():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    editor.add_manual_bond(mol, 0, 1)
+    editor.delete_atom(mol, 1)
+    assert mol.n_atoms == 1
+    assert mol.manual_bonds == []
+
+
 # -- xyz writer ------------------------------------------------------------
 def test_xyz_dumps_roundtrip():
     mol = Molecule()

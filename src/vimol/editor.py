@@ -45,8 +45,42 @@ def _neighbors(mol: Molecule, idx: int) -> List[int]:
 
 
 def _reperceive(mol: Molecule) -> None:
-    """Recompute distance-based bonds after a geometry change."""
-    mol.bonds = perceive_bonds(mol)
+    """Recompute distance-based bonds after a geometry change.
+
+    Every edit ends here, which would otherwise silently erase manual bonds
+    (see :func:`add_manual_bond`) -- so the distance-perceived list is unioned
+    with ``mol.manual_bonds``, deduped on the normalized ``(i, j)`` pair, so a
+    manual bond that also happens to be within auto range is never listed
+    twice.
+    """
+    bonds = perceive_bonds(mol)
+    seen = {(i, j) for i, j, _order in bonds}
+    for i, j, order in mol.manual_bonds:
+        if (i, j) not in seen:
+            bonds.append((i, j, order))
+            seen.add((i, j))
+    mol.bonds = bonds
+
+
+def add_manual_bond(mol: Molecule, i: int, j: int, order: int = 1) -> bool:
+    """Record an explicit bond between *i* and *j* that survives re-perception.
+
+    Normalizes to ``i < j``. Returns False (no change) if ``i == j`` or the
+    pair is already in ``mol.manual_bonds``; otherwise appends and
+    re-perceives (which unions it into ``mol.bonds``) and returns True. If
+    the pair is already within the auto-perception distance, the manual bond
+    is still recorded -- that is what makes the drawn bond robust to later
+    geometry changes that pull the atoms apart.
+    """
+    if i == j:
+        return False
+    if i > j:
+        i, j = j, i
+    if any(a == i and b == j for a, b, _order in mol.manual_bonds):
+        return False
+    mol.manual_bonds.append((i, j, order))
+    _reperceive(mol)
+    return True
 
 
 def _cap(mol: Molecule, center: np.ndarray, dirs: np.ndarray,
@@ -144,6 +178,16 @@ def delete_atom(mol: Molecule, idx: int) -> None:
         if mol.symbols[j] == "H" and _neighbors(mol, j) == [idx]:
             victims.add(j)
     keep = [i for i in range(mol.n_atoms) if i not in victims]
+    # Remap manual bonds across the row removal *before* rebuilding symbols/
+    # positions below: drop any pair touching a deleted atom, and shift the
+    # survivors' indices old -> new via the same mapping `keep` implies.
+    # `keep` is ascending, so remapping never reorders a surviving pair.
+    remap = {old: new for new, old in enumerate(keep)}
+    mol.manual_bonds = [
+        (remap[i], remap[j], order)
+        for i, j, order in mol.manual_bonds
+        if i not in victims and j not in victims
+    ]
     mol.symbols = [mol.symbols[i] for i in keep]
     # fancy-index the surviving rows (a copy); empty keep -> a clean (0, 3) array
     mol.positions = mol.positions[keep]

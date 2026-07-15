@@ -49,6 +49,10 @@ class Molecule:
     bonds: List[Tuple[int, int, int]] = field(default_factory=list)
     name: str = ""
     vector_fields: List[VectorField] = field(default_factory=list)
+    # Explicit bonds (e.g. drawn by option-drag) that survive re-perception
+    # even beyond the auto distance threshold; (i, j, order) with i < j, like
+    # `bonds`. `editor._reperceive` unions these into `bonds` on every rebuild.
+    manual_bonds: List[Tuple[int, int, int]] = field(default_factory=list)
 
     # -- construction -----------------------------------------------------
     def add_atom(self, symbol: str, x: float, y: float, z: float) -> int:
