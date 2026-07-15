@@ -87,6 +87,10 @@ class MoleculeWidget:
         self._undo_stack.clear()
         self._saved_sig = self._signature()
         self.dirty = False
+        # Drop any in-flight bond gesture -- its anchor index and preview
+        # field both belong to the molecule being replaced.
+        self._bond_anchor = None
+        self._bond_field = None
 
     def set_pixel_size(self, width: int, height: int, refit: bool = False) -> None:
         self.scene.set_size(width, height, refit=refit)
