@@ -70,6 +70,7 @@ _HELP_EDIT = [
     "     click the [ C ] pill -> pick a different element to build",
     "  x .................. delete            s .................. save",
     "  u .................. undo",
+    "     option-drag atom -> atom ... draw a bond (kept beyond auto range)",
 ]
 _HELP_TAIL = [
     "  n / p .............. next/prev frame   d .................. depth cue",

@@ -145,6 +145,7 @@ editing is on, a few keys change meaning from the classic bindings above
 |---|---|
 | Append / edit | `a` toggles; then click an H → grow, click a heavy atom → replace it, click empty space → new methane |
 | Delete | `x` toggles; then click an atom to remove it (its terminal hydrogens go with it) |
+| Manual bond | option/alt-drag from one atom to another — draws a bond kept even beyond the auto-perception distance |
 | Undo | `u` (reverts the last edit) |
 | Save | `s` (prompts for a filename; asks before overwriting an existing file) |
 | Autospin | `o` (relocated from `a` while editing) |
