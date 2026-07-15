@@ -1,6 +1,6 @@
 """Command-line driver for vimol.
 
-    vimol file.pdb                 # interactive viewer
+    vimol file.pdb                 # interactive viewer (opens editable: a=append)
     vimol file.xyz --spin          # autospinning
     vimol file.mol --render out.png --size 800x800
     vimol file.pdb --kitty         # emit one frame to stdout (for pipes/embeds)
@@ -75,8 +75,6 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--rotate", nargs=2, type=float, metavar=("YAW", "PITCH"),
                    default=(20.0, -15.0), help="initial rotation in degrees")
     p.add_argument("--spin", action="store_true", help="autospin in interactive mode")
-    p.add_argument("--edit", action="store_true",
-                   help="enable interactive editing (a=append, s=save, u=undo, o=autospin)")
     p.add_argument("--render", metavar="PNG", help="render a still image to a PNG file and exit")
     p.add_argument("--kitty", action="store_true", help="emit one frame to stdout as Kitty graphics and exit")
     p.add_argument("--info", action="store_true", help="print structure info and exit")
@@ -193,7 +191,7 @@ def main(argv: List[str] | None = None) -> int:
 
     from .viewer import Viewer
     viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin,
-                    backend=args.backend, source_path=args.file, editable=args.edit)
+                    backend=args.backend, source_path=args.file, editable=True)
     viewer.frame_index = idx
     # apply initial rotation
     viewer.widget.scene.camera.orbit(args.rotate[0], args.rotate[1])

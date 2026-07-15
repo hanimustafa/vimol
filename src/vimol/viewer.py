@@ -63,7 +63,7 @@ _HELP_HEAD = [
 _HELP_VIEW = [
     "  s .................. cycle style       a .................. autospin",
 ]
-# Shown only when editing is enabled (--edit).
+# Shown only when editing is enabled (Viewer(editable=True), the vimol CLI default).
 _HELP_EDIT = [
     "  a .................. append (edit)     o .................. autospin",
     "     click H -> grow · heavy atom -> replace · empty space -> new molecule",

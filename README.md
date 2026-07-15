@@ -11,28 +11,22 @@ It is built as **two layers**:
 * **`vimol` — an embeddable library.** Drop it into any terminal application
   to render molecules to pixels or a Kitty escape stream, and forward
   intercepted mouse/key events to it to make them interactive.
-* **`main.py` (a.k.a. *main.app*) — the driver application.** Deliberately
-  tiny: it resolves a file and opens the molecule full-screen with mouse
-  control. All real logic lives in the library.
+* **the `vimol` CLI** (`src/vimol/app.py`) — the driver application. Opens a
+  molecule full-screen with mouse control and interactive editing on by
+  default, and also handles batch rendering (stills, styles, PNG).
 
 ```
-./main.py                             # opens the bundled C60, full-screen
-./main.py examples/benzene.xyz        # drag to rotate, right-drag to pan, wheel to zoom
+vimol examples/c60.xyz                         # full-screen, editable, drag to rotate
+vimol examples/benzene.xyz --spin --style spacefill
+vimol protein.pdb --render out.png --size 1200x900
 ```
 
-`main.py` really is this small — everything else is in `src/vimol/`:
+The CLI is a thin wrapper — everything else is in `src/vimol/`:
 
 ```python
-import sys, vimol
-vimol.view(sys.argv[1])   # full-screen: mouse rotate/pan/zoom + hover-to-identify
-```
-
-For batch rendering and flags (stills, styles, PNG), use the `vimol` CLI
-(`python -m vimol` / the installed console script):
-
-```
-vimol examples/c60.xyz --spin --style spacefill
-vimol protein.pdb --render out.png --size 1200x900
+import vimol
+mol = vimol.load("caffeine.sdf")
+vimol.view(mol, editable=True)   # full-screen: mouse rotate/pan/zoom + hover-to-identify
 ```
 
 ## Why impostor raycasting?
@@ -72,7 +66,7 @@ NGL) use — just done on the CPU.
 ```bash
 pip install -e .          # then: vimol examples/c60.xyz
 # or run straight from the checkout with no install:
-./main.py examples/c60.xyz
+PYTHONPATH=src python -m vimol examples/c60.xyz
 ```
 
 Requires Python ≥ 3.8 and numpy. A terminal that speaks the Kitty graphics
@@ -140,11 +134,10 @@ host app that puts its own chrome above the molecule and routes the mouse.
 
 ### Editing
 
-`./main.py` — the standalone app — always opens with editing on. Everywhere
-else, editing is **off by default**: the `vimol` CLI needs `--edit`
-(`vimol --edit mol.xyz`), and the Python API (`vimol.view()`, `Viewer`,
-`MoleculeWidget`) needs `editable=True`. That way a host application that
-embeds the widget doesn't inherit these keybindings unless it opts in. When
+The `vimol` CLI always opens with editing on. The Python API (`vimol.view()`,
+`Viewer`, `MoleculeWidget`) still defaults to `editable=False` and needs
+`editable=True` to opt in — that way a host application that embeds the
+widget doesn't inherit these keybindings unless it asks for them. When
 editing is on, a few keys change meaning from the classic bindings above
 (`a` = autospin, `s` = cycle style):
 
@@ -199,7 +192,6 @@ one-line addition.
 ## Project layout
 
 ```
-main.py                     # main.app — very thin full-screen launcher
 src/vimol/
 ├── __init__.py             # public library API
 ├── widget.py               # MoleculeWidget: embeddable interaction core (+ picking)
