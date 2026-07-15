@@ -19,7 +19,7 @@ valency with new ones.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -85,11 +85,18 @@ def add_manual_bond(mol: Molecule, i: int, j: int, order: int = 1) -> bool:
 
 def _cap(mol: Molecule, center: np.ndarray, dirs: np.ndarray,
          center_elem: str, cap_elem: str) -> None:
-    """Place a *cap_elem* atom along each unit direction in *dirs*."""
+    """Place a *cap_elem* atom along each unit direction in *dirs*.
+
+    Every atom placed here is editor-created, so it joins ``mol.new_atoms``
+    -- this single spot covers the caps for :func:`birth_molecule`,
+    :func:`replace_atom`'s valence fill, and :func:`_promote_hydrogen`'s
+    freed valences all at once.
+    """
     r = _bond_length(center_elem, cap_elem)
     for d in dirs:
         p = center + np.asarray(d, float) * r
-        mol.add_atom(cap_elem, p[0], p[1], p[2])
+        idx = mol.add_atom(cap_elem, p[0], p[1], p[2])
+        mol.new_atoms.add(idx)
 
 
 # Sample density for the fallback direction search: fine enough that the
@@ -188,6 +195,7 @@ def delete_atom(mol: Molecule, idx: int) -> None:
         for i, j, order in mol.manual_bonds
         if i not in victims and j not in victims
     ]
+    mol.new_atoms = {remap[i] for i in mol.new_atoms if i not in victims}
     mol.symbols = [mol.symbols[i] for i in keep]
     # fancy-index the surviving rows (a copy); empty keep -> a clean (0, 3) array
     mol.positions = mol.positions[keep]
@@ -204,6 +212,7 @@ def birth_molecule(mol: Molecule, position, element: str = "C",
     tmpl = template or templates.default_template(element)
     p = np.asarray(position, float)
     center = mol.add_atom(element, p[0], p[1], p[2])
+    mol.new_atoms.add(center)
     _cap(mol, p, tmpl.free_directions(), element, tmpl.cap)
     _reperceive(mol)
     return center
@@ -222,6 +231,7 @@ def _promote_hydrogen(mol: Molecule, h_idx: int, element: str,
     if not neigh:
         # lone hydrogen: reuse it as the center of a free molecule
         mol.symbols[h_idx] = elements.normalize_symbol(element)
+        mol.new_atoms.add(h_idx)     # moved and changed element -> new segment
         _cap(mol, mol.positions[h_idx].copy(), template.free_directions(),
              element, template.cap)
         _reperceive(mol)
@@ -233,6 +243,7 @@ def _promote_hydrogen(mol: Molecule, h_idx: int, element: str,
     center = parent_pos + d * _bond_length(parent_elem, element)
     mol.symbols[h_idx] = elements.normalize_symbol(element)
     mol.positions[h_idx] = center
+    mol.new_atoms.add(h_idx)         # moved and changed element -> new segment
     opens = template.open_directions(-d)
     _cap(mol, center, opens, element, template.cap)
     _reperceive(mol)
@@ -254,3 +265,113 @@ def grow_at_atom(mol: Molecule, idx: int, element: str = "C",
     if mol.symbols[idx] == "H":
         return _promote_hydrogen(mol, idx, element, tmpl)
     return replace_atom(mol, idx, element, tmpl)
+
+
+# Perception's own distance tolerance (see bonds.perceive_bonds) -- a manual
+# bond only counts as "stretched" once it exceeds even that generous margin.
+_PERCEPTION_TOLERANCE = 0.45
+# How far a clash pair is pushed past the perception cutoff during cleanup,
+# so the false bond is unambiguously gone (not just barely) on re-perception.
+_CLASH_CLEARANCE = 0.2
+# A new-atom bond within this many angstrom of the ideal length is treated as
+# an editor-intended bond, not a proximity accident.
+_CLASH_SLOP = 0.05
+
+
+def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    """(clash_pairs, stretched_manual) that pressing 'c' would fix.
+
+    A pure, cheap function of current state -- no event bookkeeping -- so
+    callers (e.g. the status-bar hint) can call it every render and always
+    get an honest answer.
+
+    * clash pair: a perceived bond with at least one endpoint in
+      ``mol.new_atoms``, not itself a manual bond, whose length deviates from
+      the covalent-sum ideal by more than :data:`_CLASH_SLOP`. The editor
+      places every bond it *intends* at exactly the ideal length and nothing
+      moves atoms afterward, so a new-atom bond at a non-ideal length can
+      only be a proximity accident. Old-old bonds are never flagged --
+      loaded geometry is not ours to judge.
+    * stretched manual bond: a manual bond longer than
+      ``ideal + _PERCEPTION_TOLERANCE`` -- i.e. one that only exists because
+      it is manual, not because the atoms are actually close.
+    """
+    manual_set = {(i, j) for i, j, _order in mol.manual_bonds}
+    clash_pairs: List[Tuple[int, int]] = []
+    for i, j, _order in mol.bonds:
+        if i not in mol.new_atoms and j not in mol.new_atoms:
+            continue
+        if (i, j) in manual_set:
+            continue
+        ideal = _bond_length(mol.symbols[i], mol.symbols[j])
+        length = float(np.linalg.norm(mol.positions[i] - mol.positions[j]))
+        if abs(length - ideal) > _CLASH_SLOP:
+            clash_pairs.append((i, j))
+
+    stretched: List[Tuple[int, int]] = []
+    for i, j, _order in mol.manual_bonds:
+        ideal = _bond_length(mol.symbols[i], mol.symbols[j])
+        length = float(np.linalg.norm(mol.positions[i] - mol.positions[j]))
+        if length > ideal + _PERCEPTION_TOLERANCE:
+            stretched.append((i, j))
+
+    return clash_pairs, stretched
+
+
+def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
+    """Relax steric clashes and stretched manual bonds ('c').
+
+    A deliberately simple fixed-target spring relaxation -- a cosmetic tidy-
+    up, not a force field. One spring per currently bonded pair:
+
+    * clash pairs are pushed to just past the perception cutoff, so the
+      false bond they created disappears on re-perception;
+    * stretched manual bonds are pulled to the covalent-sum ideal, so they
+      read as a real bond;
+    * every other current bond holds its *current* length -- not the
+      covalent ideal, which would distort a loaded real-world structure --
+      simply keeping the rest of the molecule from falling apart while the
+      two groups above move.
+
+    Atoms in ``mol.new_atoms`` move ~7x more than the rest (weight 1.0 vs
+    0.15): the new segment does almost all the moving, but old atoms are not
+    frozen solid (a fully pinned clash could be unresolvable).
+
+    Returns False (no change) if :func:`cleanup_targets` finds nothing to
+    fix; otherwise relaxes, re-perceives, "accepts" the result by clearing
+    ``mol.new_atoms``, and returns True.
+    """
+    clash_pairs, stretched = cleanup_targets(mol)
+    if not clash_pairs and not stretched:
+        return False
+
+    handled = set(clash_pairs) | set(stretched)
+    springs: List[Tuple[int, int, float]] = []
+    for i, j in clash_pairs:
+        ideal = _bond_length(mol.symbols[i], mol.symbols[j])
+        springs.append((i, j, ideal + _PERCEPTION_TOLERANCE + _CLASH_CLEARANCE))
+    for i, j in stretched:
+        springs.append((i, j, _bond_length(mol.symbols[i], mol.symbols[j])))
+    for i, j, _order in mol.bonds:
+        if (i, j) in handled:
+            continue
+        springs.append((i, j, float(np.linalg.norm(mol.positions[i] - mol.positions[j]))))
+
+    weight = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
+    pos = mol.positions
+    for _ in range(iterations):
+        forces = np.zeros_like(pos)
+        for i, j, target in springs:
+            delta = pos[j] - pos[i]
+            length = float(np.linalg.norm(delta))
+            if length < 1e-6:      # perception already rejects sub-0.4A contacts
+                continue
+            f = (length - target) * (delta / length)
+            forces[i] += f
+            forces[j] -= f
+        pos = pos + step * weight[:, None] * forces
+    mol.positions = pos
+
+    _reperceive(mol)
+    mol.new_atoms.clear()
+    return True

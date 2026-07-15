@@ -316,6 +316,150 @@ def test_delete_atom_drops_manual_bond_touching_deleted_atom():
     assert mol.manual_bonds == []
 
 
+# -- editor: new_atoms tracking ---------------------------------------------
+def test_birth_molecule_marks_all_atoms_new():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
+    assert mol.new_atoms == set(range(mol.n_atoms))
+
+
+def test_grow_promotes_hydrogen_marks_promoted_atom_and_caps():
+    # ethane-ish start: one C with a single H sticking out along +x
+    mol = Molecule(symbols=["C", "H"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.09, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    mol.new_atoms.clear()          # pretend the starting C-H is loaded, not editor-made
+    editor.grow_at_atom(mol, 1)    # click the H -> promotes to C, caps with 3 H
+    # the promoted atom (1) and its 3 new caps are marked; the parent C (0) is not
+    assert mol.new_atoms == {1, 2, 3, 4}
+
+
+def test_replace_atom_marks_added_hydrogens_not_relabeled_anchor():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    mol.new_atoms.clear()
+    editor.replace_atom(mol, 0, "O")     # relabels atom 0 in place, adds 1 fill H
+    assert 0 not in mol.new_atoms        # relabeled anchor keeps its position -> not marked
+    assert mol.new_atoms == {2}          # the added fill hydrogen is marked
+
+
+def test_birth_molecule_center_and_caps_all_marked_via_lone_atom_replace():
+    # replace_atom on a lone atom takes the birth_molecule-style full-cap path;
+    # every added cap must be marked (the anchor itself is never "added").
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    mol.new_atoms.clear()
+    editor.replace_atom(mol, 0, "O")     # lone atom -> full water cap
+    assert 0 not in mol.new_atoms
+    assert mol.new_atoms == {1, 2}
+
+
+def test_delete_atom_remaps_new_atoms_indices():
+    # atom 0 is isolated; deleting it must shift the new-atom index (2) down to 1.
+    mol = Molecule(symbols=["He", "C", "C"],
+                   positions=np.array([[-50.0, 0.0, 0.0], [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    mol.new_atoms = {2}
+    editor.delete_atom(mol, 0)
+    assert mol.n_atoms == 2
+    assert mol.new_atoms == {1}
+
+
+def test_delete_atom_drops_new_atoms_touching_deleted_atom():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    mol.new_atoms = {1}
+    editor.delete_atom(mol, 1)
+    assert mol.new_atoms == set()
+
+
+# -- editor: cleanup_targets --------------------------------------------------
+def test_cleanup_targets_ignores_old_old_bonds_flags_new_atom_clash():
+    # two old atoms, already bonded (loaded geometry) -- never flagged regardless
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    assert len(mol.bonds) == 1
+    clash, stretched = editor.cleanup_targets(mol)
+    assert clash == [] and stretched == []
+
+    # a new atom lands near atom 0 at a non-ideal (proximity-accident) distance
+    idx = mol.add_atom("C", -1.0, 1.0, 0.0)
+    mol.new_atoms.add(idx)
+    editor._reperceive(mol)
+    pairs = [(i, j) for i, j, _o in mol.bonds]
+    assert (0, idx) in pairs
+    assert (idx, 1) not in pairs and (1, idx) not in pairs   # no accidental 2nd bond
+    clash, stretched = editor.cleanup_targets(mol)
+    assert clash == [(0, idx)]
+    assert stretched == []
+
+
+def test_cleanup_targets_does_not_flag_editors_own_ideal_length_bonds():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # CH4, every bond at ideal length
+    clash, stretched = editor.cleanup_targets(mol)
+    assert clash == [] and stretched == []
+
+
+def test_cleanup_targets_flags_stretched_manual_bond_not_short_one():
+    far = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]]))
+    editor.add_manual_bond(far, 0, 1)
+    clash, stretched = editor.cleanup_targets(far)
+    assert stretched == [(0, 1)]
+
+    near = Molecule(symbols=["C", "C"],
+                    positions=np.array([[0.0, 0.0, 0.0], [1.6, 0.0, 0.0]]))
+    editor.add_manual_bond(near, 0, 1)
+    clash, stretched = editor.cleanup_targets(near)
+    assert stretched == []
+
+
+# -- editor: cleanup ----------------------------------------------------------
+def test_cleanup_pushes_clash_apart_and_barely_moves_old_atoms():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    idx = mol.add_atom("C", -1.0, 1.0, 0.0)
+    mol.new_atoms.add(idx)
+    editor._reperceive(mol)
+    pairs = [(i, j) for i, j, _o in mol.bonds]
+    assert (0, idx) in pairs
+    old_pos_before = mol.positions[[0, 1]].copy()
+    new_pos_before = mol.positions[idx].copy()
+
+    assert editor.cleanup(mol) is True
+
+    old_disp = np.linalg.norm(mol.positions[[0, 1]] - old_pos_before, axis=1).max()
+    new_disp = np.linalg.norm(mol.positions[idx] - new_pos_before)
+    assert new_disp > old_disp        # the new segment did almost all the moving
+    pairs_after = [(i, j) for i, j, _o in mol.bonds]
+    assert (0, idx) not in pairs_after                # false bond is gone
+    assert mol.new_atoms == set()
+
+
+def test_cleanup_pulls_stretched_manual_bond_toward_ideal_length():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]]))
+    editor.add_manual_bond(mol, 0, 1)
+    assert editor.cleanup(mol) is True
+    ideal = elements.covalent_radius("C") * 2
+    length = np.linalg.norm(mol.positions[1] - mol.positions[0])
+    assert length == pytest.approx(ideal, abs=0.01)
+    assert (0, 1, 1) in mol.bonds                      # stays a bond
+    assert mol.new_atoms == set()
+
+
+def test_cleanup_returns_false_and_moves_nothing_when_nothing_to_clean():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # only ideal-length bonds
+    before = mol.positions.copy()
+    assert editor.cleanup(mol) is False
+    np.testing.assert_allclose(mol.positions, before)
+
+
 # -- xyz writer ------------------------------------------------------------
 def test_xyz_dumps_roundtrip():
     mol = Molecule()

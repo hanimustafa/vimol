@@ -7,7 +7,7 @@ operate on the whole structure vectorized.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -53,6 +53,11 @@ class Molecule:
     # even beyond the auto distance threshold; (i, j, order) with i < j, like
     # `bonds`. `editor._reperceive` unions these into `bonds` on every rebuild.
     manual_bonds: List[Tuple[int, int, int]] = field(default_factory=list)
+    # Indices of atoms created by editing since load (or since the last
+    # `editor.cleanup` accepted the relaxed geometry). `editor.py` marks every
+    # atom it creates; `editor.cleanup` reads this to weight its relaxation
+    # and clears it once the geometry is "accepted".
+    new_atoms: Set[int] = field(default_factory=set)
 
     # -- construction -----------------------------------------------------
     def add_atom(self, symbol: str, x: float, y: float, z: float) -> int:
