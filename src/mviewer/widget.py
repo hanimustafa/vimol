@@ -48,6 +48,7 @@ class MoleculeWidget:
         self.editable = editable
         self.append_mode = False                # 'a': click to build atoms
         self.build_element = "C"                # element placed while appending
+        self.build_template = None              # chosen geometry/valence; None -> element default
         self.dirty = False                      # True once the model is edited
         self._undo_stack: list = []             # snapshots for 'u'
         self._undo_limit = 200
@@ -268,10 +269,12 @@ class MoleculeWidget:
         mol = self.scene.molecule
         self._push_undo()                       # snapshot for 'u' before mutating
         idx = self.pick(px, py) if mol.n_atoms else None
+        tmpl = self.build_template          # None -> editor uses the element default
         if idx is not None:
-            editor.grow_at_atom(mol, idx, element=self.build_element)
+            editor.grow_at_atom(mol, idx, element=self.build_element, template=tmpl)
         else:
-            editor.birth_molecule(mol, self.unproject(px, py), element=self.build_element)
+            editor.birth_molecule(mol, self.unproject(px, py),
+                                  element=self.build_element, template=tmpl)
         # atom count changed: refresh color cache and drop stale hover/selection
         self._base_colors = mol.element_colors()
         self.hovered = self.selected = None

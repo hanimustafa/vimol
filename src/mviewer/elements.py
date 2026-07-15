@@ -25,6 +25,31 @@ SYMBOLS = [
 
 SYMBOL_TO_Z = {s.upper(): z for z, s in enumerate(SYMBOLS)}
 
+# Full element names, aligned with SYMBOLS (index 0 is the same dummy).
+NAMES = [
+    "",
+    "Hydrogen", "Helium", "Lithium", "Beryllium", "Boron", "Carbon", "Nitrogen",
+    "Oxygen", "Fluorine", "Neon", "Sodium", "Magnesium", "Aluminium", "Silicon",
+    "Phosphorus", "Sulfur", "Chlorine", "Argon", "Potassium", "Calcium",
+    "Scandium", "Titanium", "Vanadium", "Chromium", "Manganese", "Iron",
+    "Cobalt", "Nickel", "Copper", "Zinc", "Gallium", "Germanium", "Arsenic",
+    "Selenium", "Bromine", "Krypton", "Rubidium", "Strontium", "Yttrium",
+    "Zirconium", "Niobium", "Molybdenum", "Technetium", "Ruthenium", "Rhodium",
+    "Palladium", "Silver", "Cadmium", "Indium", "Tin", "Antimony", "Tellurium",
+    "Iodine", "Xenon", "Caesium", "Barium", "Lanthanum", "Cerium",
+    "Praseodymium", "Neodymium", "Promethium", "Samarium", "Europium",
+    "Gadolinium", "Terbium", "Dysprosium", "Holmium", "Erbium", "Thulium",
+    "Ytterbium", "Lutetium", "Hafnium", "Tantalum", "Tungsten", "Rhenium",
+    "Osmium", "Iridium", "Platinum", "Gold", "Mercury", "Thallium", "Lead",
+    "Bismuth", "Polonium", "Astatine", "Radon", "Francium", "Radium",
+    "Actinium", "Thorium", "Protactinium", "Uranium", "Neptunium",
+    "Plutonium", "Americium", "Curium", "Berkelium", "Californium",
+    "Einsteinium", "Fermium", "Mendelevium", "Nobelium", "Lawrencium",
+    "Rutherfordium", "Dubnium", "Seaborgium", "Bohrium", "Hassium",
+    "Meitnerium", "Darmstadtium", "Roentgenium", "Copernicium", "Nihonium",
+    "Flerovium", "Moscovium", "Livermorium", "Tennessine", "Oganesson",
+]
+
 # Covalent radii (Cordero 2008), angstrom. Fallback 0.77 (carbon-ish).
 _COVALENT = {
     "H": 0.31, "He": 0.28, "Li": 1.28, "Be": 0.96, "B": 0.84, "C": 0.76,
@@ -90,3 +115,9 @@ def vdw_radius(sym: str) -> float:
 
 def element_color(sym: str) -> tuple:
     return _COLORS.get(normalize_symbol(sym), _DEFAULT_COLOR)
+
+
+def element_name(sym: str) -> str:
+    """Full element name, e.g. 'Carbon' for 'C'. Falls back to the symbol itself."""
+    z = symbol_to_z(sym)
+    return NAMES[z] if z else normalize_symbol(sym)

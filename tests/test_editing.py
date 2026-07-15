@@ -1,6 +1,7 @@
 """Tests for interactive molecule editing: templates, editor, save, widget."""
 import os
 import sys
+import re
 
 import numpy as np
 import pytest
@@ -8,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import mviewer
-from mviewer import elements, templates, editor
+from mviewer import elements, templates, editor, periodic_table as pt
 from mviewer.molecule import Molecule
 from mviewer.bonds import ensure_bonds
 from mviewer.parsers import xyz as xyz_parser
@@ -276,6 +277,7 @@ def test_viewer_dispatch_routes_edit_keys(tmp_path):
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
     # 'a' toggles append mode (not autospin)
     v._dispatch([KeyEvent("a")])
     assert v.widget.append_mode and not v.autospin
@@ -330,3 +332,439 @@ def test_widget_drag_does_not_edit():
     w.handle_event(MouseEvent("up", 140, 100, button=0, pixel=True))
     assert not w.dirty                    # a drag rotates, it must not build
     assert w.molecule.n_atoms == 0
+
+
+# -- periodic-table layout --------------------------------------------------
+def test_periodic_table_covers_all_118_elements_once():
+    seen = set()
+    n_gaps = 0
+    for row in pt.GRID:
+        for cell in row:
+            if cell is None:
+                continue
+            if cell.symbol is None:
+                n_gaps += 1
+                continue
+            assert cell.symbol not in seen, f"duplicate {cell.symbol}"
+            seen.add(cell.symbol)
+    assert n_gaps == 2   # La-Lu and Ac-Lr placeholders
+    assert seen == set(elements.SYMBOLS[1:])
+
+
+def test_periodic_table_known_positions():
+    assert pt.position_of("H") == (0, 0)
+    assert pt.position_of("He") == (0, 17)
+    assert pt.position_of("C") == (1, 13)
+    assert pt.position_of("Og") == (6, 17)
+    assert pt.position_of("La") == (7, 3)
+    assert pt.position_of("Lu") == (7, 17)
+    assert pt.position_of("Ac") == (8, 3)
+    assert pt.position_of("Lr") == (8, 17)
+    assert pt.position_of("not-a-real-element") == pt.position_of("C")  # fallback
+
+
+def test_periodic_table_gap_cells_jump_to_f_block_rows():
+    gap_ln = pt.cell_at(5, 2)
+    gap_an = pt.cell_at(6, 2)
+    assert gap_ln.symbol is None and gap_ln.jump_row == 7
+    assert gap_an.symbol is None and gap_an.jump_row == 8
+
+
+def test_element_name():
+    assert elements.element_name("C") == "Carbon"
+    assert elements.element_name("Og") == "Oganesson"
+    assert elements.element_name("Fe") == "Iron"
+
+
+# -- periodic-table picker (Viewer) -----------------------------------------
+def _viewer_in_append_mode(cols=100, rows=30):
+    from mviewer.viewer import Viewer
+    mol = Molecule()
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(240, 200)
+    v._cols, v._rows = cols, rows
+    v._dispatch([KeyEvent("a")])
+    v._status_bar()   # populate v._elem_button_span
+    return v
+
+
+def test_status_bar_element_button_span_only_in_append_mode():
+    v = _viewer_in_append_mode()
+    assert v._elem_button_span is not None
+    row, c0, c1 = v._elem_button_span
+    assert row == v._rows - 1
+    assert c1 - c0 == len(f" {v.widget.build_element} ")
+
+    from mviewer.viewer import Viewer
+    v2 = Viewer(Molecule(), backend="cpu", editable=True)
+    v2.widget.set_pixel_size(240, 200)
+    v2._cols, v2._rows = 100, 30
+    v2._status_bar()   # append mode never toggled on
+    assert v2._elem_button_span is None
+
+
+def test_click_element_button_opens_picker_at_current_element():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    changed = v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert changed and v._mode == "periodic_table"
+    assert (v._pt_row, v._pt_col) == pt.position_of(v.widget.build_element)
+
+
+def test_click_geometry_pill_opens_geometry_picker_not_periodic_table():
+    v = _viewer_in_append_mode()
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "geometry_picker"
+
+
+def test_click_between_and_past_the_pills_opens_nothing():
+    v = _viewer_in_append_mode()
+    row, _ec0, ec1 = v._elem_button_span
+    _grow, gc0, gc1 = v._geom_button_span
+    # the single space between the two pills, and well past the geometry pill
+    for col in (ec1, gc1 + 6):
+        if ec1 < gc0:                    # ensure there really is a gap column
+            v._dispatch([MouseEvent("down", col, row, button=0, pixel=False)])
+            assert v._mode == "normal"
+
+
+def test_picker_keyboard_navigation_and_select():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+
+    v._dispatch([KeyEvent("right")])
+    v._dispatch([KeyEvent("down")])
+    target = pt.GRID[v._pt_row][v._pt_col]
+    assert target is not None and target.symbol is not None
+
+    v._dispatch([KeyEvent("enter")])
+    assert v._mode == "normal"
+    assert v.widget.build_element == target.symbol
+
+
+def test_picker_escape_cancels_without_changing_element():
+    v = _viewer_in_append_mode()
+    before = v.widget.build_element
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    v._dispatch([KeyEvent("right")])   # move around first
+    v._dispatch([KeyEvent("escape")])
+    assert v._mode == "normal"
+    assert v.widget.build_element == before
+
+
+def test_picker_gap_cell_jumps_without_selecting():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    v._pt_row, v._pt_col = 5, 2   # the La-Lu gap
+    v._dispatch([KeyEvent("enter")])
+    assert v._mode == "periodic_table"   # jump, not select -- picker stays open
+    landed = pt.GRID[v._pt_row][v._pt_col]
+    assert landed.symbol == "La"
+
+
+def test_picker_mouse_click_selects_cell_under_cursor():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    top, left, _w, _h = v._pt_geometry()
+    screen_row = top + 1   # grid row 0
+    screen_col = left + 2 + 17 * 4 + 1   # grid col 17 (He)
+    v._dispatch([MouseEvent("down", screen_col, screen_row, button=0, pixel=False)])
+    assert v._mode == "normal"
+    assert v.widget.build_element == "He"
+
+
+def test_picker_click_outside_panel_is_a_no_op():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    changed = v._dispatch([MouseEvent("down", 0, 0, button=0, pixel=False)])
+    assert not changed
+    assert v._mode == "periodic_table"
+
+
+def test_picker_anchors_above_the_button_not_screen_center():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    top, left, width, height = v._pt_geometry()
+    # flush against the row just above the status bar, not vertically centered
+    assert top + height - 1 == v._rows - 2
+    # horizontally centered on the button, not on the whole screen width
+    button_center = (c0 + c1) // 2
+    assert abs((left + width // 2) - button_center) <= 1
+    screen_center = v._cols // 2
+    assert left + width // 2 != screen_center
+
+
+def test_status_bar_button_column_stable_across_hover_and_name_changes():
+    from mviewer.viewer import Viewer
+    mol = Molecule(symbols=["C", "O"], positions=np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(240, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("a")])
+    v._status_bar()
+    baseline = v._elem_button_span
+    assert baseline is not None
+
+    v.widget.hovered = 0
+    v._status_bar()
+    assert v._elem_button_span == baseline, "hovering a short-symbol atom must not move the button"
+
+    v.widget.hovered = 1
+    v._status_bar()
+    assert v._elem_button_span == baseline
+
+    v.widget.hovered = None
+    mol.name = "a-much-longer-molecule-name-than-before"
+    v._status_bar()
+    assert v._elem_button_span == baseline, "a longer molecule name must not move the button"
+
+    v._msg = "saved something.xyz"
+    v._status_bar()
+    assert v._elem_button_span == baseline, "a transient status message must not move the button"
+
+
+# -- status-bar dead zone: protect it from accidental 3D-viewport clicks ---
+def test_status_zone_click_opens_picker_even_one_row_off():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row - 1, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+
+
+def test_status_zone_near_miss_click_never_births_an_atom():
+    v = _viewer_in_append_mode()
+    status_row = v._rows - 1
+    for click_row in (status_row, status_row - 1):
+        # column 2 is the status bar's left (hover/molecule-info) area -- in the
+        # dead zone but on neither pill, so it must be swallowed silently.
+        v._dispatch([MouseEvent("down", 2, click_row, button=0, pixel=False)])
+        v._dispatch([MouseEvent("up", 2, click_row, button=0, pixel=False)])
+        assert v._mode == "normal"
+        assert v.widget.molecule.n_atoms == 0
+
+
+def test_status_zone_does_not_swallow_normal_viewport_clicks():
+    v = _viewer_in_append_mode()
+    v._dispatch([MouseEvent("down", 20, 5, button=0, pixel=False)])
+    v._dispatch([MouseEvent("up", 20, 5, button=0, pixel=False)])
+    assert v.widget.molecule.n_atoms == 5   # a fresh methane, built normally
+
+
+def test_status_zone_drag_stays_suppressed_even_if_it_enters_the_viewport():
+    v = _viewer_in_append_mode()
+    rot_before = v.widget.scene.camera.rotation.copy()
+    v._dispatch([MouseEvent("down", 5, v._rows - 1, button=0, pixel=False)])
+    v._dispatch([MouseEvent("drag", 5, 10, button=0, pixel=False)])
+    v._dispatch([MouseEvent("up", 5, 10, button=0, pixel=False)])
+    assert (v.widget.scene.camera.rotation == rot_before).all()
+
+
+def test_viewport_drag_starting_outside_the_zone_still_rotates():
+    v = _viewer_in_append_mode()
+    rot_before = v.widget.scene.camera.rotation.copy()
+    v._dispatch([MouseEvent("down", 5, 10, button=0, pixel=False)])
+    v._dispatch([MouseEvent("drag", 40, 10, button=0, pixel=False)])
+    v._dispatch([MouseEvent("up", 40, 10, button=0, pixel=False)])
+    assert not (v.widget.scene.camera.rotation == rot_before).all()
+
+
+# -- clicking the pill again toggles the picker closed ----------------------
+def test_clicking_the_same_pill_closes_the_picker():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "normal"
+    assert v.widget.build_element == "C"   # unchanged, just closed
+
+
+def test_pill_toggle_full_cycle_and_row_tolerance():
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "normal"
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+    # closing also tolerates the same one-row margin as opening does
+    v._dispatch([MouseEvent("down", c0 + 0.5, row - 1, button=0, pixel=False)])
+    assert v._mode == "normal"
+
+
+def test_cell_size_px_rounds_to_whole_pixels(monkeypatch):
+    import mviewer.kitty as kitty
+    # a window size that would otherwise produce a fractional cell height
+    monkeypatch.setattr(kitty, "terminal_size_px", lambda fd=1: (80, 24, 726, 434))
+    cw, ch = kitty.cell_size_px()
+    assert cw == float(round(726 / 80))
+    assert ch == float(round(434 / 24))
+    assert cw == int(cw) and ch == int(ch)
+
+
+def test_query_cell_size_px_parses_csi_16t_reply(monkeypatch):
+    import mviewer.kitty as kitty
+    import os as _os
+    import select as _select
+    reply = {"data": b"\x1b[6;38;19t"}
+    monkeypatch.setattr(_os, "write", lambda fd, data: len(data))
+    monkeypatch.setattr(_select, "select", lambda r, w, x, t: ([r[0]], [], []))
+
+    def fake_read(fd, n):
+        d = reply["data"]
+        reply["data"] = b""
+        return d
+    monkeypatch.setattr(_os, "read", fake_read)
+    cw, ch = kitty.query_cell_size_px(0, 1)
+    assert (cw, ch) == (19.0, 38.0)   # reply is height;width -> (w, h)
+
+
+def test_query_cell_size_px_returns_none_without_reply(monkeypatch):
+    import mviewer.kitty as kitty
+    import os as _os
+    import select as _select
+    monkeypatch.setattr(_os, "write", lambda fd, data: len(data))
+    monkeypatch.setattr(_select, "select", lambda r, w, x, t: ([], [], []))  # never ready
+    assert kitty.query_cell_size_px(0, 1, timeout=0.01) is None
+
+
+# -- taller status-bar dead zone (guard pushed higher) ----------------------
+def test_status_zone_guard_blocks_several_rows_above_status():
+    from mviewer.viewer import _STATUS_ZONE_ROWS
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    for dr in range(_STATUS_ZONE_ROWS):
+        click_row = v._rows - 1 - dr
+        v._dispatch([MouseEvent("down", c1 + 6, click_row, button=0, pixel=False)])
+        v._dispatch([MouseEvent("up", c1 + 6, click_row, button=0, pixel=False)])
+        assert v.widget.molecule.n_atoms == 0, f"stray atom at row offset {dr}"
+
+
+def test_click_just_above_the_zone_still_builds():
+    from mviewer.viewer import _STATUS_ZONE_ROWS
+    v = _viewer_in_append_mode()
+    click_row = v._rows - 1 - _STATUS_ZONE_ROWS   # first row outside the guard
+    v._dispatch([MouseEvent("down", 20, click_row, button=0, pixel=False)])
+    v._dispatch([MouseEvent("up", 20, click_row, button=0, pixel=False)])
+    assert v.widget.molecule.n_atoms == 5
+
+
+# -- closing the picker lifts only its rows (no full-screen repaint) --------
+def test_update_geometry_prefers_queried_cell_size():
+    from mviewer.viewer import Viewer
+    v = Viewer(Molecule(), backend="cpu", editable=True)
+    v._cell_px = (11.0, 23.0)          # as if the terminal answered CSI 16 t
+    v._update_geometry()
+    assert v.widget.cell_w == 11.0 and v.widget.cell_h == 23.0
+
+
+def test_closing_picker_erases_only_panel_rows(monkeypatch):
+    import mviewer.kitty as kitty
+    v = _viewer_in_append_mode()
+    row, c0, c1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+    top, _left, _w, height = v._pt_geometry()
+
+    captured = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd: captured.extend(data))
+    v._dispatch([KeyEvent("escape")])
+    text = bytes(captured).decode("utf-8", "replace")
+
+    assert "\x1b[2J" not in text, "close must not full-clear the screen"
+    erased = sorted(int(m) for m in re.findall(r"\x1b\[(\d+);1H\x1b\[0m\x1b\[2K", text))
+    assert erased, "panel rows should be erased"
+    assert erased[0] == top + 1                     # first panel row (1-based)
+    assert max(erased) <= v._rows - 1               # never wipes the status row
+
+
+# -- template registry: per-element geometry options -----------------------
+def test_options_for_lists_hybridizations_most_bonds_first():
+    labels = [o.geometry for o in templates.options_for("C")]
+    assert labels == ["tetrahedral", "trigonal", "linear"]     # sp3, sp2, sp
+    valences = [o.valence for o in templates.options_for("N")]
+    assert valences == sorted(valences, reverse=True)          # descending
+    assert templates.options_for("O")[0].geometry == "bent"
+
+
+def test_options_for_unknown_element_falls_back_to_one_default():
+    opts = templates.options_for("Fe")
+    assert len(opts) == 1
+    assert opts[0].element == "Fe"
+
+
+def test_template_label_reads_naturally():
+    t = templates.TEMPLATES[("C", 4)]
+    assert t.label() == "tetrahedral · sp3 · 4 bonds"
+    assert templates.TEMPLATES[("H", 1)].label() == "terminal · 1 bond"   # no hybridization
+
+
+# -- geometry picker (Viewer) ----------------------------------------------
+def test_click_geometry_pill_opens_picker_at_active_option():
+    v = _viewer_in_append_mode()
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "geometry_picker"
+    assert v._geom_opts[v._geom_idx].geometry == "tetrahedral"   # C's default
+
+
+def test_geometry_picker_select_sets_build_template_and_affects_building():
+    v = _viewer_in_append_mode()
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    v._dispatch([KeyEvent("down")])                 # tetrahedral -> trigonal (sp2)
+    chosen = v._geom_opts[v._geom_idx]
+    v._dispatch([KeyEvent("enter")])
+    assert v._mode == "normal"
+    assert v.widget.build_template is chosen
+    # building now uses sp2 carbon: a fresh atom is capped with 3 H, not 4
+    v._dispatch([MouseEvent("down", 20, 5, button=0, pixel=False)])
+    v._dispatch([MouseEvent("up", 20, 5, button=0, pixel=False)])
+    assert v.widget.molecule.formula() == "CH3"
+
+
+def test_geometry_picker_escape_leaves_template_unchanged():
+    v = _viewer_in_append_mode()
+    before = v.widget.build_template
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    v._dispatch([KeyEvent("down")])
+    v._dispatch([KeyEvent("escape")])
+    assert v._mode == "normal"
+    assert v.widget.build_template is before
+
+
+def test_clicking_geometry_pill_again_toggles_it_closed():
+    v = _viewer_in_append_mode()
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "geometry_picker"
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "normal"
+
+
+def test_picking_new_element_resets_geometry_to_its_default():
+    v = _viewer_in_append_mode()
+    # choose a non-default geometry for carbon first
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    v._dispatch([KeyEvent("down")])
+    v._dispatch([KeyEvent("enter")])
+    assert v.widget.build_template is not None
+    # now pick oxygen from the periodic table -> template resets to O's default
+    erow, ec0, ec1 = v._elem_button_span
+    v._dispatch([MouseEvent("down", ec0 + 0.5, erow, button=0, pixel=False)])
+    v._pt_row, v._pt_col = pt.position_of("O")
+    v._dispatch([KeyEvent("enter")])
+    assert v.widget.build_element == "O"
+    assert v.widget.build_template is None            # reset to default
+    assert v._active_template().geometry == "bent"    # O's default

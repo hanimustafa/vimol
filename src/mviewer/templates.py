@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .camera import rotation_from_axis_angle
+from .elements import normalize_symbol as _normalize_symbol
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:
@@ -90,6 +91,16 @@ class AtomTemplate:
     geometry: str
     directions: np.ndarray
     cap: str = "H"
+    hybridization: str = ""          # "sp3" / "sp2" / "sp"; "" when N/A (e.g. H, halogens)
+
+    def label(self) -> str:
+        """A short human label, e.g. 'tetrahedral · sp3 · 4 bonds'."""
+        bonds = f"{self.valence} bond" + ("s" if self.valence != 1 else "")
+        parts = [self.geometry]
+        if self.hybridization:
+            parts.append(self.hybridization)
+        parts.append(bonds)
+        return " · ".join(parts)
 
     def free_directions(self) -> np.ndarray:
         """All bond directions in the canonical frame (for a free-standing atom)."""
@@ -108,22 +119,41 @@ class AtomTemplate:
         return self.directions[1:] @ R.T
 
 
-# -- registry: one template per (element, valence) ------------------------
+# -- registry: hybridization/valence options per element ------------------
+# Mirrors the set of atom-type choices a builder like GaussView offers for each
+# element: the standard VSEPR hybridization states (sp3 tetrahedral, sp2
+# trigonal, sp linear, and the lone-pair-reduced pyramidal/bent variants). The
+# order here is the order the geometry picker lists them in (most bonds first).
 TEMPLATES = {
-    ("C", 4): AtomTemplate("C", 4, "tetrahedral", _TETRAHEDRAL),
-    ("N", 3): AtomTemplate("N", 3, "pyramidal", _TETRAHEDRAL[:3]),
-    ("N", 4): AtomTemplate("N", 4, "tetrahedral", _TETRAHEDRAL),
-    ("O", 2): AtomTemplate("O", 2, "bent", _TETRAHEDRAL[:2]),
-    ("B", 3): AtomTemplate("B", 3, "trigonal", _TRIGONAL),
-    ("C", 3): AtomTemplate("C", 3, "trigonal", _TRIGONAL),
-    ("C", 2): AtomTemplate("C", 2, "linear", _LINEAR),
+    # Carbon: sp3 / sp2 / sp
+    ("C", 4): AtomTemplate("C", 4, "tetrahedral", _TETRAHEDRAL, hybridization="sp3"),
+    ("C", 3): AtomTemplate("C", 3, "trigonal", _TRIGONAL, hybridization="sp2"),
+    ("C", 2): AtomTemplate("C", 2, "linear", _LINEAR, hybridization="sp"),
+    # Nitrogen: ammonium sp3 / amine sp3 / imine sp2 / nitrile sp
+    ("N", 4): AtomTemplate("N", 4, "tetrahedral", _TETRAHEDRAL, hybridization="sp3"),
+    ("N", 3): AtomTemplate("N", 3, "pyramidal", _TETRAHEDRAL[:3], hybridization="sp3"),
+    ("N", 2): AtomTemplate("N", 2, "bent", _TRIGONAL[:2], hybridization="sp2"),
+    ("N", 1): AtomTemplate("N", 1, "terminal", _TERMINAL, hybridization="sp"),
+    # Oxygen: ether/hydroxyl sp3 / carbonyl-like sp2 / terminal
+    ("O", 2): AtomTemplate("O", 2, "bent", _TETRAHEDRAL[:2], hybridization="sp3"),
+    ("O", 1): AtomTemplate("O", 1, "terminal", _TERMINAL, hybridization="sp2"),
+    # Boron: sp2 / sp3
+    ("B", 3): AtomTemplate("B", 3, "trigonal", _TRIGONAL, hybridization="sp2"),
+    ("B", 4): AtomTemplate("B", 4, "tetrahedral", _TETRAHEDRAL, hybridization="sp3"),
+    # Heavier main-group with a couple of common valences
+    ("P", 3): AtomTemplate("P", 3, "pyramidal", _TETRAHEDRAL[:3], hybridization="sp3"),
+    ("S", 2): AtomTemplate("S", 2, "bent", _TETRAHEDRAL[:2], hybridization="sp3"),
+    # Monovalent (halogens, hydrogen): a single terminal bond
     ("H", 1): AtomTemplate("H", 1, "terminal", _TERMINAL),
     ("F", 1): AtomTemplate("F", 1, "terminal", _TERMINAL),
     ("Cl", 1): AtomTemplate("Cl", 1, "terminal", _TERMINAL),
+    ("Br", 1): AtomTemplate("Br", 1, "terminal", _TERMINAL),
+    ("I", 1): AtomTemplate("I", 1, "terminal", _TERMINAL),
 }
 
 # Typical valence used to pick a default template when none is specified.
-_DEFAULT_VALENCE = {"C": 4, "N": 3, "O": 2, "B": 3, "H": 1, "F": 1, "Cl": 1}
+_DEFAULT_VALENCE = {"C": 4, "N": 3, "O": 2, "B": 3, "P": 3, "S": 2,
+                    "H": 1, "F": 1, "Cl": 1, "Br": 1, "I": 1}
 
 
 def default_template(element: str = "C") -> AtomTemplate:
@@ -132,12 +162,28 @@ def default_template(element: str = "C") -> AtomTemplate:
     Falls back to a tetrahedral, carbon-like template for elements without a
     dedicated entry, so an unknown element still grows sensibly.
     """
+    element = _normalize_symbol(element)
     val = _DEFAULT_VALENCE.get(element, 4)
     tmpl = TEMPLATES.get((element, val))
     if tmpl is not None:
         return tmpl
     # synthesize a tetrahedral fallback for the requested element
-    return AtomTemplate(element, 4, "tetrahedral", _TETRAHEDRAL)
+    return AtomTemplate(element, 4, "tetrahedral", _TETRAHEDRAL, hybridization="sp3")
+
+
+def options_for(element: str):
+    """The geometry/hybridization templates offered for *element*.
+
+    Returns every registered template for the element, most bonds first (the
+    order the picker lists them). Elements with no dedicated entry fall back to
+    a single default template, so the picker always has at least one option.
+    """
+    element = _normalize_symbol(element)
+    opts = [t for (el, _val), t in TEMPLATES.items() if el == element]
+    if not opts:
+        return [default_template(element)]
+    opts.sort(key=lambda t: -t.valence)
+    return opts
 
 
 def free_direction(neighbor_dirs) -> np.ndarray:

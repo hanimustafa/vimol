@@ -47,10 +47,72 @@ def terminal_size_px(fd: int = 1) -> Tuple[int, int, int, int]:
 
 
 def cell_size_px(fd: int = 1) -> Tuple[float, float]:
-    """Approximate (cell_width_px, cell_height_px). Defaults to 9x18 if unknown."""
+    """(cell_width_px, cell_height_px). Defaults to 9x18 if unknown.
+
+    Derived by dividing the window's reported pixel extent by its cell
+    count. That extent can include the terminal's window padding, which
+    this then smears across every row/column as a fractional per-cell
+    error -- invisible to the continuous, radius-based atom picker but
+    enough to make a rigid per-cell grid (the periodic-table picker) land
+    on the wrong cell, worse the further down you go as the error adds up.
+    Rounding removes the smaller part of that noise; :func:`query_cell_size_px`
+    removes it entirely by asking the terminal for the exact cell size, and
+    the viewer prefers that when the terminal answers.
+    """
     cols, rows, xpx, ypx = terminal_size_px(fd)
-    cw = xpx / cols if xpx and cols else 9.0
-    ch = ypx / rows if ypx and rows else 18.0
+    cw = round(xpx / cols) if xpx and cols else 9.0
+    ch = round(ypx / rows) if ypx and rows else 18.0
+    return float(cw), float(ch)
+
+
+def query_cell_size_px(fd_in: int = 0, fd_out: int = 1, timeout: float = 0.2):
+    """Ask the terminal for its exact cell size in pixels via ``CSI 16 t``.
+
+    Returns ``(cell_width_px, cell_height_px)`` from the terminal's
+    ``CSI 6 ; height ; width t`` reply, or ``None`` if it doesn't answer.
+    Unlike :func:`cell_size_px` this is the terminal's own authoritative
+    cell metric, with no window-padding contamination -- so cell/pixel
+    hit-testing lines up exactly with where glyphs are actually drawn.
+    Requires the tty to be in raw mode (mirrors input.query_decset).
+    """
+    import select
+    import time as _time
+
+    try:
+        os.write(fd_out, b"\x1b[16t")
+    except OSError:
+        return None
+    buf = b""
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        r, _, _ = select.select([fd_in], [], [], max(0.0, deadline - _time.monotonic()))
+        if not r:
+            break
+        try:
+            chunk = os.read(fd_in, 64)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+        if b"t" in buf and b"\x1b[6;" in buf:
+            break
+    # parse: ESC [ 6 ; <height> ; <width> t
+    marker = b"\x1b[6;"
+    i = buf.find(marker)
+    if i < 0:
+        return None
+    j = buf.find(b"t", i)
+    if j < 0:
+        return None
+    try:
+        h_str, w_str = buf[i + len(marker):j].split(b";")
+        ch = float(int(h_str))
+        cw = float(int(w_str))
+    except (ValueError, IndexError):
+        return None
+    if cw <= 0 or ch <= 0:
+        return None
     return cw, ch
 
 

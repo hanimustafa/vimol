@@ -159,14 +159,32 @@ In **append** mode (status bar shows `✎APPEND`) a left *click* — not a drag,
 which still rotates — builds structure:
 
 - **click an atom** → grow the structure there. Clicking a **hydrogen** promotes
-  it to a carbon and caps its freed valences with hydrogens (so an H becomes a
-  `–CH3`); clicking a heavier atom attaches a new methyl at a free site.
-- **click empty space** → a fresh methane is born on the plane through the
-  molecule's center.
+  it to the element you've selected and caps its freed valences with hydrogens
+  (so an H becomes a `–CH3` by default); clicking a heavier atom attaches a
+  new group at a free site.
+- **click empty space** → a fresh, fully-capped molecule of the selected
+  element is born on the plane through the molecule's center (carbon → methane,
+  oxygen → water, etc).
 
-The status bar shows what you're placing as colored, button-styled tokens —
-`adding [ C ] [ tetrahedral ]`. (Clicking those buttons to change the element or
-geometry is coming in a later commit; for now they're the visual indicator.)
+The status bar shows what you're placing as two colored, button-styled tokens —
+`adding [ C ] [ tetrahedral ]`. Both are clickable, and each opens a picker
+anchored right above the button you clicked (not centered on screen) so it
+appears where you're already looking; click the same pill again, or press `Esc`,
+to dismiss it without changing anything.
+
+- **Click the element pill** (`[ C ]`) to open a **periodic-table picker**: a
+  bordered overlay colored by each element's CPK color. Drive it with the arrow
+  keys / `h j k l`, the mouse, or both — click a cell or move to it and press
+  Enter. The info line shows the full element name and the geometry it'll build
+  with; the lanthanide/actinide gap cells (`**`) jump you down to their own row.
+  Choosing a new element resets the geometry to that element's default.
+- **Click the geometry pill** (`[ tetrahedral ]`) to open a **geometry picker**
+  listing the hybridization/valence options for the current element — e.g.
+  carbon offers `tetrahedral · sp3 · 4 bonds`, `trigonal · sp2 · 3 bonds`, and
+  `linear · sp · 2 bonds`; nitrogen and oxygen list their own. The active choice
+  is marked `●`. Pick one with the arrows/mouse + Enter, and subsequent builds
+  use that geometry (so an sp² carbon grows a `–CH2`/`=CH` centre instead of a
+  full tetrahedron).
 
 Any edit marks the model `[MODIFIED]`; `u` undoes step by step. Press `s` to
 save — the prompt is pre-filled with the source path, saves straight to a new
