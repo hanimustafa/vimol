@@ -127,6 +127,29 @@ def replace_atom(mol: Molecule, idx: int, element: str = "C",
     return idx
 
 
+def delete_atom(mol: Molecule, idx: int) -> None:
+    """Remove atom *idx* (and its own terminal hydrogens) from the molecule.
+
+    Terminal-H neighbors of *idx* -- hydrogens bonded to nothing but *idx* --
+    are swept away with it. That one rule covers both gestures: deleting a
+    heavy atom takes its whole hydrogen shell (methane's carbon removes the
+    CH4); deleting a hydrogen has no hydrogens of its own, so only it goes.
+
+    Bonds are re-perceived rather than reindexed, and no auto-capping is done:
+    heavy neighbors that lose a bond are left dangling and under-coordinated
+    (deletion is a plain erase, not a substitution like :func:`replace_atom`).
+    """
+    victims = {idx}
+    for j in _neighbors(mol, idx):
+        if mol.symbols[j] == "H" and _neighbors(mol, j) == [idx]:
+            victims.add(j)
+    keep = [i for i in range(mol.n_atoms) if i not in victims]
+    mol.symbols = [mol.symbols[i] for i in keep]
+    # fancy-index the surviving rows (a copy); empty keep -> a clean (0, 3) array
+    mol.positions = mol.positions[keep]
+    _reperceive(mol)
+
+
 def birth_molecule(mol: Molecule, position, element: str = "C",
                    template: Optional[AtomTemplate] = None) -> int:
     """Create a fresh, fully-capped atom at *position* (e.g. methane).

@@ -206,6 +206,55 @@ def test_replace_mid_chain_atom_snaps_h_and_keeps_skeleton():
         assert np.linalg.norm(mol.positions[i] - n_pos) == pytest.approx(nh, abs=1e-6)
 
 
+# -- editor: delete --------------------------------------------------------
+def test_delete_heavy_atom_sweeps_its_hydrogens():
+    # deleting methane's carbon takes its four terminal H with it
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
+    editor.delete_atom(mol, c)
+    assert mol.n_atoms == 0                                   # whole group gone
+    assert mol.bonds == []
+
+
+def test_delete_hydrogen_removes_only_that_atom():
+    # clicking a hydrogen has no hydrogens-of-its-own, so exactly it goes
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])              # CH4
+    h = next(i for i, s in enumerate(mol.symbols) if s == "H")
+    editor.delete_atom(mol, h)
+    assert mol.formula() == "CH3"                             # one H fewer
+    assert mol.n_atoms == 4
+    assert mol.symbols.count("H") == 3
+
+
+def test_delete_mid_chain_atom_leaves_neighbor_dangling_no_cap():
+    # ethane: delete one carbon -> its heavy neighbor loses a bond, no new H
+    mol = Molecule()
+    c0 = editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # CH4
+    h = next(i for i, s in enumerate(mol.symbols) if s == "H")
+    editor.grow_at_atom(mol, h)                              # promote H -> ethane C2H6
+    assert mol.formula() == "C2H6"
+    c1 = next(i for i, s in enumerate(mol.symbols) if s == "C" and i != c0)
+    editor.delete_atom(mol, c1)                              # remove c1 + its 3 terminal H
+    # a bare methyl remains -- CH4 (not CH3) would mean a hydrogen was auto-capped
+    assert mol.formula() == "CH3"
+    assert mol.n_atoms == 4
+    # the surviving carbon is bonded only to its 3 hydrogens (the C-C bond is gone)
+    c = mol.symbols.index("C")
+    neigh = editor._neighbors(mol, c)
+    assert len(neigh) == 3
+    assert all(mol.symbols[j] == "H" for j in neigh)
+
+
+def test_delete_last_atom_leaves_empty_molecule():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    editor.delete_atom(mol, 0)
+    assert mol.n_atoms == 0
+    assert mol.symbols == []
+    assert mol.positions.shape == (0, 3)
+
+
 # -- xyz writer ------------------------------------------------------------
 def test_xyz_dumps_roundtrip():
     mol = Molecule()
