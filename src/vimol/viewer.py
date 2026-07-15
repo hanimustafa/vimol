@@ -18,6 +18,7 @@ from .molecule import Molecule
 from .render import Style
 from .widget import MoleculeWidget, REPRESENTATIONS
 from .bonds import ensure_bonds
+from . import editor
 from . import kitty
 from . import input as _input
 from . import elements
@@ -71,6 +72,7 @@ _HELP_EDIT = [
     "  x .................. delete            s .................. save",
     "  u .................. undo",
     "     option-drag atom -> atom ... draw a bond (kept beyond auto range)",
+    "  c .................. cleanup clashes / long bonds",
 ]
 _HELP_TAIL = [
     "  n / p .............. next/prev frame   d .................. depth cue",
@@ -87,7 +89,10 @@ def _help_lines(editable: bool):
 # things: autospin when read-only, append when editable (see _driver_key).
 _BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "\x03"}
 # Extra keys claimed only when editing is enabled.
-_EDIT_DRIVER_KEYS = {"s", "u", "o", "x"}
+_EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
+
+# Warm warning color for the status bar's "press c to cleanup" hint.
+_CLEANUP_HINT_FG = (255, 170, 60)
 
 # Periodic-table picker panel colors.
 _PT_BG = (18, 20, 26)
@@ -705,6 +710,17 @@ class Viewer:
         elif show_delete:
             pieces.append((f"  {base}\x1b[1m✗DELETE\x1b[22m", 9))          # "  ✗DELETE"
         pieces.append((mod, len(mod)))
+        # Cleanup hint: recomputed from model state every render (no hover
+        # dependence), so it appears/disappears exactly like [MODIFIED] does
+        # and never disturbs the button-span stability tests.
+        cleanup_hint = ""
+        if self.editable:
+            clash, stretched = editor.cleanup_targets(mol)
+            if clash or stretched:
+                r, g, b = _CLEANUP_HINT_FG
+                cleanup_hint = f"  \x1b[38;2;{r};{g};{b}m\x1b[1m⚠ c cleanup\x1b[22m{base}"
+        cleanup_hint_len = len("  ⚠ c cleanup") if cleanup_hint else 0
+        pieces.append((cleanup_hint, cleanup_hint_len))
         elem_piece_idx = None
         if show_buttons:
             buttons_text, buttons_len, elem_rel, geom_rel = self._edit_buttons()
@@ -849,6 +865,8 @@ class Viewer:
             self._open_save_prompt()
         elif key == "u" and self.editable:
             return self.widget.undo()
+        elif key == "c" and self.editable:
+            return self.widget.cleanup()
         elif key == "?":
             self._show_help = not self._show_help
             if not self._show_help:

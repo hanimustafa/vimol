@@ -1418,6 +1418,92 @@ def test_picking_new_element_resets_geometry_to_its_default():
     assert v._active_template().geometry == "bent"    # O's default
 
 
+# -- widget/viewer cleanup ('c') --------------------------------------------
+def _clashy_molecule():
+    """An old-old bonded pair plus one editor-new atom clashing with atom 0."""
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    idx = mol.add_atom("C", -1.0, 1.0, 0.0)
+    mol.new_atoms.add(idx)
+    editor._reperceive(mol)
+    return mol
+
+
+def test_widget_cleanup_relaxes_and_is_undoable():
+    mol = _clashy_molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    pos_before = mol.positions.copy()
+    new_atoms_before = set(mol.new_atoms)
+    assert not w.dirty
+    assert w.cleanup() is True
+    assert w.dirty
+    assert mol.new_atoms == set()
+    assert w.undo()
+    np.testing.assert_allclose(mol.positions, pos_before)
+    assert mol.new_atoms == new_atoms_before
+    assert not w.dirty
+
+
+def test_widget_cleanup_returns_false_when_nothing_to_clean():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])       # ideal-length bonds only
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    assert w.cleanup() is False
+    assert not w.dirty
+    assert not w.undo()                               # no snapshot was pushed
+
+
+def test_viewer_c_key_triggers_cleanup_only_when_editable():
+    from vimol.viewer import Viewer
+    mol = _clashy_molecule()
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    assert v._dispatch([KeyEvent("c")])
+    assert v.widget.dirty
+    assert v.widget.molecule.new_atoms == set()
+
+    v2 = Viewer(_clashy_molecule(), backend="cpu")    # editable defaults False
+    v2.widget.set_pixel_size(200, 200)
+    v2._cols, v2._rows = 100, 30
+    assert not v2._dispatch([KeyEvent("c")])
+    assert not v2.widget.dirty
+
+
+def test_status_bar_shows_cleanup_hint_when_clash_exists_and_hides_after_c():
+    from vimol.viewer import Viewer
+    mol = _clashy_molecule()
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    assert "cleanup" in v._status_bar()
+    v._dispatch([KeyEvent("c")])
+    assert "cleanup" not in v._status_bar()
+
+
+def test_status_bar_shows_cleanup_hint_after_over_long_manual_bond():
+    from vimol.viewer import Viewer
+    mol = _far_pair()
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    assert "cleanup" not in v._status_bar()
+    ax, ay = _atom_px(v.widget, 0)
+    bx, by = _atom_px(v.widget, 1)
+    _alt_drag(v.widget, ax, ay, bx, by)
+    assert "cleanup" in v._status_bar()
+
+
+def test_status_bar_no_cleanup_hint_when_not_editable():
+    from vimol.viewer import Viewer
+    mol = _clashy_molecule()
+    v = Viewer(mol, backend="cpu")                    # editable defaults False
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    assert "cleanup" not in v._status_bar()
+
+
 # -- CLI: no-arg default opens the bundled demo -----------------------------
 def test_default_demo_path_resolves_to_bundled_c60():
     path = vimol_app._default_demo_path()

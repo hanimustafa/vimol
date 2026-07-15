@@ -282,7 +282,8 @@ class MoleculeWidget:
 
     def _snapshot(self):
         mol = self.scene.molecule
-        return (list(mol.symbols), mol.positions.copy(), list(mol.bonds), list(mol.manual_bonds))
+        return (list(mol.symbols), mol.positions.copy(), list(mol.bonds),
+                list(mol.manual_bonds), set(mol.new_atoms))
 
     def _commit_undo(self, snapshot) -> None:
         self._undo_stack.append(snapshot)
@@ -301,13 +302,14 @@ class MoleculeWidget:
         # dereferenced by the next drag event.
         if self._bond_anchor is not None:
             self._cancel_bond_gesture()
-        symbols, positions, bonds, manual_bonds = self._undo_stack.pop()
+        symbols, positions, bonds, manual_bonds, new_atoms = self._undo_stack.pop()
         mol = self.scene.molecule
         # restore in place so the Scene keeps referencing the same object
         mol.symbols = list(symbols)
         mol.positions = positions.copy()
         mol.bonds = list(bonds)
         mol.manual_bonds = list(manual_bonds)
+        mol.new_atoms = set(new_atoms)
         self._base_colors = mol.element_colors()
         self.hovered = self.selected = None
         self._refresh_dirty()
@@ -415,6 +417,23 @@ class MoleculeWidget:
                 self._refresh_dirty()
             # else: already a manual bond between this pair -- no-op, no undo entry
         return True
+
+    # -- cleanup ('c') ------------------------------------------------------
+    def cleanup(self) -> bool:
+        """Relax steric clashes / stretched manual bonds. Returns True if
+        anything moved.
+
+        Same snapshot-then-commit-on-change pattern as :meth:`_end_bond_gesture`:
+        the snapshot is taken before mutating, but only pushed to the undo
+        stack if :func:`editor.cleanup` actually changed the geometry.
+        """
+        mol = self.scene.molecule
+        snapshot = self._snapshot()          # taken before mutating
+        if editor.cleanup(mol):
+            self._commit_undo(snapshot)
+            self._refresh_dirty()
+            return True
+        return False
 
     # -- picking ----------------------------------------------------------
     def pick(self, px: float, py: float) -> Optional[int]:
