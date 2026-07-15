@@ -1,7 +1,8 @@
 # 'c' cleanup: relax steric clashes and stretched manual bonds
 
 **Date:** 2026-07-16
-**Status:** Approved
+**Status:** Approved — amended by Revision 2 (see end): editor-intended
+bonds become manual bonds, angle (geometry) springs, animated stepping.
 
 ## Problem
 
@@ -127,3 +128,111 @@ New cases in `tests/test_editing.py`:
   `'c'` does nothing in a read-only viewer; the status-bar hint appears
   when a clash exists, appears after drawing an over-long manual bond,
   and disappears after pressing `c`.
+
+## Revision 2 (2026-07-16, post-review by user)
+
+Three defects in the shipped v1, fixed together:
+
+### 2a. Editor-intended bonds join `manual_bonds`
+
+Editing *knows* the connectivity it creates; that knowledge was thrown
+away. Every bond the editor deliberately makes is now recorded through
+the same store as option-drag bonds:
+
+- `_cap` records `(center_idx, cap_idx)` for every cap it places — it
+  needs the center's index, so its signature gains one (every caller
+  already has it).
+- `birth_molecule`: center ↔ each cap. `_promote_hydrogen`: parent ↔
+  promoted atom, promoted ↔ its caps. `replace_atom`: anchor ↔ each
+  fill hydrogen (the anchor's pre-existing bonds stay perception-owned).
+- Recording appends to `mol.manual_bonds` (normalized `i < j`, deduped)
+  with the op's single existing `_reperceive` picking up the union — do
+  not re-perceive once per bond.
+
+**Consequence — clash detection simplifies and hardens:** a clash pair
+is now simply a perceived bond with at least one endpoint in
+`new_atoms` whose pair is NOT in `manual_bonds`. The
+deviation-from-ideal heuristic (`_CLASH_SLOP`) is deleted — intent is
+now recorded, not inferred, so even an accidental contact at exactly
+ideal length is correctly flagged.
+
+### 2b. Angle springs enforce local geometry
+
+Bond-length springs alone let angles collapse. Add classic 1-3
+(Urey-Bradley) springs, reusing the template registry's geometry:
+
+- For each **center** atom `k` in `new_atoms` ∪ {endpoints of stretched
+  manual bonds}: look up `TEMPLATES.get((symbol(k), n_neighbors(k)))`;
+  no entry (hypervalent, unknown) → skip that center. The ideal angle θ
+  is the angle between the template's first two directions (109.47°
+  tetrahedral, 120° trigonal, 180° linear, etc. — uniform across pairs
+  for every registered template).
+- For each pair of bonded neighbors `(a, b)` of `k`: add a spring
+  between `a` and `b` targeting the law-of-cosines distance
+  `sqrt(La² + Lb² − 2·La·Lb·cosθ)`, where `La`/`Lb` are the bond
+  springs' target lengths for `(k,a)` and `(k,b)`.
+- Angle springs act at **half stiffness** (scale their force by 0.5) —
+  they shape, the bond springs place; halving also keeps the iteration
+  stable for 4-coordinate centers, which gain 3 extra springs per atom.
+- Old, uninvolved centers get no angle springs — loaded geometry is
+  still not ours to judge.
+
+### 2c. The relaxation animates
+
+`c` no longer teleports atoms; the user watches the molecule settle
+(~half a second). The monolithic `editor.cleanup` splits:
+
+- `cleanup_prepare(mol) -> Optional[RelaxState]` — computes targets;
+  None when nothing to fix. `RelaxState` (small dataclass in
+  `editor.py`) carries the fixed spring list (bond + angle, each with
+  target and stiffness) and the per-atom weight vector.
+- `cleanup_advance(mol, state, iterations=4, step=0.15) -> float` —
+  runs a few spring iterations in place, returns the max per-atom
+  displacement of the call (convergence signal).
+- `cleanup_finish(mol)` — `_reperceive` + `new_atoms.clear()`. Bonds
+  are NOT re-perceived mid-animation: the clash bond visibly stretches
+  as the fragments separate and pops off at the end.
+- `cleanup(mol)` stays as the convenience that runs
+  prepare → advance×N → finish (API compat + non-animated tests).
+
+Widget:
+
+- `start_cleanup() -> bool`: snapshot, `cleanup_prepare`; None → False
+  (discard snapshot). Otherwise commit the snapshot to the undo stack
+  immediately (one `u` undoes the whole animation), store the state and
+  a frame budget (~30 frames), return True.
+- `cleanup_active` property; `cleanup_tick() -> bool`: one
+  `cleanup_advance` call per frame; finish (via `cleanup_finish` +
+  `_refresh_dirty`) when the budget runs out or displacement drops
+  below 1e-3, returning False from then on.
+- `undo()` and `set_molecule()` cancel an in-flight animation (drop the
+  state, no finish) — same lifecycle discipline as the bond gesture.
+  A `c` press while an animation is active is ignored.
+
+Viewer: `'c'` calls `start_cleanup()`; the run loop gains an
+autospin-style block — while `widget.cleanup_active`, call
+`cleanup_tick()` each frame, mark `changed`, and refresh
+`_last_interact` so supersampling stays in fast mode during the motion.
+
+### Revision-2 tests
+
+- Intended-bond recording: after `birth_molecule`, center↔cap pairs are
+  in `manual_bonds`; after `grow_at_atom` on an H, parent↔promoted and
+  promoted↔cap pairs are; after `replace_atom` valence fill, anchor↔H
+  pairs are.
+- Hardened clash detection: a new atom placed at *exactly* ideal
+  bonding distance from an unrelated old atom is still flagged (the old
+  slop heuristic would have missed it).
+- Angle enforcement: a deliberately distorted new fragment (e.g. CH4
+  with one H squeezed to ~70° of another) relaxes to within a few
+  degrees of 109.47° after `cleanup`.
+- Animation: `start_cleanup()` returns True and `cleanup_active` is
+  True; repeated `cleanup_tick()` calls produce at least two distinct
+  intermediate position states before returning False; after finish the
+  clash is resolved and `new_atoms` is empty; a single `u` restores the
+  pre-cleanup positions; `undo()` mid-animation cancels it (no further
+  ticks mutate); `start_cleanup()` with nothing to fix returns False and
+  pushes no undo entry.
+- Viewer: `KeyEvent("c")` dispatch starts the animation
+  (`widget.cleanup_active`); the existing hint/read-only tests keep
+  passing.
