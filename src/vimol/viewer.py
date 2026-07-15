@@ -85,7 +85,7 @@ def _help_lines(editable: bool):
 # things: autospin when read-only, append when editable (see _driver_key).
 _BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "\x03"}
 # Extra keys claimed only when editing is enabled.
-_EDIT_DRIVER_KEYS = {"s", "u", "o"}
+_EDIT_DRIVER_KEYS = {"s", "u", "o", "x"}
 
 # Periodic-table picker panel colors.
 _PT_BG = (18, 20, 26)
@@ -179,7 +179,10 @@ class Viewer:
     def _exit(self):
         import termios
         cleanup = kitty.delete_image(self._img_id)
+        # unconditionally clear the crosshair pointer so a quit/kill mid-delete
+        # never leaves the terminal's cursor stuck as one.
         kitty.write_bytes(_input.disable_mouse(pixel=True) + cleanup
+                          + kitty.reset_pointer_shape()
                           + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
         if self._old_termios is not None:
             termios.tcsetattr(self.fd_in, termios.TCSADRAIN, self._old_termios)
@@ -685,6 +688,7 @@ class Viewer:
         mod = " [MODIFIED]" if (self.editable and self.widget.dirty) else ""
         hint = "  s save  q quit" if self.editable else "  q quit"
         show_buttons = self.editable and self.widget.append_mode
+        show_delete = self.editable and self.widget.delete_mode
 
         # Everything from the representation tag onward is a "trailer" built
         # from (escaped, visible_len) pieces and right-anchored via padding
@@ -696,6 +700,8 @@ class Viewer:
         pieces = [(f"[{rep}]", len(rep) + 2), (frame, len(frame)), (spin, len(spin))]
         if show_buttons:
             pieces.append((f"  {base}\x1b[1m✎APPEND\x1b[22m", 9))          # "  ✎APPEND"
+        elif show_delete:
+            pieces.append((f"  {base}\x1b[1m✗DELETE\x1b[22m", 9))          # "  ✗DELETE"
         pieces.append((mod, len(mod)))
         elem_piece_idx = None
         if show_buttons:
@@ -819,10 +825,22 @@ class Viewer:
             return False
         elif key == "a":
             if self.editable:
+                was_delete = self.widget.delete_mode
                 self.widget.set_append_mode(not self.widget.append_mode)
                 self._msg = ""
+                if was_delete:
+                    # switching delete -> append via 'a': drop the crosshair so
+                    # it doesn't linger into append mode.
+                    kitty.write_bytes(kitty.reset_pointer_shape(), self.fd_out)
             else:
                 self.autospin = not self.autospin        # classic binding
+        elif key == "x" and self.editable:
+            self.widget.set_delete_mode(not self.widget.delete_mode)
+            self._msg = ""
+            # arm/disarm the crosshair pointer on every delete-mode transition
+            shape = (kitty.set_pointer_shape("crosshair") if self.widget.delete_mode
+                     else kitty.reset_pointer_shape())
+            kitty.write_bytes(shape, self.fd_out)
         elif key == "o" and self.editable:
             self.autospin = not self.autospin            # relocated while editing
         elif key == "s" and self.editable:

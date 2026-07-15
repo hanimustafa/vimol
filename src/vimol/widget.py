@@ -47,6 +47,7 @@ class MoleculeWidget:
         # editing state -- inert unless the host opts in with editable=True
         self.editable = editable
         self.append_mode = False                # 'a': click to build atoms
+        self.delete_mode = False                # 'x': click to remove atoms
         self.build_element = "C"                # element placed while appending
         self.build_template = None              # chosen geometry/valence; None -> element default
         self.dirty = False                      # True once the model is edited
@@ -155,6 +156,11 @@ class MoleculeWidget:
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
                     return self._edit_at(x, y)
+            elif self.editable and self.delete_mode and was_left and not ev.shift:
+                dx = x - self._press[0]
+                dy = y - self._press[1]
+                if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
+                    return self._delete_at(x, y)
             return False
         if ev.action == "drag" and self._drag_button is not None:
             dx = x - self._last[0]
@@ -212,6 +218,14 @@ class MoleculeWidget:
     def set_append_mode(self, on: bool) -> None:
         # append mode is meaningless (and stays off) unless editing is enabled
         self.append_mode = bool(on) and self.editable
+        if self.append_mode:
+            self.delete_mode = False            # one active build tool at a time
+
+    def set_delete_mode(self, on: bool) -> None:
+        # delete mode is meaningless (and stays off) unless editing is enabled
+        self.delete_mode = bool(on) and self.editable
+        if self.delete_mode:
+            self.append_mode = False            # one active build tool at a time
 
     # -- undo / dirty tracking -------------------------------------------
     def _signature(self):
@@ -281,6 +295,25 @@ class MoleculeWidget:
         self._refresh_dirty()
         return True
 
+    def _delete_at(self, px: float, py: float) -> bool:
+        """Delete the atom under a widget-local pixel. Returns True if one went.
+
+        Unlike :meth:`_edit_at` -- which always mutates -- a delete click can
+        land on empty space, so we pick *first* and bail (no undo snapshot, no
+        mutation) when nothing is under the cursor.
+        """
+        mol = self.scene.molecule
+        idx = self.pick(px, py) if mol.n_atoms else None
+        if idx is None:
+            return False
+        self._push_undo()                       # snapshot for 'u' before mutating
+        editor.delete_atom(mol, idx)
+        # atom count changed: refresh color cache and drop stale hover/selection
+        self._base_colors = mol.element_colors()
+        self.hovered = self.selected = None
+        self._refresh_dirty()
+        return True
+
     # -- picking ----------------------------------------------------------
     def pick(self, px: float, py: float) -> Optional[int]:
         """Return the index of the front-most atom under widget-local pixel
@@ -322,8 +355,10 @@ class MoleculeWidget:
             self.style.color_override = None
             return
         cols = self._base_colors.copy()
-        # brighten + tint the highlighted atom toward yellow
-        cols[hi] = np.clip(cols[hi] * 0.4 + np.array([1.0, 0.95, 0.3]) * 0.9, 0, 1)
+        # brighten + tint the highlighted atom: red in delete mode (a preview of
+        # "this disappears if you click here"), yellow otherwise.
+        tint = np.array([1.0, 0.2, 0.2]) if self.delete_mode else np.array([1.0, 0.95, 0.3])
+        cols[hi] = np.clip(cols[hi] * 0.4 + tint * 0.9, 0, 1)
         self.style.color_override = cols
 
     def render(self) -> np.ndarray:

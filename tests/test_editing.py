@@ -470,6 +470,157 @@ def test_widget_drag_does_not_edit():
     assert w.molecule.n_atoms == 0
 
 
+# -- widget delete mode ----------------------------------------------------
+def test_delete_and_append_modes_are_mutually_exclusive():
+    mol = Molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    assert w.append_mode and not w.delete_mode
+    w.set_delete_mode(True)                    # turning delete on clears append
+    assert w.delete_mode and not w.append_mode
+    w.set_append_mode(True)                    # ...and back the other way
+    assert w.append_mode and not w.delete_mode
+
+
+def test_delete_mode_stays_off_when_not_editable():
+    mol = Molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")   # editable defaults False
+    w.set_delete_mode(True)
+    assert not w.delete_mode
+
+
+def test_widget_delete_mode_click_atom_removes_it_and_is_undoable():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_delete_mode(True)
+    Wr, Hr = w.scene.render_size
+    ss = w.scene.supersample
+    cx, cy = (Wr * 0.5) / ss, (Hr * 0.5) / ss
+    assert w.pick(cx, cy) == 0                  # the lone carbon sits dead center
+    changed = _click(w, cx, cy)
+    assert changed and w.dirty
+    assert w.molecule.n_atoms == 0              # last atom gone (0-atom bookkeeping ok)
+    assert w.undo() and w.molecule.n_atoms == 1 # delete is undoable
+
+
+def test_widget_delete_mode_click_empty_space_is_noop():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # CH4, centered
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_delete_mode(True)
+    assert w.pick(180, 20) is None              # empty corner (precondition)
+    n0 = w.molecule.n_atoms
+    changed = _click(w, 180, 20)
+    assert not changed                          # nothing under the cursor -> no-op
+    assert not w.dirty                          # dirty untouched
+    assert w.molecule.n_atoms == n0
+    assert not w.undo()                         # and no undo snapshot was pushed
+
+
+def test_delete_mode_hover_tints_red_not_yellow():
+    mol = Molecule(symbols=["C", "O"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.hovered = 0
+    w.set_append_mode(True)
+    w._apply_highlight()
+    append_col = w.style.color_override[0].copy()
+    w.set_delete_mode(True)
+    w._apply_highlight()
+    delete_col = w.style.color_override[0]
+    assert delete_col[0] >= delete_col[1]                # red preview, not yellow
+    assert not np.allclose(delete_col, append_col)
+
+
+# -- viewer delete mode ----------------------------------------------------
+def test_viewer_x_toggles_delete_mode_only_when_editable():
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("x")])
+    assert v.widget.delete_mode
+    v._dispatch([KeyEvent("x")])
+    assert not v.widget.delete_mode
+    # read-only viewer: 'x' is not claimed, delete mode never turns on
+    v2 = Viewer(mol, backend="cpu")
+    v2._dispatch([KeyEvent("x")])
+    assert not v2.widget.delete_mode
+
+
+def test_viewer_x_and_a_are_mutually_exclusive_modes():
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("x")])
+    assert v.widget.delete_mode and not v.widget.append_mode
+    v._dispatch([KeyEvent("a")])                 # switch to append via 'a'
+    assert v.widget.append_mode and not v.widget.delete_mode
+
+
+def test_status_bar_shows_delete_badge_when_active():
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    assert "✗DELETE" not in v._status_bar()
+    v._dispatch([KeyEvent("x")])
+    bar = v._status_bar()
+    assert "✗DELETE" in bar
+    assert "adding" not in bar                   # no build pills in delete mode
+
+
+def test_delete_mode_writes_pointer_shape_escapes(monkeypatch):
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    captured = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: captured.extend(data))
+    v._dispatch([KeyEvent("x")])                 # delete on -> crosshair
+    assert kitty.set_pointer_shape("crosshair") in bytes(captured)
+    captured.clear()
+    v._dispatch([KeyEvent("x")])                 # delete off -> reset
+    assert kitty.reset_pointer_shape() in bytes(captured)
+
+
+def test_switching_to_append_via_a_resets_pointer(monkeypatch):
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("x")])                 # delete on
+    captured = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: captured.extend(data))
+    v._dispatch([KeyEvent("a")])                 # crosshair must not linger into append
+    assert kitty.reset_pointer_shape() in bytes(captured)
+
+
+def test_exit_resets_pointer_shape(monkeypatch):
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    captured = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: captured.extend(data))
+    v._exit()                                    # cleanup always un-sets the crosshair
+    assert kitty.reset_pointer_shape() in bytes(captured)
+
+
+def test_pointer_shape_helpers_build_osc22_sequences():
+    from vimol import kitty
+    assert kitty.set_pointer_shape("crosshair") == b"\x1b]22;crosshair\x1b\\"
+    assert kitty.reset_pointer_shape() == b"\x1b]22;\x1b\\"
+
+
 # -- periodic-table layout --------------------------------------------------
 def test_periodic_table_covers_all_118_elements_once():
     seen = set()

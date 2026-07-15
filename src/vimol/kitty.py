@@ -242,6 +242,21 @@ def clear_all_images() -> bytes:
     return _GRAPHICS_START + b"a=d,d=A,q=2;" + _GRAPHICS_END
 
 
+def set_pointer_shape(shape: str) -> bytes:
+    """OSC 22 bytes to set the OS mouse-pointer icon to a CSS-cursor *shape*.
+
+    Kitty-family terminals honor this while focused; others ignore an OSC they
+    don't recognize, so it's safe to write unconditionally (like the mouse-mode
+    sequences). Returns raw bytes for the caller to write.
+    """
+    return f"\x1b]22;{shape}\x1b\\".encode()
+
+
+def reset_pointer_shape() -> bytes:
+    """OSC 22 bytes restoring the terminal's default mouse-pointer shape."""
+    return b"\x1b]22;\x1b\\"
+
+
 def write_bytes(data: bytes, fd: int = 1) -> None:
     os.write(fd, data)
 
