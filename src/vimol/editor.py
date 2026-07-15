@@ -58,6 +58,11 @@ def _cap(mol: Molecule, center: np.ndarray, dirs: np.ndarray,
         mol.add_atom(cap_elem, p[0], p[1], p[2])
 
 
+# Sample density for the fallback direction search: fine enough that the
+# worst-case angular error (~7 deg) is invisible at bond scale, still cheap.
+_FILL_SPHERE_SAMPLES = 256
+
+
 def _fibonacci_sphere(n: int) -> np.ndarray:
     """*n* roughly-evenly distributed unit vectors."""
     i = np.arange(n) + 0.5
@@ -82,7 +87,7 @@ def _fill_directions(existing, n: int) -> np.ndarray:
     for _ in range(n):
         d = templates.free_direction(dirs)
         if dirs and max(float(np.dot(d, e)) for e in dirs) > 0.5:   # cos 60 deg
-            pts = _fibonacci_sphere(256)
+            pts = _fibonacci_sphere(_FILL_SPHERE_SAMPLES)
             worst = (pts @ np.array(dirs).T).max(axis=1)  # closest occupied, per point
             d = pts[int(np.argmin(worst))]
         out.append(d)
@@ -102,8 +107,8 @@ def replace_atom(mol: Molecule, idx: int, element: str = "C",
 
     Returns *idx*.
     """
-    tmpl = template or templates.default_template(element)
     element = elements.normalize_symbol(element)
+    tmpl = template or templates.default_template(element)
     pos = mol.positions[idx].copy()
     neigh = _neighbors(mol, idx)
     mol.symbols[idx] = element

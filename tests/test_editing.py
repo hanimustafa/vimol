@@ -125,7 +125,7 @@ def test_replace_relabels_in_place_hypervalent():
     # CH4 carbon -> N (valence 3): coordination 4 >= 3, so relabel only
     mol = Molecule()
     c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
-    editor.replace_atom(mol, c, "N", templates.TEMPLATES[("N", 3)])
+    assert editor.replace_atom(mol, c, "N", templates.TEMPLATES[("N", 3)]) == c
     assert mol.symbols[c] == "N"
     assert mol.n_atoms == 5                    # nothing added, nothing removed
     np.testing.assert_allclose(mol.positions[c], [0.0, 0.0, 0.0], atol=1e-9)
@@ -183,6 +183,26 @@ def test_replace_lone_atom_caps_fully():
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     editor.replace_atom(mol, 0, "O")
     assert mol.formula() == "H2O"
+
+
+def test_replace_mid_chain_atom_snaps_h_and_keeps_skeleton():
+    # ethane-like: replace one CH3 carbon with N -> heavy C stays, its 3 H snap
+    mol = Molecule()
+    c0 = editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # CH4
+    h = next(i for i, s in enumerate(mol.symbols) if s == "H")
+    c1 = editor.grow_at_atom(mol, h)                          # promote H -> ethane
+    heavy_pos = mol.positions[c0].copy()
+    editor.replace_atom(mol, c1, "N", templates.TEMPLATES[("N", 3)])
+    assert mol.symbols[c1] == "N"
+    np.testing.assert_allclose(mol.positions[c0], heavy_pos, atol=1e-9)  # skeleton pinned
+    nh = elements.covalent_radius("N") + elements.covalent_radius("H")
+    n_pos = mol.positions[c1]
+    snapped = [i for i in range(mol.n_atoms)
+               if mol.symbols[i] == "H"
+               and np.linalg.norm(mol.positions[i] - n_pos) < 1.2]
+    assert len(snapped) == 3                                  # N keeps its 3 H...
+    for i in snapped:
+        assert np.linalg.norm(mol.positions[i] - n_pos) == pytest.approx(nh, abs=1e-6)
 
 
 # -- xyz writer ------------------------------------------------------------
