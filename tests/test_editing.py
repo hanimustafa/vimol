@@ -119,6 +119,71 @@ def test_lone_hydrogen_becomes_methane():
     assert mol.formula() == "CH4"
 
 
+# -- editor: replace --------------------------------------------------------
+def test_replace_relabels_in_place_hypervalent():
+    # CH4 carbon -> N (valence 3): coordination 4 >= 3, so relabel only
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
+    editor.replace_atom(mol, c, "N", templates.TEMPLATES[("N", 3)])
+    assert mol.symbols[c] == "N"
+    assert mol.n_atoms == 5                    # nothing added, nothing removed
+    np.testing.assert_allclose(mol.positions[c], [0.0, 0.0, 0.0], atol=1e-9)
+
+
+def test_replace_snaps_terminal_hydrogens():
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4 at C-H length
+    editor.replace_atom(mol, c, "N", templates.TEMPLATES[("N", 3)])
+    nh = elements.covalent_radius("N") + elements.covalent_radius("H")
+    for h in range(1, 5):
+        assert np.linalg.norm(mol.positions[h] - mol.positions[c]) == pytest.approx(nh, abs=1e-6)
+
+
+def test_replace_keeps_heavy_neighbors_and_fills_valency():
+    # C-C stub; replace atom 0 with O (default: bent, 2 bonds) -> one H added
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    editor.replace_atom(mol, 0, "O")
+    assert mol.symbols[0] == "O"
+    np.testing.assert_allclose(mol.positions[1], [1.52, 0.0, 0.0], atol=1e-9)
+    assert mol.symbols.count("H") == 1
+    oh = elements.covalent_radius("O") + elements.covalent_radius("H")
+    assert np.linalg.norm(mol.positions[2] - mol.positions[0]) == pytest.approx(oh, abs=1e-6)
+
+
+def test_replace_fills_multiple_hydrogens_without_overlap():
+    # water O -> C (valence 4): the 2 existing H snap, 2 more are added
+    mol = Molecule()
+    o = editor.birth_molecule(mol, [0.0, 0.0, 0.0], element="O")   # H2O
+    editor.replace_atom(mol, o, "C")
+    assert mol.formula() == "CH4"
+    ch = elements.covalent_radius("C") + elements.covalent_radius("H")
+    hs = [i for i, s in enumerate(mol.symbols) if s == "H"]
+    for h in hs:
+        assert np.linalg.norm(mol.positions[h] - mol.positions[o]) == pytest.approx(ch, abs=1e-6)
+    # the naive free_direction loop would stack the last two H on top of
+    # each other; no H pair may come close to colliding
+    for i in range(len(hs)):
+        for j in range(i + 1, len(hs)):
+            assert np.linalg.norm(mol.positions[hs[i]] - mol.positions[hs[j]]) > 1.0
+
+
+def test_replace_same_element_repairs_valency():
+    # sp2 CH3 clicked with default (sp3) carbon selected -> gains one H
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0],
+                              template=templates.TEMPLATES[("C", 3)])   # CH3
+    editor.replace_atom(mol, c, "C")
+    assert mol.formula() == "CH4"
+
+
+def test_replace_lone_atom_caps_fully():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    editor.replace_atom(mol, 0, "O")
+    assert mol.formula() == "H2O"
+
+
 # -- xyz writer ------------------------------------------------------------
 def test_xyz_dumps_roundtrip():
     mol = Molecule()

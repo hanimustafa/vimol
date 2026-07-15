@@ -55,6 +55,70 @@ def _cap(mol: Molecule, center: np.ndarray, dirs: np.ndarray,
         mol.add_atom(cap_elem, p[0], p[1], p[2])
 
 
+def _fibonacci_sphere(n: int) -> np.ndarray:
+    """*n* roughly-evenly distributed unit vectors."""
+    i = np.arange(n) + 0.5
+    phi = np.arccos(1.0 - 2.0 * i / n)
+    theta = np.pi * (1.0 + 5.0 ** 0.5) * i
+    return np.stack([np.sin(phi) * np.cos(theta),
+                     np.sin(phi) * np.sin(theta),
+                     np.cos(phi)], axis=1)
+
+
+def _fill_directions(existing, n: int) -> np.ndarray:
+    """Pick *n* unit directions, one at a time, each far from all others.
+
+    ``templates.free_direction`` handles the generic VSEPR-ish case, but it
+    degenerates on symmetric arrangements (it can return a direction that is
+    already occupied). When its answer lies within 60 degrees of an occupied
+    direction we instead take the sphere point maximizing the minimum angle
+    to everything placed so far.
+    """
+    dirs = [templates._normalize(d) for d in existing]
+    out = []
+    for _ in range(n):
+        d = templates.free_direction(dirs)
+        if dirs and max(float(np.dot(d, e)) for e in dirs) > 0.5:   # cos 60 deg
+            pts = _fibonacci_sphere(256)
+            worst = (pts @ np.array(dirs).T).max(axis=1)  # closest occupied, per point
+            d = pts[int(np.argmin(worst))]
+        out.append(d)
+        dirs.append(d)
+    return np.array(out)
+
+
+def replace_atom(mol: Molecule, idx: int, element: str = "C",
+                 template: Optional[AtomTemplate] = None) -> int:
+    """Replace atom *idx* with *element*, keeping it anchored in place.
+
+    The atom is relabeled where it stands. Terminal hydrogen neighbors are
+    snapped to the new element-H bond length along their existing directions;
+    heavy neighbors never move. If coordination is below the template's
+    valence, hydrogens are added on free sites until it is met; excess
+    coordination is left alone (hypervalency is the user's business).
+
+    Returns *idx*.
+    """
+    tmpl = template or templates.default_template(element)
+    element = elements.normalize_symbol(element)
+    pos = mol.positions[idx].copy()
+    neigh = _neighbors(mol, idx)
+    mol.symbols[idx] = element
+    for j in neigh:
+        if mol.symbols[j] == "H" and _neighbors(mol, j) == [idx]:
+            d = templates._normalize(mol.positions[j] - pos)
+            mol.positions[j] = pos + d * _bond_length(element, "H")
+    n_add = tmpl.valence - len(neigh)
+    if n_add > 0:
+        if not neigh:       # lone atom: full template, like birth_molecule
+            _cap(mol, pos, tmpl.free_directions(), element, tmpl.cap)
+        else:
+            existing = [templates._normalize(mol.positions[j] - pos) for j in neigh]
+            _cap(mol, pos, _fill_directions(existing, n_add), element, tmpl.cap)
+    _reperceive(mol)
+    return idx
+
+
 def birth_molecule(mol: Molecule, position, element: str = "C",
                    template: Optional[AtomTemplate] = None) -> int:
     """Create a fresh, fully-capped atom at *position* (e.g. methane).
