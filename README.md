@@ -144,6 +144,7 @@ editing is on, a few keys change meaning from the classic bindings above
 | Action | Keys |
 |---|---|
 | Append / edit | `a` toggles; then click an H → grow, click a heavy atom → replace it, click empty space → new methane |
+| Delete | `x` toggles; then click an atom to remove it (its terminal hydrogens go with it) |
 | Undo | `u` (reverts the last edit) |
 | Save | `s` (prompts for a filename; asks before overwriting an existing file) |
 | Autospin | `o` (relocated from `a` while editing) |
@@ -181,6 +182,16 @@ to dismiss it without changing anything.
   is marked `●`. Pick one with the arrows/mouse + Enter, and subsequent builds
   use that geometry (so an sp² carbon grows a `–CH2`/`=CH` centre instead of a
   full tetrahedron).
+
+Press `x` to toggle **delete** mode (status bar shows `✗DELETE`; on Kitty-family
+terminals the mouse pointer becomes a **crosshair** while it's armed, and the
+atom under the cursor previews in red). A left click then removes the atom it
+lands on — and, if that atom is a heavy one, its own terminal hydrogens go with
+it, so deleting a methyl carbon takes its three H too. Clicking a hydrogen
+directly removes just that hydrogen; clicking empty space does nothing. Deletion
+is a plain erase — a heavy neighbor that loses a bond is left dangling, with no
+hydrogen added to cap it (unlike replace, which tops up valence). `x` and `a`
+are mutually exclusive: arming one disarms the other.
 
 Any edit marks the model `[MODIFIED]`; `u` undoes step by step. Press `s` to
 save — the prompt is pre-filled with the source path, saves straight to a new

@@ -68,7 +68,8 @@ _HELP_EDIT = [
     "  a .................. append (edit)     o .................. autospin",
     "     click H -> grow · heavy atom -> replace · empty space -> new molecule",
     "     click the [ C ] pill -> pick a different element to build",
-    "  s .................. save              u .................. undo",
+    "  x .................. delete            s .................. save",
+    "  u .................. undo",
 ]
 _HELP_TAIL = [
     "  n / p .............. next/prev frame   d .................. depth cue",
