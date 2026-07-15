@@ -138,12 +138,15 @@ host app that puts its own chrome above the molecule and routes the mouse.
 | Depth cue / hi-quality / re-fit / reset | `d` / `g` / `f` / `r` |
 | Help / quit | `?` / `q` or `Esc` |
 
-### Editing (opt-in)
+### Editing
 
-Editing is **off by default** so embedders and read-only viewers keep the
-classic bindings above (`a` = autospin, `s` = cycle style). Turn it on with the
-`--edit` flag (`./main.py --edit mol.xyz`, `mviewer --edit mol.xyz`, or
-`mviewer.view(path, editable=True)`); when enabled, a few keys change meaning:
+`./main.py` — the standalone app — always opens with editing on. Everywhere
+else, editing is **off by default**: the `mviewer` CLI needs `--edit`
+(`mviewer --edit mol.xyz`), and the Python API (`mviewer.view()`, `Viewer`,
+`MoleculeWidget`) needs `editable=True`. That way a host application that
+embeds the widget doesn't inherit these keybindings unless it opts in. When
+editing is on, a few keys change meaning from the classic bindings above
+(`a` = autospin, `s` = cycle style):
 
 | Action | Keys |
 |---|---|
