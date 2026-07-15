@@ -66,7 +66,7 @@ _HELP_VIEW = [
 # Shown only when editing is enabled (--edit).
 _HELP_EDIT = [
     "  a .................. append (edit)     o .................. autospin",
-    "     click atom -> grow · click empty space -> new molecule",
+    "     click H -> grow · heavy atom -> replace · empty space -> new molecule",
     "     click the [ C ] pill -> pick a different element to build",
     "  s .................. save              u .................. undo",
 ]

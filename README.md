@@ -150,7 +150,7 @@ editing is on, a few keys change meaning from the classic bindings above
 
 | Action | Keys |
 |---|---|
-| Append / edit | `a` toggles; then click an atom → grow a carbon, click empty space → new methane |
+| Append / edit | `a` toggles; then click an H → grow, click a heavy atom → replace it, click empty space → new methane |
 | Undo | `u` (reverts the last edit) |
 | Save | `s` (prompts for a filename; asks before overwriting an existing file) |
 | Autospin | `o` (relocated from `a` while editing) |
@@ -158,10 +158,13 @@ editing is on, a few keys change meaning from the classic bindings above
 In **append** mode (status bar shows `✎APPEND`) a left *click* — not a drag,
 which still rotates — builds structure:
 
-- **click an atom** → grow the structure there. Clicking a **hydrogen** promotes
-  it to the element you've selected and caps its freed valences with hydrogens
-  (so an H becomes a `–CH3` by default); clicking a heavier atom attaches a
-  new group at a free site.
+- **click a hydrogen** → grow there: the H is promoted to the element you've
+  selected and its freed valences are capped with hydrogens (so an H becomes
+  a `–CH3` by default).
+- **click a heavier atom** → *replace* it with the selected element/geometry.
+  Terminal hydrogens snap to the new bond length; an under-coordinated atom
+  is topped up with hydrogens to meet the chosen valence, and excess bonds
+  are left alone (hypervalent atoms are yours to make).
 - **click empty space** → a fresh, fully-capped molecule of the selected
   element is born on the plane through the molecule's center (carbon → methane,
   oxygen → water, etc).
