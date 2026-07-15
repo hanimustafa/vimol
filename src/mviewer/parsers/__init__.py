@@ -51,6 +51,31 @@ def load_all(path: str, fmt: str | None = None) -> List[Molecule]:
     return mols
 
 
+_EXT_WRITERS = {
+    ".xyz": _xyz.write,
+}
+
+SAVE_EXTENSIONS = tuple(sorted(_EXT_WRITERS))
+
+
+def save(mol: Molecule, path: str, fmt: str | None = None) -> None:
+    """Write a molecule to *path*, dispatching on extension (or *fmt*).
+
+    Only formats in :data:`SAVE_EXTENSIONS` can be written (currently XYZ); a
+    path with any other extension raises :class:`ValueError`.
+    """
+    if fmt is None:
+        ext = os.path.splitext(path)[1].lower()
+    else:
+        ext = fmt if fmt.startswith(".") else "." + fmt.lower()
+    writer = _EXT_WRITERS.get(ext)
+    if writer is None:
+        raise ValueError(
+            f"Cannot write {ext!r}. Writable formats: {', '.join(SAVE_EXTENSIONS)}"
+        )
+    writer(mol, path)
+
+
 def loads(text: str, fmt: str) -> Molecule:
     """Parse a molecule from an in-memory string given an explicit format."""
     ext = fmt if fmt.startswith(".") else "." + fmt.lower()

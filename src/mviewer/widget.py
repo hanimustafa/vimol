@@ -27,6 +27,7 @@ from .molecule import Molecule
 from .render import Style, _atom_radii
 from .scene import Scene
 from .input import MouseEvent, KeyEvent, Event
+from . import editor
 
 REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
 
@@ -34,7 +35,7 @@ REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
 class MoleculeWidget:
     def __init__(self, molecule: Molecule, width: int = 320, height: int = 240,
                  style: Optional[Style] = None, supersample: int = 1,
-                 picking: bool = True, backend: str = "auto"):
+                 picking: bool = True, backend: str = "auto", editable: bool = False):
         self.style = style or Style()
         self.scene = Scene(molecule, width, height, style=self.style, supersample=supersample,
                            backend=backend)
@@ -43,12 +44,21 @@ class MoleculeWidget:
         self.picking = picking
         self.hovered: Optional[int] = None      # atom index under the cursor
         self.selected: Optional[int] = None     # last clicked atom
+        # editing state -- inert unless the host opts in with editable=True
+        self.editable = editable
+        self.append_mode = False                # 'a': click to build atoms
+        self.build_element = "C"                # element placed while appending
+        self.dirty = False                      # True once the model is edited
+        self._undo_stack: list = []             # snapshots for 'u'
+        self._undo_limit = 200
+        self._saved_sig = self._signature()     # model state considered "on disk"
         # cell metrics used only to convert cell-based events to pixels
         self.cell_w = 9.0
         self.cell_h = 18.0
         self._drag_button: Optional[int] = None
         self._drag_shift = False
         self._last = (0.0, 0.0)
+        self._press = (0.0, 0.0)                 # where the current press started
         self._base_colors = molecule.element_colors()
 
     # -- configuration ----------------------------------------------------
@@ -62,6 +72,9 @@ class MoleculeWidget:
         self.scene.camera.rotation = rot
         self._base_colors = molecule.element_colors()
         self.hovered = self.selected = None
+        self._undo_stack.clear()
+        self._saved_sig = self._signature()
+        self.dirty = False
 
     def set_pixel_size(self, width: int, height: int, refit: bool = False) -> None:
         self.scene.set_size(width, height, refit=refit)
@@ -128,11 +141,19 @@ class MoleculeWidget:
             self._drag_button = ev.button
             self._drag_shift = ev.shift
             self._last = (x, y)
+            self._press = (x, y)
             if self.picking:
                 self.selected = self.pick(x, y)
             return False
         if ev.action == "up":
+            was_left = self._drag_button == 0
             self._drag_button = None
+            # A left click (no meaningful drag) in append mode edits the model.
+            if self.editable and self.append_mode and was_left and not ev.shift:
+                dx = x - self._press[0]
+                dy = y - self._press[1]
+                if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
+                    return self._edit_at(x, y)
             return False
         if ev.action == "drag" and self._drag_button is not None:
             dx = x - self._last[0]
@@ -180,9 +201,82 @@ class MoleculeWidget:
             self.fit(); return True
         if key in ("1", "2", "3", "4"):
             self.set_representation(REPRESENTATIONS[int(key) - 1]); return True
-        if key == "s":
+        if key == "s" and not self.editable:
+            # Without editing, 's' keeps its original meaning (cycle style).
+            # When editable, the host driver claims 's' for Save instead.
             self.cycle_representation(); return True
         return False
+
+    # -- editing ----------------------------------------------------------
+    def set_append_mode(self, on: bool) -> None:
+        # append mode is meaningless (and stays off) unless editing is enabled
+        self.append_mode = bool(on) and self.editable
+
+    # -- undo / dirty tracking -------------------------------------------
+    def _signature(self):
+        """A cheap hashable snapshot of model identity (for the dirty flag)."""
+        mol = self.scene.molecule
+        return (tuple(mol.symbols), mol.positions.tobytes())
+
+    def _refresh_dirty(self) -> None:
+        self.dirty = self._signature() != self._saved_sig
+
+    def mark_saved(self) -> None:
+        """Record the current model as the on-disk state (clears [MODIFIED])."""
+        self._saved_sig = self._signature()
+        self.dirty = False
+
+    def _push_undo(self) -> None:
+        mol = self.scene.molecule
+        self._undo_stack.append((list(mol.symbols), mol.positions.copy(), list(mol.bonds)))
+        if len(self._undo_stack) > self._undo_limit:
+            self._undo_stack.pop(0)
+
+    def undo(self) -> bool:
+        """Revert the most recent edit. Returns True if anything changed."""
+        if not self._undo_stack:
+            return False
+        symbols, positions, bonds = self._undo_stack.pop()
+        mol = self.scene.molecule
+        # restore in place so the Scene keeps referencing the same object
+        mol.symbols = list(symbols)
+        mol.positions = positions.copy()
+        mol.bonds = list(bonds)
+        self._base_colors = mol.element_colors()
+        self.hovered = self.selected = None
+        self._refresh_dirty()
+        return True
+
+    def unproject(self, px: float, py: float) -> np.ndarray:
+        """Widget-local pixel -> world point on the camera's center plane.
+
+        The inverse of the renderer's orthographic projection (see :meth:`pick`),
+        evaluated at view-space depth 0 so a click in empty space lands on the
+        plane through the molecule's center that faces the camera.
+        """
+        cam = self.scene.camera
+        ss = self.scene.supersample
+        rx, ry = px * ss, py * ss
+        Wr, Hr = self.scene.render_size
+        vx = (rx - Wr * 0.5 - cam.pan[0]) / cam.zoom
+        vy = (Hr * 0.5 - cam.pan[1] - ry) / cam.zoom
+        view = np.array([vx, vy, 0.0])
+        return view @ cam.rotation + cam.center
+
+    def _edit_at(self, px: float, py: float) -> bool:
+        """Perform an append edit at a widget-local pixel. Returns True (redraw)."""
+        mol = self.scene.molecule
+        self._push_undo()                       # snapshot for 'u' before mutating
+        idx = self.pick(px, py) if mol.n_atoms else None
+        if idx is not None:
+            editor.grow_at_atom(mol, idx, element=self.build_element)
+        else:
+            editor.birth_molecule(mol, self.unproject(px, py), element=self.build_element)
+        # atom count changed: refresh color cache and drop stale hover/selection
+        self._base_colors = mol.element_colors()
+        self.hovered = self.selected = None
+        self._refresh_dirty()
+        return True
 
     # -- picking ----------------------------------------------------------
     def pick(self, px: float, py: float) -> Optional[int]:

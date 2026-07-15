@@ -48,3 +48,21 @@ def parse(text: str) -> List[Molecule]:
         mols.append(mol)
         i += 2 + count
     return mols
+
+
+def dumps(mol: Molecule) -> str:
+    """Serialize a molecule to XYZ text (single frame).
+
+    The comment line carries the molecule name. Coordinates are written with
+    six decimals, which round-trips through :func:`parse` without drift.
+    """
+    lines = [str(mol.n_atoms), mol.name or ""]
+    for sym, p in zip(mol.symbols, mol.positions):
+        lines.append(f"{sym:<2s} {p[0]:>14.6f} {p[1]:>14.6f} {p[2]:>14.6f}")
+    return "\n".join(lines) + "\n"
+
+
+def write(mol: Molecule, path: str) -> None:
+    """Write a molecule to *path* as XYZ."""
+    with open(path, "w") as fh:
+        fh.write(dumps(mol))

@@ -138,6 +138,40 @@ host app that puts its own chrome above the molecule and routes the mouse.
 | Depth cue / hi-quality / re-fit / reset | `d` / `g` / `f` / `r` |
 | Help / quit | `?` / `q` or `Esc` |
 
+### Editing (opt-in)
+
+Editing is **off by default** so embedders and read-only viewers keep the
+classic bindings above (`a` = autospin, `s` = cycle style). Turn it on with the
+`--edit` flag (`./main.py --edit mol.xyz`, `mviewer --edit mol.xyz`, or
+`mviewer.view(path, editable=True)`); when enabled, a few keys change meaning:
+
+| Action | Keys |
+|---|---|
+| Append / edit | `a` toggles; then click an atom → grow a carbon, click empty space → new methane |
+| Undo | `u` (reverts the last edit) |
+| Save | `s` (prompts for a filename; asks before overwriting an existing file) |
+| Autospin | `o` (relocated from `a` while editing) |
+
+In **append** mode (status bar shows `✎APPEND`) a left *click* — not a drag,
+which still rotates — builds structure:
+
+- **click an atom** → grow the structure there. Clicking a **hydrogen** promotes
+  it to a carbon and caps its freed valences with hydrogens (so an H becomes a
+  `–CH3`); clicking a heavier atom attaches a new methyl at a free site.
+- **click empty space** → a fresh methane is born on the plane through the
+  molecule's center.
+
+The status bar shows what you're placing as colored, button-styled tokens —
+`adding [ C ] [ tetrahedral ]`. (Clicking those buttons to change the element or
+geometry is coming in a later commit; for now they're the visual indicator.)
+
+Any edit marks the model `[MODIFIED]`; `u` undoes step by step. Press `s` to
+save — the prompt is pre-filled with the source path, saves straight to a new
+file, and asks before replacing an existing one. Geometry for each element comes
+from a small template registry (`templates.py`) keyed by element and valence —
+tetrahedral carbon, pyramidal nitrogen, bent oxygen, … — so new templates are a
+one-line addition.
+
 ## Project layout
 
 ```

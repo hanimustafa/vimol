@@ -26,18 +26,20 @@ from .render import Renderer, Style
 from .scene import Scene
 from .widget import MoleculeWidget
 from .input import InputDecoder, MouseEvent, KeyEvent, enable_mouse, disable_mouse
-from .parsers import load, load_all, loads, SUPPORTED_EXTENSIONS
+from .parsers import load, load_all, loads, save, SUPPORTED_EXTENSIONS, SAVE_EXTENSIONS
 from .bonds import perceive_bonds, ensure_bonds
 from . import kitty
 from . import elements
+from . import templates
+from . import editor
 
 __version__ = "0.1.0"
 
 __all__ = [
     "Molecule", "VectorField", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
     "InputDecoder", "MouseEvent", "KeyEvent", "enable_mouse", "disable_mouse",
-    "load", "load_all", "loads", "SUPPORTED_EXTENSIONS",
-    "perceive_bonds", "ensure_bonds", "kitty", "elements",
+    "load", "load_all", "loads", "save", "SUPPORTED_EXTENSIONS", "SAVE_EXTENSIONS",
+    "perceive_bonds", "ensure_bonds", "kitty", "elements", "templates", "editor",
     "view", "__version__",
 ]
 
@@ -52,6 +54,7 @@ def view(molecule_or_path, **kwargs):
 
     if isinstance(molecule_or_path, str):
         mol = load(molecule_or_path)
+        kwargs.setdefault("source_path", molecule_or_path)
     else:
         mol = molecule_or_path
     ensure_bonds(mol)

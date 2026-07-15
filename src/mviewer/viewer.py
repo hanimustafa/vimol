@@ -20,6 +20,8 @@ from .widget import MoleculeWidget, REPRESENTATIONS
 from .bonds import ensure_bonds
 from . import kitty
 from . import input as _input
+from . import elements
+from . import templates
 
 # ANSI / terminal control -------------------------------------------------
 _ALT_SCREEN_ON = b"\x1b[?1049h"
@@ -29,29 +31,51 @@ _SHOW_CURSOR = b"\x1b[?25h"
 _CLEAR = b"\x1b[2J"
 _HOME = b"\x1b[H"
 
-HELP_LINES = [
+_HELP_HEAD = [
     "  mviewer — terminal molecular viewer",
     "",
     "  Mouse drag ......... rotate            Wheel / + - ........ zoom",
     "  Right / mid drag ... pan               [ / ] .............. roll",
     "  Hover .............. identify atom      Arrows / h j k l ... rotate",
     "  1 2 3 4 ............ ball / space / licorice / wire",
+]
+# Shown only when editing is disabled (the classic bindings).
+_HELP_VIEW = [
     "  s .................. cycle style       a .................. autospin",
+]
+# Shown only when editing is enabled (--edit).
+_HELP_EDIT = [
+    "  a .................. append (edit)     o .................. autospin",
+    "     click atom -> grow C · click empty space -> new methane",
+    "  s .................. save              u .................. undo",
+]
+_HELP_TAIL = [
     "  n / p .............. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
     "  f / r / z .......... re-fit / reset    ? .................. toggle help",
     "  q / Esc ............ quit",
 ]
 
-_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "\x03"}
+
+def _help_lines(editable: bool):
+    return _HELP_HEAD + (_HELP_EDIT if editable else _HELP_VIEW) + _HELP_TAIL
+
+# Keys the driver always claims. 'a' is here in both modes but means different
+# things: autospin when read-only, append when editable (see _driver_key).
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "\x03"}
+# Extra keys claimed only when editing is enabled.
+_EDIT_DRIVER_KEYS = {"s", "u", "o"}
 
 
 class Viewer:
     def __init__(self, molecule: Molecule, frames: Optional[List[Molecule]] = None,
                  style: Optional[Style] = None, fd_in: int = 0, fd_out: int = 1,
                  autospin: bool = False, target_fps: float = 60.0, picking: bool = True,
-                 transparent: bool = True, backend: str = "auto"):
+                 transparent: bool = True, backend: str = "auto",
+                 source_path: Optional[str] = None, editable: bool = False):
         self.frames = frames or [molecule]
+        self.source_path = source_path
+        self.editable = editable
         for m in self.frames:
             ensure_bonds(m)
         self.frame_index = 0
@@ -65,7 +89,14 @@ class Viewer:
         self.target_fps = target_fps
 
         self.widget = MoleculeWidget(self.frames[0], 320, 240, style=self.style,
-                                     supersample=1, picking=picking, backend=backend)
+                                     supersample=1, picking=picking, backend=backend,
+                                     editable=editable)
+        # Editing keys ('a' append, 's' save, 'u' undo, 'o' autospin) are only
+        # bound when editing is enabled; otherwise 'a' keeps its classic meaning
+        # (autospin) and 's' falls through to the widget (cycle representation).
+        self._driver_keys = set(_BASE_DRIVER_KEYS)
+        if editable:
+            self._driver_keys |= _EDIT_DRIVER_KEYS
         self.decoder = _input.InputDecoder(pixel=False)
         self._max_ss = 2
         self._drawn_ss = None   # supersample of the last frame actually drawn
@@ -76,6 +107,10 @@ class Viewer:
 
         self._running = False
         self._show_help = False
+        # modal save prompt: "normal" | "save_input" | "save_confirm"
+        self._mode = "normal"
+        self._input_buf = ""
+        self._msg = ""                   # transient status message (e.g. "saved foo.xyz")
         self._last_interact = 0.0
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
@@ -153,23 +188,64 @@ class Viewer:
 
     def _draw_help(self):
         out = bytearray()
-        for k, line in enumerate(HELP_LINES):
+        for k, line in enumerate(_help_lines(self.editable)):
             out += b"\x1b[%d;3H" % (2 + k)
             out += b"\x1b[48;2;20;22;30m\x1b[38;2;220;220;230m"
             out += (" " + line.ljust(58)).encode()
             out += b"\x1b[0m"
         kitty.write_bytes(bytes(out), self.fd_out)
 
+    @staticmethod
+    def _pill(label: str, bg, fg=None) -> str:
+        """A padded, bold, reverse-video 'button' -- a clickable-looking pill.
+
+        Clicking these isn't wired yet: this commit only makes them *look* like
+        buttons (colored, pressable). A later commit turns a click on one into a
+        change of the active element / geometry.
+        """
+        r, g, b = (int(c * 255) if c <= 1 else int(c) for c in bg)
+        if fg is None:
+            lum = 0.299 * r + 0.587 * g + 0.114 * b       # pick readable text
+            fg = (10, 12, 14) if lum > 140 else (245, 246, 250)
+        fr, fg_, fb = fg
+        return (f"\x1b[48;2;{r};{g};{b}m\x1b[38;2;{fr};{fg_};{fb}m\x1b[1m"
+                f" {label} \x1b[22m\x1b[0m")
+
+    def _edit_buttons(self) -> str:
+        """'adding [ C ] [ tetrahedral ]' with each token as a colored button."""
+        elem = self.widget.build_element
+        geom = templates.default_template(elem).geometry
+        elem_btn = self._pill(elem, elements.element_color(elem))
+        geom_btn = self._pill(geom, (0.17, 0.71, 0.63))       # teal accent
+        return f"\x1b[38;2;150;155;170madding\x1b[0m {elem_btn} {geom_btn}"
+
     def _status_bar(self) -> str:
+        if self._mode == "save_input":
+            body = f" Save to: {self._input_buf}█   Enter save · Esc cancel "
+            return f"\x1b[48;2;44;40;30m\x1b[38;2;240;236;220m{body}\x1b[0m"
+        if self._mode == "save_confirm":
+            name = os.path.basename(self._input_buf.strip())
+            body = f" {name} exists — replace? (y/n) "
+            return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
         mol = self.widget.molecule
         hov = self.widget.atom_info(self.widget.hovered)
-        left = hov if hov else f"{(mol.name or 'molecule')[:22]}  {mol.formula()}  {mol.n_atoms} atoms"
+        left = hov if hov else (self._msg or
+            f"{(mol.name or 'molecule')[:22]}  {mol.formula()}  {mol.n_atoms} atoms")
         rep = self.style.representation
         frame = f"  {self.frame_index+1}/{len(self.frames)}" if len(self.frames) > 1 else ""
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
         backend = "gpu" if self.widget.scene.backend == "gl" else "cpu"
-        seg = f"\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m {left}  [{rep}]{frame}{spin} q{self.widget.scene.supersample}x{px}  [{backend}]  ? help  q quit "
+        base = "\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m"
+        # editing-only status: [MODIFIED] flag, APPEND indicator, and the
+        # (button-styled) active build element / geometry.
+        mod = " [MODIFIED]" if (self.editable and self.widget.dirty) else ""
+        hint = "  s save  q quit" if self.editable else "  q quit"
+        buttons = ""
+        if self.editable and self.widget.append_mode:
+            buttons = f"  {self._edit_buttons()}{base}"
+        append = f"  {base}\x1b[1m✎APPEND\x1b[22m" if (self.editable and self.widget.append_mode) else ""
+        seg = f"{base} {left}  [{rep}]{frame}{spin}{append}{mod}{buttons} q{self.widget.scene.supersample}x{px}  [{backend}]  ? help{hint} "
         return seg + "\x1b[0m"
 
     # -- input ------------------------------------------------------------
@@ -195,12 +271,19 @@ class Viewer:
         frame should be redrawn."""
         changed = False
         for ev in events:
-            if isinstance(ev, _input.KeyEvent) and ev.key in _DRIVER_KEYS:
+            if self._mode != "normal":
+                # While the save prompt is up, keystrokes drive it and mouse
+                # events are swallowed (no accidental rotate mid-save).
+                if isinstance(ev, _input.KeyEvent) and self._handle_prompt_key(ev.key):
+                    changed = True
+                continue
+            if isinstance(ev, _input.KeyEvent) and ev.key in self._driver_keys:
                 if self._driver_key(ev.key):
                     changed = True
             else:
                 if self.widget.handle_event(ev):
                     self._last_interact = time.time()
+                    self._msg = ""          # a fresh interaction clears "saved …"
                     changed = True
         return changed
 
@@ -210,7 +293,17 @@ class Viewer:
             self._running = False
             return False
         elif key == "a":
-            self.autospin = not self.autospin
+            if self.editable:
+                self.widget.set_append_mode(not self.widget.append_mode)
+                self._msg = ""
+            else:
+                self.autospin = not self.autospin        # classic binding
+        elif key == "o" and self.editable:
+            self.autospin = not self.autospin            # relocated while editing
+        elif key == "s" and self.editable:
+            self._open_save_prompt()
+        elif key == "u" and self.editable:
+            return self.widget.undo()
         elif key == "?":
             self._show_help = not self._show_help
             if not self._show_help:
@@ -232,6 +325,63 @@ class Viewer:
         else:
             return False
         return True
+
+    # -- save prompt ------------------------------------------------------
+    def _default_save_path(self) -> str:
+        if self.source_path:
+            return self.source_path
+        name = (self.widget.molecule.name or "molecule").strip() or "molecule"
+        return f"{name}.xyz"
+
+    def _open_save_prompt(self) -> None:
+        self._mode = "save_input"
+        self._input_buf = self._default_save_path()
+        self._msg = ""
+
+    def _handle_prompt_key(self, key: str) -> bool:
+        """Drive the modal save prompt. Returns True if the display changed."""
+        if self._mode == "save_input":
+            if key == "enter":
+                path = self._input_buf.strip()
+                if not path:
+                    return False
+                if os.path.exists(path):
+                    self._mode = "save_confirm"   # ask before clobbering
+                else:
+                    self._do_save(path)
+                return True
+            if key in ("escape", "\x03"):
+                self._mode = "normal"
+                self._msg = ""
+                return True
+            if key == "backspace":
+                self._input_buf = self._input_buf[:-1]
+                return True
+            if len(key) == 1 and key.isprintable():
+                self._input_buf += key
+                return True
+            return False
+        if self._mode == "save_confirm":
+            if key in ("y", "Y", "enter"):
+                self._do_save(self._input_buf.strip())
+                return True
+            if key in ("n", "N", "escape", "\x03"):
+                self._mode = "save_input"       # back to editing the name
+                return True
+            return False
+        return False
+
+    def _do_save(self, path: str) -> None:
+        from .parsers import save
+        try:
+            save(self.widget.molecule, path)
+        except (OSError, ValueError) as e:
+            self._msg = f"save failed: {e}"
+        else:
+            self.source_path = path
+            self.widget.mark_saved()
+            self._msg = f"saved {os.path.basename(path)}"
+        self._mode = "normal"
 
     # -- main loop --------------------------------------------------------
     def run(self):
