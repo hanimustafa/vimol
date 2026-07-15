@@ -146,6 +146,7 @@ editing is on, a few keys change meaning from the classic bindings above
 | Append / edit | `a` toggles; then click an H → grow, click a heavy atom → replace it, click empty space → new methane |
 | Delete | `x` toggles; then click an atom to remove it (its terminal hydrogens go with it) |
 | Manual bond | option/alt-drag from one atom to another — draws a bond kept even beyond the auto-perception distance |
+| Cleanup | `c` — relaxes steric clashes and stretched manual bonds |
 | Undo | `u` (reverts the last edit) |
 | Save | `s` (prompts for a filename; asks before overwriting an existing file) |
 | Autospin | `o` (relocated from `a` while editing) |
@@ -193,6 +194,15 @@ directly removes just that hydrogen; clicking empty space does nothing. Deletion
 is a plain erase — a heavy neighbor that loses a bond is left dangling, with no
 hydrogen added to cap it (unlike replace, which tops up valence). `x` and `a`
 are mutually exclusive: arming one disarms the other.
+
+Bond perception is distance-based, so freshly-built atoms can appear "bonded"
+to whatever they merely landed near, and an option-drag manual bond can be
+far longer than a real one. Press `c` to **cleanup**: it relaxes those two
+cases with a simple spring — pushing steric-clash bonds apart until the false
+bond disappears, and pulling over-long manual bonds toward a real bond
+length — moving the atoms you just placed far more than the rest of the
+structure. The status bar hints `⚠ c cleanup` whenever there's something for
+it to fix, and it's undoable like any other edit.
 
 Any edit marks the model `[MODIFIED]`; `u` undoes step by step. Press `s` to
 save — the prompt is pre-filled with the source path, saves straight to a new
