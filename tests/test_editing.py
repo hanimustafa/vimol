@@ -16,6 +16,7 @@ from vimol.parsers import xyz as xyz_parser
 from vimol.parsers import save, loads
 from vimol.widget import MoleculeWidget
 from vimol.input import MouseEvent, KeyEvent
+from vimol import app as vimol_app
 
 EX = os.path.join(os.path.dirname(__file__), "..", "examples")
 
@@ -854,3 +855,19 @@ def test_picking_new_element_resets_geometry_to_its_default():
     assert v.widget.build_element == "O"
     assert v.widget.build_template is None            # reset to default
     assert v._active_template().geometry == "bent"    # O's default
+
+
+# -- CLI: no-arg default opens the bundled demo -----------------------------
+def test_default_demo_path_resolves_to_bundled_c60():
+    path = vimol_app._default_demo_path()
+    assert path is not None and os.path.exists(path)
+    assert os.path.basename(path) == "c60.xyz"
+
+
+def test_cli_with_no_file_uses_demo_default_not_help(capsys):
+    # non-tty stdout (pytest) means it can't actually open the interactive
+    # viewer -- it should get as far as trying to (exit 4), not fall back to
+    # --help (exit 1), proving args.file was filled in with the demo path.
+    rc = vimol_app.main([])
+    assert rc == 4
+    assert "usage:" not in capsys.readouterr().out

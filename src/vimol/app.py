@@ -1,5 +1,6 @@
 """Command-line driver for vimol.
 
+    vimol                           # opens the bundled C60 demo (checkout only)
     vimol file.pdb                 # interactive viewer (opens editable: a=append)
     vimol file.xyz --spin          # autospinning
     vimol file.mol --render out.png --size 800x800
@@ -11,7 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
 from .parsers import load_all, SUPPORTED_EXTENSIONS
 from .bonds import ensure_bonds
@@ -104,6 +105,18 @@ def _print_info(mol: Molecule):
     print("composition: " + ", ".join(f"{k}:{v}" for k, v in sorted(comp.items())))
 
 
+def _default_demo_path() -> Optional[str]:
+    """Path to the bundled C60 demo, for `vimol` with no file argument.
+
+    Only resolvable from a checkout or editable install -- `examples/` sits
+    next to `src/`, not inside the installed package -- so a plain `vimol`
+    still falls back to --help rather than crashing on a real install.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "examples", "c60.xyz")
+    return path if os.path.exists(path) else None
+
+
 def main(argv: List[str] | None = None) -> int:
     args = make_parser().parse_args(argv)
 
@@ -115,8 +128,10 @@ def main(argv: List[str] | None = None) -> int:
         print("Supported formats: " + ", ".join(SUPPORTED_EXTENSIONS))
         return 0
     if not args.file:
-        make_parser().print_help()
-        return 1
+        args.file = _default_demo_path()
+        if not args.file:
+            make_parser().print_help()
+            return 1
     if not os.path.exists(args.file):
         print(f"error: no such file: {args.file}", file=sys.stderr)
         return 2

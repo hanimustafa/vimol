@@ -16,7 +16,7 @@ It is built as **two layers**:
   default, and also handles batch rendering (stills, styles, PNG).
 
 ```
-vimol examples/c60.xyz                         # full-screen, editable, drag to rotate
+vimol                                           # opens the bundled C60 demo (checkout only)
 vimol examples/benzene.xyz --spin --style spacefill
 vimol protein.pdb --render out.png --size 1200x900
 ```
