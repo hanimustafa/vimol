@@ -154,6 +154,11 @@ class MoleculeWidget:
             self.zoom(self.zoom_step if ev.scroll == "up" else 1 / self.zoom_step)
             return True
         if ev.action == "down":
+            # A fresh press while a bond gesture is still live means its 'up'
+            # was lost (focus change, dropped event): tear the stale gesture
+            # down so its preview arrow can't be orphaned in vector_fields.
+            if self._bond_anchor is not None:
+                self._cancel_bond_gesture()
             if ev.button == 0 and ev.alt and self.editable:
                 idx = self.pick(x, y) if self.molecule.n_atoms else None
                 if idx is not None:
@@ -291,6 +296,11 @@ class MoleculeWidget:
         """Revert the most recent edit. Returns True if anything changed."""
         if not self._undo_stack:
             return False
+        # Undo can shrink the molecule under a live bond gesture; cancel it
+        # (removing its preview arrow too) so a stale anchor index can't be
+        # dereferenced by the next drag event.
+        if self._bond_anchor is not None:
+            self._cancel_bond_gesture()
         symbols, positions, bonds, manual_bonds = self._undo_stack.pop()
         mol = self.scene.molecule
         # restore in place so the Scene keeps referencing the same object
@@ -369,6 +379,11 @@ class MoleculeWidget:
         anchor = self._bond_anchor
         target = self.unproject(px, py)
         self._bond_field.vectors[anchor] = target - mol.positions[anchor]
+
+    def _cancel_bond_gesture(self) -> None:
+        """Abort an in-flight bond gesture: drop the preview, clear the anchor."""
+        self._remove_bond_preview()
+        self._bond_anchor = None
 
     def _remove_bond_preview(self) -> None:
         """Drop exactly the widget's own preview field; never touch user fields.

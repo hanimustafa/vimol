@@ -628,6 +628,45 @@ def test_widget_alt_drag_preview_removal_ignores_other_vector_fields():
     assert mol.vector_fields[0].vectors[0, 0] == pytest.approx(1.0)
 
 
+def test_widget_undo_mid_gesture_cancels_it_and_removes_preview():
+    # undo() can shrink the molecule under a live gesture; a stale anchor
+    # index must not survive into the next drag event (IndexError), and the
+    # preview arrow must not leak into the restored state's vector_fields.
+    mol = _far_pair()                                # 2 atoms
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    _click(w, 5, 5)                                  # empty corner -> +CH4, 7 atoms
+    assert w.molecule.n_atoms == 7
+    ax, ay = _atom_px(w, 5)
+    w.handle_event(MouseEvent("down", ax, ay, button=0, alt=True, pixel=True))
+    assert w._bond_anchor == 5
+    assert w.undo()                                  # back to 2 atoms mid-gesture
+    assert w.molecule.n_atoms == 2
+    assert w._bond_anchor is None                    # gesture cancelled
+    assert w.molecule.vector_fields == []            # preview did not leak
+    # the drag that used to crash with IndexError is now a plain no-op drag
+    w.handle_event(MouseEvent("drag", 50, 50, button=0, alt=True, pixel=True))
+    w.handle_event(MouseEvent("up", 50, 50, button=0, alt=True, pixel=True))
+    assert w.molecule.manual_bonds == []
+
+
+def test_widget_second_alt_down_mid_gesture_does_not_leak_preview():
+    # a missed 'up' (focus loss, dropped event) leaves a gesture live; the
+    # next alt+down must tear the old preview down, not orphan it.
+    mol = _far_pair()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    bx, by = _atom_px(w, 1)
+    w.handle_event(MouseEvent("down", ax, ay, button=0, alt=True, pixel=True))
+    w.handle_event(MouseEvent("down", bx, by, button=0, alt=True, pixel=True))
+    assert len(mol.vector_fields) == 1               # one preview, not two
+    assert w._bond_anchor == 1                       # the newer gesture won
+    assert w.pick(5, 5) is None
+    w.handle_event(MouseEvent("up", 5, 5, button=0, alt=True, pixel=True))
+    assert mol.vector_fields == []                   # nothing orphaned
+    assert w._bond_anchor is None
+
+
 def test_widget_alt_down_over_empty_space_behaves_as_normal_press():
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
