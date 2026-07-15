@@ -371,11 +371,19 @@ class MoleculeWidget:
         self._bond_field.vectors[anchor] = target - mol.positions[anchor]
 
     def _remove_bond_preview(self) -> None:
-        """Drop exactly the widget's own preview field; never touch user fields."""
+        """Drop exactly the widget's own preview field; never touch user fields.
+
+        Uses identity (``is``), not ``in``/``==`` -- :class:`VectorField` is a
+        dataclass holding a numpy array, so its generated ``__eq__`` raises on
+        an ambiguous truth value as soon as it's compared against any *other*
+        field with more than one vector.
+        """
         if self._bond_field is not None:
             fields = self.scene.molecule.vector_fields
-            if self._bond_field in fields:
-                fields.remove(self._bond_field)
+            for i, f in enumerate(fields):
+                if f is self._bond_field:
+                    del fields[i]
+                    break
             self._bond_field = None
 
     def _end_bond_gesture(self, px: float, py: float) -> bool:

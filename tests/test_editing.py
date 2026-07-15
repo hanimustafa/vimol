@@ -613,6 +613,21 @@ def test_widget_alt_drag_preview_field_appears_and_disappears():
     assert len(mol.vector_fields) == 0           # preview removed after release
 
 
+def test_widget_alt_drag_preview_removal_ignores_other_vector_fields():
+    # a pre-existing user vector field (e.g. dipole arrows) sits in the list
+    # ahead of the gesture's own preview; removal must use identity, not
+    # dataclass equality (which would raise on numpy array comparison).
+    mol = _far_pair()
+    mol.add_vector_field(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    bx, by = _atom_px(w, 1)
+    changed = _alt_drag(w, ax, ay, bx, by)
+    assert changed
+    assert len(mol.vector_fields) == 1               # only the user field remains
+    assert mol.vector_fields[0].vectors[0, 0] == pytest.approx(1.0)
+
+
 def test_widget_alt_down_over_empty_space_behaves_as_normal_press():
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
