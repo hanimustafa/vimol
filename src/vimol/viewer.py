@@ -144,8 +144,10 @@ class Viewer:
 
         self._running = False
         self._show_help = False
-        # modal state: "normal" | "save_input" | "save_confirm" | "periodic_table"
+        # modal state: "normal" | "save_input" | "save_confirm" |
+        # "quit_confirm" | "periodic_table" | "geometry_picker"
         self._mode = "normal"
+        self._quit_after_save = False    # ESC-quit routed through the save prompt
         self._input_buf = ""
         self._msg = ""                   # transient status message (e.g. "saved foo.xyz")
         # periodic-table picker: cursor position (row, col) into periodic_table.GRID
@@ -700,6 +702,9 @@ class Viewer:
             name = os.path.basename(self._input_buf.strip())
             body = f" {name} exists — replace? (y/n) "
             return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
+        if self._mode == "quit_confirm":
+            body = " unsaved changes — save before quitting? (y/n/Esc) "
+            return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
         mol = self.widget.molecule
         hov = self.widget.atom_info(self.widget.hovered)
         # a live measurement readout (2+ picks in measure mode) outranks the
@@ -870,7 +875,12 @@ class Viewer:
 
     def _driver_key(self, key: str) -> bool:
         """Handle a driver-level key; return True if it changed the view."""
-        if key in ("q", "escape", "\x03"):
+        if key == "escape" and self.editable and self.widget.dirty:
+            # Unsaved changes: ask before quitting. 'q' and Ctrl-C stay
+            # immediate quits (deliberate force-quit / emergency paths).
+            self._mode = "quit_confirm"
+            return True
+        elif key in ("q", "escape", "\x03"):
             self._running = False
             return False
         elif key == "a":
@@ -956,6 +966,10 @@ class Viewer:
             if key in ("escape", "\x03"):
                 self._mode = "normal"
                 self._msg = ""
+                # bailing out of the filename prompt cancels a pending
+                # quit-after-save entirely: a cancelled save must never fall
+                # through to "quit anyway, discarding changes".
+                self._quit_after_save = False
                 return True
             if key == "backspace":
                 self._input_buf = self._input_buf[:-1]
@@ -972,6 +986,18 @@ class Viewer:
                 self._mode = "save_input"       # back to editing the name
                 return True
             return False
+        if self._mode == "quit_confirm":
+            if key in ("y", "Y", "enter"):
+                self._quit_after_save = True    # a successful save then quits
+                self._open_save_prompt()
+                return True
+            if key in ("n", "N"):
+                self._running = False           # quit without saving
+                return True
+            if key in ("escape", "\x03"):
+                self._mode = "normal"           # cancel the quit, keep working
+                return True
+            return False
         return False
 
     def _do_save(self, path: str) -> None:
@@ -980,10 +1006,14 @@ class Viewer:
             save(self.widget.molecule, path)
         except (OSError, ValueError) as e:
             self._msg = f"save failed: {e}"
+            self._quit_after_save = False       # a failed save stays running
         else:
             self.source_path = path
             self.widget.mark_saved()
             self._msg = f"saved {os.path.basename(path)}"
+            if self._quit_after_save:           # ESC-quit routed through save
+                self._quit_after_save = False
+                self._running = False
         self._mode = "normal"
 
     # -- main loop --------------------------------------------------------

@@ -210,7 +210,9 @@ like any other edit.
 
 Any edit marks the model `[MODIFIED]`; `u` undoes step by step. Press `s` to
 save — the prompt is pre-filled with the source path, saves straight to a new
-file, and asks before replacing an existing one. Geometry for each element comes
+file, and asks before replacing an existing one. Pressing `Esc` with unsaved
+changes asks `save before quitting? (y/n/Esc)` instead of quitting silently
+(`q` stays an immediate quit). Geometry for each element comes
 from a small template registry (`templates.py`) keyed by element and valence —
 tetrahedral carbon, pyramidal nitrogen, bent oxygen, … — so new templates are a
 one-line addition.

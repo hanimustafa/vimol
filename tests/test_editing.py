@@ -844,6 +844,92 @@ def test_save_prompt_escape_cancels(tmp_path):
     assert v.widget.dirty                 # cancel leaves the model dirty
 
 
+# -- ESC quit-save prompt ----------------------------------------------------
+def test_escape_with_dirty_model_prompts_instead_of_quitting(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    v.widget.dirty = True
+    v._dispatch([KeyEvent("escape")])
+    assert v._mode == "quit_confirm"
+    assert v._running                        # still alive, waiting for y/n/Esc
+
+
+def test_quit_confirm_n_quits_without_saving(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    v.widget.dirty = True
+    v._dispatch([KeyEvent("escape")])
+    v._dispatch([KeyEvent("n")])
+    assert not v._running
+
+
+def test_quit_confirm_escape_cancels_the_quit(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    v.widget.dirty = True
+    v._dispatch([KeyEvent("escape")])
+    v._dispatch([KeyEvent("escape")])
+    assert v._mode == "normal"
+    assert v._running
+    assert v.widget.dirty                    # cancel changes nothing
+
+
+def test_quit_confirm_y_saves_then_quits(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    v.widget.dirty = True
+    v._dispatch([KeyEvent("escape")])
+    v._dispatch([KeyEvent("y")])
+    assert v._mode == "save_input"           # existing filename prompt, prefilled
+    target = tmp_path / "quit-save.xyz"
+    v._input_buf = str(target)
+    v._handle_prompt_key("enter")
+    assert target.exists()
+    assert not v._running                    # saved -> quit
+
+
+def test_escape_inside_save_prompt_cancels_the_quit_entirely(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    v.widget.dirty = True
+    v._dispatch([KeyEvent("escape")])
+    v._dispatch([KeyEvent("y")])
+    v._handle_prompt_key("escape")           # bail out of the filename prompt
+    assert v._mode == "normal"
+    assert v._running                        # a cancelled save NEVER quits
+    assert v.widget.dirty
+    # ...and a later ordinary save must not quit either (flag was cleared)
+    v._open_save_prompt()
+    v._input_buf = str(tmp_path / "later.xyz")
+    v._handle_prompt_key("enter")
+    assert v._running
+
+
+def test_escape_with_clean_model_quits_immediately(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    assert not v.widget.dirty
+    v._dispatch([KeyEvent("escape")])
+    assert not v._running
+
+
+def test_escape_in_readonly_viewer_quits_immediately():
+    from vimol.viewer import Viewer
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, backend="cpu")           # editable=False
+    v._running = True
+    v._dispatch([KeyEvent("escape")])
+    assert not v._running
+
+
+def test_q_with_dirty_model_still_quits_immediately(tmp_path):
+    v = _new_viewer(tmp_path)
+    v._running = True
+    v.widget.dirty = True
+    v._dispatch([KeyEvent("q")])
+    assert not v._running                    # 'q' stays the force-quit path
+
+
 def test_viewer_dispatch_routes_edit_keys(tmp_path):
     from vimol.viewer import Viewer
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
