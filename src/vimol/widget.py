@@ -127,9 +127,11 @@ class MoleculeWidget:
         self.scene.camera.orbit(dx_px, dy_px, speed=self.rotate_speed)
 
     def pan(self, dx_px: float, dy_px: float) -> None:
-        ss = self.scene.supersample
+        # widget px -> render-buffer px (supersample * render_scale), so the
+        # molecule tracks the cursor 1:1 even mid dynamic-resolution drag.
+        f = self.scene.render_size[0] / max(self.scene.width, 1)
         # screen y is down; move the molecule with the cursor
-        self.scene.camera.pan_by(dx_px * ss, -dy_px * ss)
+        self.scene.camera.pan_by(dx_px * f, -dy_px * f)
 
     def zoom(self, factor: float) -> None:
         self.scene.camera.zoom_by(factor)
@@ -359,9 +361,12 @@ class MoleculeWidget:
         plane through the molecule's center that faces the camera.
         """
         cam = self.scene.camera
-        ss = self.scene.supersample
-        rx, ry = px * ss, py * ss
         Wr, Hr = self.scene.render_size
+        # widget-local px -> render-buffer px via the true buffer ratio:
+        # this is supersample * render_scale (dynamic resolution), not
+        # supersample alone.
+        rx = px * (Wr / max(self.scene.width, 1))
+        ry = py * (Hr / max(self.scene.height, 1))
         vx = (rx - Wr * 0.5 - cam.pan[0]) / cam.zoom
         vy = (Hr * 0.5 - cam.pan[1] - ry) / cam.zoom
         view = np.array([vx, vy, 0.0])
@@ -548,9 +553,12 @@ class MoleculeWidget:
         if mol.n_atoms == 0:
             return None
         cam = self.scene.camera
-        ss = self.scene.supersample
-        rx, ry = px * ss, py * ss
         Wr, Hr = self.scene.render_size
+        # widget-local px -> render-buffer px via the true buffer ratio:
+        # this is supersample * render_scale (dynamic resolution), not
+        # supersample alone.
+        rx = px * (Wr / max(self.scene.width, 1))
+        ry = py * (Hr / max(self.scene.height, 1))
         v = cam.view_positions(mol.positions)
         ox_s = Wr * 0.5 + cam.pan[0]
         oy_s = Hr * 0.5 - cam.pan[1]

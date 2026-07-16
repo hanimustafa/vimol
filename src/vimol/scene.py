@@ -66,6 +66,7 @@ class Scene:
         self.width = width
         self.height = height
         self.supersample = max(1, int(supersample))
+        self.render_scale = 1.0        # dynamic-resolution factor, see set_render_scale
         self.camera = Camera(center=molecule.centroid(), extent=molecule.radius_of_gyration_extent())
         self._backend_name, self._renderer = self._make_renderer(
             backend, width * self.supersample, height * self.supersample)
@@ -118,7 +119,7 @@ class Scene:
         old_min = max(min(self._renderer.width, self._renderer.height), 1)
         self.width = max(1, int(width))
         self.height = max(1, int(height))
-        self._renderer.resize(self.width * self.supersample, self.height * self.supersample)
+        self._resize_renderer()
         if refit:
             self.fit()
             return
@@ -132,18 +133,47 @@ class Scene:
         if new_ss == self.supersample:
             return
         # Rescale zoom/pan (both in supersampled-buffer pixel units) by the
-        # exact ratio so the apparent on-screen picture -- including any
-        # manual scroll-to-zoom -- is bit-for-bit preserved across a
+        # exact buffer-size ratio so the apparent on-screen picture --
+        # including any manual scroll-to-zoom -- is preserved across a
         # supersample change. This must NOT go through fit()/Camera.fit():
         # that recomputes zoom purely from the molecule's extent, with no
         # memory of the user's current zoom, so it silently discarded any
         # scroll-zoom every time the interactive quality switch (fast while
         # dragging/scrolling -> crisp ~0.25s after stopping) fired.
-        scale = new_ss / self.supersample
+        old_min = max(min(self._renderer.width, self._renderer.height), 1)
         self.supersample = new_ss
-        self._renderer.resize(self.width * new_ss, self.height * new_ss)
+        self._resize_renderer()
+        new_min = max(min(self._renderer.width, self._renderer.height), 1)
+        scale = new_min / old_min
         self.camera.zoom *= scale
         self.camera.pan = self.camera.pan * scale
+
+    def set_render_scale(self, factor: float) -> None:
+        """Render internally at *factor* x the logical resolution (0.2..1).
+
+        Below 1.0 the scene draws fewer pixels and the terminal (or host)
+        stretches the image back up -- slightly soft/grainy, but the frame
+        cost drops with the square of the factor. Interactive hosts use this
+        as dynamic resolution while the camera is moving, snapping back to
+        1.0 (and full supersampling) once idle. Zoom/pan rescale by the exact
+        buffer-size ratio, like :meth:`set_supersample`, so the apparent
+        framing never changes.
+        """
+        f = min(1.0, max(0.2, float(factor)))
+        if f == self.render_scale:
+            return
+        old_min = max(min(self._renderer.width, self._renderer.height), 1)
+        self.render_scale = f
+        self._resize_renderer()
+        new_min = max(min(self._renderer.width, self._renderer.height), 1)
+        scale = new_min / old_min
+        self.camera.zoom *= scale
+        self.camera.pan = self.camera.pan * scale
+
+    def _resize_renderer(self) -> None:
+        self._renderer.resize(
+            max(1, int(round(self.width * self.supersample * self.render_scale))),
+            max(1, int(round(self.height * self.supersample * self.render_scale))))
 
     def fit(self, keep_orientation: bool = False, keep_zoom: bool = False) -> None:
         rot = self.camera.rotation.copy()

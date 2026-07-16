@@ -93,6 +93,10 @@ _BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x0
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
 
+# Interactive frame budget (seconds) for the dynamic-resolution controller:
+# ~120 fps, minus headroom for encode/transmit.
+_INTERACT_BUDGET = 1.0 / 120.0
+
 # Warm warning color for the status bar's "press c to cleanup" hint.
 _CLEANUP_HINT_FG = (255, 170, 60)
 
@@ -107,7 +111,7 @@ _PT_GAP_BG = (40, 42, 50)
 class Viewer:
     def __init__(self, molecule: Molecule, frames: Optional[List[Molecule]] = None,
                  style: Optional[Style] = None, fd_in: int = 0, fd_out: int = 1,
-                 autospin: bool = False, target_fps: float = 60.0, picking: bool = True,
+                 autospin: bool = False, target_fps: float = 120.0, picking: bool = True,
                  transparent: bool = True, backend: str = "auto",
                  source_path: Optional[str] = None, editable: bool = False):
         self.frames = frames or [molecule]
@@ -165,6 +169,7 @@ class Viewer:
         # pointer strays back over the molecule mid-drag.
         self._status_zone_press = False
         self._last_interact = 0.0
+        self._interact_scale = 1.0   # dynamic-resolution factor while moving
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
@@ -253,13 +258,43 @@ class Viewer:
         idle = (time.time() - self._last_interact) > 0.25 and not self.autospin
         return self._max_ss if idle else 1
 
+    @staticmethod
+    def _next_render_scale(current: float, elapsed: float) -> float:
+        """Dynamic-resolution controller: the next interactive render scale.
+
+        Aims the CPU raycaster at the ~120 fps frame budget by trading
+        resolution for speed while the camera is moving (pixels scale with
+        the square of the factor, so the correction is a square root). Slow
+        frames step the scale down immediately; comfortably fast frames ease
+        it back up. Clamped to [0.25, 1]; the floor is a last resort the
+        controller only reaches when the budget demands it, and it only
+        ever applies during motion (idle frames are always drawn at full
+        resolution + supersampling).
+        """
+        if elapsed > _INTERACT_BUDGET:
+            factor = (_INTERACT_BUDGET / elapsed) ** 0.5
+            return max(0.25, current * max(factor, 0.5))
+        if elapsed < _INTERACT_BUDGET * 0.5:
+            return min(1.0, current * 1.15)
+        return current
+
     def _draw(self):
         want_ss = self._target_ss()
-        if self.widget.scene.supersample != want_ss:
-            self.widget.scene.set_supersample(want_ss)
+        interacting = want_ss == 1
+        scene = self.widget.scene
+        if scene.supersample != want_ss:
+            scene.set_supersample(want_ss)
+        # dynamic resolution (CPU backend only -- GL is fast at full size):
+        # render interactive frames at the adaptive scale, idle ones crisp.
+        if scene.backend == "cpu":
+            scene.set_render_scale(self._interact_scale if interacting else 1.0)
         self._drawn_ss = want_ss
 
+        t0 = time.perf_counter()
         img = self.widget.render()
+        if interacting and scene.backend == "cpu":
+            self._interact_scale = self._next_render_scale(
+                self._interact_scale, time.perf_counter() - t0)
         data = kitty.encode_image(img, image_id=self._img_id, placement_id=self._img_id,
                                   cols=self._img_cols, rows=self._img_rows, move_cursor=False,
                                   z_index=_IMAGE_Z_INDEX)

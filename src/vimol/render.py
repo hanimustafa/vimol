@@ -339,9 +339,9 @@ class Renderer:
         or near-empty scenes run single-banded (the per-primitive python
         overhead is serialized by the GIL and would dominate).
         """
-        if H * W < 2_000_000 or n_primitives < 8 or _POOL_WORKERS < 2:
+        if H * W < 250_000 or n_primitives < 8 or _POOL_WORKERS < 2:
             return [(0, H)]
-        n = min(_POOL_WORKERS, max(2, H * W // 800_000))
+        n = min(_POOL_WORKERS, max(2, H * W // 200_000))
         edges = np.linspace(0, H, n + 1).astype(int)
         return [(int(edges[i]), int(edges[i + 1])) for i in range(n)
                 if edges[i] < edges[i + 1]]

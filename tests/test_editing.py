@@ -833,6 +833,62 @@ def test_widget_unproject_matches_pick_center():
     np.testing.assert_allclose(world, [0.0, 0.0, 0.0], atol=1e-6)
 
 
+# -- dynamic resolution (render_scale) ---------------------------------------
+def test_set_render_scale_resizes_buffer_and_keeps_framing():
+    from vimol.scene import Scene
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    sc = Scene(mol, 400, 300, backend="cpu")
+    zoom_per_px = sc.camera.zoom / min(sc.render_size)
+    sc.set_render_scale(0.5)
+    assert sc.render_size == (200, 150)
+    # apparent framing preserved: zoom scales with the buffer
+    assert sc.camera.zoom / min(sc.render_size) == pytest.approx(zoom_per_px)
+    sc.set_render_scale(1.0)
+    assert sc.render_size == (400, 300)
+    sc.set_render_scale(0.05)                    # clamped to the 0.2 floor
+    assert sc.render_scale == 0.2
+
+
+def test_pick_and_unproject_correct_at_reduced_render_scale():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.scene.set_render_scale(0.5)
+    # widget-local coordinates stay logical: the center of the 200x200 widget
+    # must still pick the origin atom and unproject to the origin, even though
+    # the internal buffer is only 100x100.
+    assert w.pick(100.0, 100.0) == 0
+    np.testing.assert_allclose(w.unproject(100.0, 100.0), [0.0, 0.0, 0.0], atol=1e-6)
+
+
+def test_dynamic_resolution_controller_steps_down_up_and_clamps():
+    from vimol.viewer import Viewer, _INTERACT_BUDGET
+    step_down = Viewer._next_render_scale(1.0, _INTERACT_BUDGET * 4)
+    assert step_down < 1.0
+    assert Viewer._next_render_scale(0.25, _INTERACT_BUDGET * 100) == 0.25  # floor
+    step_up = Viewer._next_render_scale(0.5, _INTERACT_BUDGET * 0.2)
+    assert step_up > 0.5
+    assert Viewer._next_render_scale(1.0, _INTERACT_BUDGET * 0.2) == 1.0   # ceiling
+    assert Viewer._next_render_scale(0.7, _INTERACT_BUDGET * 0.8) == 0.7   # in band
+
+
+def test_viewer_draw_scales_down_while_interacting_and_restores_idle(monkeypatch):
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+    v._interact_scale = 0.5
+    v._last_interact = __import__("time").time()   # interacting right now
+    v._draw()
+    assert v.widget.scene.render_scale == 0.5      # grainy while moving
+    v._last_interact = 0.0                          # long idle
+    v._draw()
+    assert v.widget.scene.render_scale == 1.0      # crisp at rest
+    assert v.widget.scene.supersample == v._max_ss
+
+
 # -- viewer save prompt ----------------------------------------------------
 def _new_viewer(tmp_path, source=None):
     from vimol.viewer import Viewer
