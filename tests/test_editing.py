@@ -497,6 +497,33 @@ def test_cleanup_pulls_stretched_manual_bond_toward_ideal_length():
     assert mol.new_atoms == set()
 
 
+def test_cleanup_relaxes_distorted_angles_toward_tetrahedral():
+    # Bond-length springs alone would resolve the clash but leave the angle
+    # collapsed; the 1-3 (Urey-Bradley) springs restore local geometry.
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4, all new
+    ch = elements.covalent_radius("C") + elements.covalent_radius("H")
+    # squeeze H4 to ~55 deg of H1 (kept at the ideal C-H length): close enough
+    # that perception sees a false H1-H4 bond (chord 0.99 A < the 1.07 A cutoff)
+    d1 = mol.positions[1] / np.linalg.norm(mol.positions[1])
+    d4 = mol.positions[4] / np.linalg.norm(mol.positions[4])
+    perp = d4 - np.dot(d4, d1) * d1
+    perp /= np.linalg.norm(perp)
+    theta = np.radians(55.0)
+    mol.positions[4] = ch * (np.cos(theta) * d1 + np.sin(theta) * perp)
+    editor._reperceive(mol)
+    pairs = [(i, j) for i, j, _o in mol.bonds]
+    assert (1, 4) in pairs                                    # the false H-H bond
+    assert editor.cleanup_targets(mol)[0] == [(1, 4)]
+
+    assert editor.cleanup(mol) is True
+    v1 = mol.positions[1] - mol.positions[c]
+    v4 = mol.positions[4] - mol.positions[c]
+    assert abs(_angle(v1, v4) - 109.47) < 5.0                 # tetrahedral again
+    pairs_after = [(i, j) for i, j, _o in mol.bonds]
+    assert (1, 4) not in pairs_after                          # false bond gone
+
+
 def test_cleanup_returns_false_and_moves_nothing_when_nothing_to_clean():
     mol = Molecule()
     editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # only ideal-length bonds

@@ -329,11 +329,16 @@ def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[in
     return clash_pairs, stretched
 
 
-def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
-    """Relax steric clashes and stretched manual bonds ('c').
+# Angle (1-3 / Urey-Bradley) springs act at half the bond springs' stiffness:
+# they shape, the bond springs place -- and halving keeps the iteration stable
+# for 4-coordinate centers, which gain several extra springs per atom.
+_ANGLE_STIFFNESS = 0.5
 
-    A deliberately simple fixed-target spring relaxation -- a cosmetic tidy-
-    up, not a force field. One spring per currently bonded pair:
+
+def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int, float, float]]:
+    """The fixed spring set for one cleanup run: (i, j, target, stiffness).
+
+    Bond springs (stiffness 1.0), one per currently bonded pair:
 
     * clash pairs are pushed to just past the perception cutoff, so the
       false bond they created disappears on re-perception;
@@ -343,6 +348,79 @@ def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
       covalent ideal, which would distort a loaded real-world structure --
       simply keeping the rest of the molecule from falling apart while the
       two groups above move.
+
+    Angle springs (stiffness :data:`_ANGLE_STIFFNESS`): classic 1-3
+    (Urey-Bradley) springs around each *center* in ``mol.new_atoms`` plus
+    the endpoints of stretched manual bonds, so bond-length springs cannot
+    collapse the local geometry. The center's template
+    (``TEMPLATES[(symbol, n_neighbors)]``; no entry -> skip) gives the ideal
+    angle theta, and each pair of its bonded neighbors gets a spring at the
+    law-of-cosines distance for theta over the two bond springs' targets.
+    Old, uninvolved centers get none -- loaded geometry is still not ours
+    to judge. A neighbor pair that already carries a bond spring keeps it:
+    a clash spring's target is raised to the angle target when the angle
+    target is longer (one spring per pair, and the geometry still clears
+    the perception cutoff); a real bond between the two neighbors (a ring)
+    is never fought.
+    """
+    clash_set = set(clash_pairs)
+    targets = {}                       # (i, j) -> bond-spring target, i < j
+    for i, j in clash_pairs:
+        ideal = _bond_length(mol.symbols[i], mol.symbols[j])
+        targets[(i, j)] = ideal + _PERCEPTION_TOLERANCE + _CLASH_CLEARANCE
+    for i, j in stretched:
+        targets[(i, j)] = _bond_length(mol.symbols[i], mol.symbols[j])
+    for i, j, _order in mol.bonds:
+        if (i, j) not in targets:
+            targets[(i, j)] = float(np.linalg.norm(mol.positions[i] - mol.positions[j]))
+
+    neighbors = {}                     # adjacency over the current bond list
+    for i, j, _order in mol.bonds:
+        neighbors.setdefault(i, []).append(j)
+        neighbors.setdefault(j, []).append(i)
+
+    centers = set(mol.new_atoms)
+    for i, j in stretched:
+        centers.add(i)
+        centers.add(j)
+
+    angle_targets = {}                 # (a, b) -> 1-3 target, a < b
+    for k in sorted(centers):
+        neigh = neighbors.get(k, [])
+        if len(neigh) < 2:
+            continue
+        tmpl = templates.TEMPLATES.get((mol.symbols[k], len(neigh)))
+        if tmpl is None:               # hypervalent / unknown coordination
+            continue
+        cos_t = float(np.dot(tmpl.directions[0], tmpl.directions[1]))
+        neigh = sorted(neigh)
+        for x in range(len(neigh)):
+            for y in range(x + 1, len(neigh)):
+                a, b = neigh[x], neigh[y]
+                la = targets[(k, a) if k < a else (a, k)]
+                lb = targets[(k, b) if k < b else (b, k)]
+                t = float(np.sqrt(la * la + lb * lb - 2.0 * la * lb * cos_t))
+                if (a, b) in clash_set:
+                    # the false bond joins two intended neighbors: let the
+                    # geometry target win (it clears the cutoff by more)
+                    targets[(a, b)] = max(targets[(a, b)], t)
+                elif (a, b) in targets:
+                    continue           # a real neighbor-neighbor bond (a ring)
+                elif (a, b) not in angle_targets:
+                    angle_targets[(a, b)] = t
+
+    springs = [(i, j, t, 1.0) for (i, j), t in targets.items()]
+    springs += [(a, b, t, _ANGLE_STIFFNESS) for (a, b), t in angle_targets.items()]
+    return springs
+
+
+def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
+    """Relax steric clashes and stretched manual bonds ('c').
+
+    A deliberately simple fixed-target spring relaxation -- a cosmetic tidy-
+    up, not a force field. The spring set (bond springs per bonded pair,
+    angle springs around new/stretched centers) is fixed once up front; see
+    :func:`_build_springs`.
 
     Atoms in ``mol.new_atoms`` move ~7x more than the rest (weight 1.0 vs
     0.15): the new segment does almost all the moving, but old atoms are not
@@ -356,28 +434,17 @@ def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
     if not clash_pairs and not stretched:
         return False
 
-    handled = set(clash_pairs) | set(stretched)
-    springs: List[Tuple[int, int, float]] = []
-    for i, j in clash_pairs:
-        ideal = _bond_length(mol.symbols[i], mol.symbols[j])
-        springs.append((i, j, ideal + _PERCEPTION_TOLERANCE + _CLASH_CLEARANCE))
-    for i, j in stretched:
-        springs.append((i, j, _bond_length(mol.symbols[i], mol.symbols[j])))
-    for i, j, _order in mol.bonds:
-        if (i, j) in handled:
-            continue
-        springs.append((i, j, float(np.linalg.norm(mol.positions[i] - mol.positions[j]))))
-
+    springs = _build_springs(mol, clash_pairs, stretched)
     weight = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
     pos = mol.positions
     for _ in range(iterations):
         forces = np.zeros_like(pos)
-        for i, j, target in springs:
+        for i, j, target, stiff in springs:
             delta = pos[j] - pos[i]
             length = float(np.linalg.norm(delta))
             if length < 1e-6:      # perception already rejects sub-0.4A contacts
                 continue
-            f = (length - target) * (delta / length)
+            f = (stiff * (length - target)) * (delta / length)
             forces[i] += f
             forces[j] -= f
         pos = pos + step * weight[:, None] * forces
