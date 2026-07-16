@@ -10,6 +10,7 @@ small/medium molecules in pure Python + numpy.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Tuple
 
@@ -38,6 +39,12 @@ class Style:
     color_override: object = None            # optional (N,3) array to replace element colors
 
 
+# render worker threads: bands of the frame raycast concurrently (numpy
+# releases the GIL inside array ops). Capped: beyond ~8 the bands get too
+# short and per-primitive python overhead starts to dominate.
+_POOL_WORKERS = min(8, os.cpu_count() or 1)
+
+
 def _atom_radii(mol: Molecule, style: Style) -> np.ndarray:
     if style.representation == "spacefill":
         return mol.vdw_radii()
@@ -48,29 +55,73 @@ def _atom_radii(mol: Molecule, style: Style) -> np.ndarray:
     return mol.vdw_radii() * style.atom_scale
 
 
+def _fast_pow(x: np.ndarray, exponent: float) -> np.ndarray:
+    """x ** exponent, using repeated squaring for power-of-two exponents.
+
+    The specular term raises every fragment's n.h to ``style.shininess``
+    (default 32). ``np.power`` with a float exponent goes through exp/log per
+    element; for the (very common) integral power-of-two case, log2(e) in-place
+    multiplies do the same thing several times faster. Falls back to
+    ``np.power`` for any other exponent.
+    """
+    e = int(exponent)
+    if e == exponent and e > 0 and (e & (e - 1)) == 0:
+        out = x * x                       # e >= 2 from here (e == 1 is the loop's no-op)
+        for _ in range(e.bit_length() - 2):
+            np.multiply(out, out, out=out)
+        return out if e > 1 else x.copy()
+    return np.power(x, exponent)
+
+
 class Renderer:
     def __init__(self, width: int, height: int):
         self.width = int(width)
         self.height = int(height)
+        # persistent framebuffers, re-filled per frame -- allocating ~25 MB of
+        # fresh pages every frame (np.full/np.empty) costs real time at
+        # supersampled full-screen sizes; reuse keeps the pages warm.
+        self._color = None
+        self._zbuf = None
+        self._bg_template = None     # pre-filled background frame (see below)
+        self._bg_key = None
+        self._pool = None            # lazy render thread pool (see _threads)
 
     def resize(self, width: int, height: int) -> None:
         self.width = int(width)
         self.height = int(height)
+        self._color = None
+        self._zbuf = None
+        self._bg_template = None
+        self._bg_key = None
+
+    def _framebuffers(self, style: Style):
+        H, W = self.height, self.width
+        if self._color is None or self._color.shape[:2] != (H, W):
+            self._color = np.empty((H, W, 3), np.float32)
+            self._zbuf = np.empty((H, W), np.float32)
+        if style.transparent:
+            self._color.fill(0.0)   # premultiplied-zero for undrawn pixels
+        else:
+            # Broadcasting a (3,) background into (H, W, 3) is a strided store
+            # that measures >10x slower than a flat memcpy at full-screen sizes
+            # (~100 ms vs ~8 ms at 3200x2000) -- so keep one pre-filled frame
+            # per background color and copy it in whole.
+            key = tuple(style.background)
+            if self._bg_key != key or self._bg_template is None \
+                    or self._bg_template.shape[:2] != (H, W):
+                self._bg_template = np.empty((H, W, 3), np.float32)
+                self._bg_template[...] = np.asarray(style.background, np.float32)
+                self._bg_key = key
+            np.copyto(self._color, self._bg_template)
+        self._zbuf.fill(-np.inf)
+        return self._color, self._zbuf
 
     # ------------------------------------------------------------------
     def render(self, mol: Molecule, camera: Camera, style: Style | None = None) -> np.ndarray:
         style = style or Style()
         W, H = self.width, self.height
         transparent = style.transparent
-        if transparent:
-            # start black so undrawn pixels are premultiplied-zero; alpha comes
-            # from the z-buffer at the end (drawn <-> not drawn).
-            color = np.zeros((H, W, 3), np.float32)
-        else:
-            bg = np.array(style.background, np.float32)
-            color = np.empty((H, W, 3), np.float32)
-            color[...] = bg  # broadcast-fill (cheaper than np.tile's repeat)
-        zbuf = np.full((H, W), -np.inf, np.float32)
+        color, zbuf = self._framebuffers(style)
         if mol.n_atoms == 0:
             return self._finish(color, zbuf, transparent)
 
@@ -114,183 +165,304 @@ class Renderer:
         # columns are the three lighting directions, so a single (M,3)@(3,3)
         # matmul yields all three dot products at once (one BLAS call instead
         # of three), which is cheaper per fragment than dotting separately.
-        shade_mat = np.stack([light, fill, halfv], axis=1)
+        # float32 throughout: fragment lists are large, and halving their
+        # width halves the memory traffic of every shading op.
+        shade_mat = np.stack([light, fill, halfv], axis=1).astype(np.float32)
 
         def shade(normals, albedo):
-            # normals: (M,3) view-space unit; albedo: (M,3) or (3,)
+            # normals: (M,3) view-space unit float32; albedo: (M,3) or (3,)
             # dots of unit vectors never exceed 1, so a lower clamp at 0 is all
             # that's needed -- np.maximum avoids np.clip's per-call overhead.
             d = normals @ shade_mat                       # (M,3): n·light, n·fill, n·halfv
             np.maximum(d, 0.0, out=d)
-            spec = np.power(d[:, 2], style.shininess) * style.specular_strength
+            spec = _fast_pow(d[:, 2], style.shininess)
+            spec *= style.specular_strength
             diff = (style.ambient + d[:, 0] + d[:, 1] * style.fill_light)[:, None]
             return albedo * diff + spec[:, None]
 
+        # scalar copies of the light vectors for the full-bbox shading path
+        l0, l1, l2 = (float(v) for v in light)
+        f0, f1, f2 = (float(v) for v in fill)
+        hv0, hv1, hv2 = (float(v) for v in halfv)
+        ambient = float(style.ambient)
+        fill_w = float(style.fill_light)
+        spec_w = float(style.specular_strength)
+        shininess = style.shininess
+        depth_cue = float(style.depth_cue)
+
+        def shade_write(sub_c, sub_z, win, depth, nx, ny, nz, albedo):
+            """Shade a full bounding box and masked-write the winners.
+
+            ``nx``/``ny``/``nz`` may be broadcastable pieces ((1,w), (h,1) or
+            (h,w)); ``albedo`` a single (3,) color or an (h,w,3) map. Shading
+            the whole box contiguously and writing through
+            ``np.copyto(..., where=win)`` measures ~3x faster than gathering
+            the winners with ``np.nonzero`` and fancy-index scattering them
+            back -- the scatter was the single hottest operation of a frame,
+            far outweighing the extra arithmetic on masked-out pixels. Fog is
+            folded into the diffuse/specular terms ((a*d+s)*m == a*(d*m)+s*m),
+            saving a separate full-box multiply of the (h,w,3) color.
+            """
+            diff = nx * l0 + ny * l1 + nz * l2
+            np.maximum(diff, 0.0, out=diff)
+            dfill = nx * f0 + ny * f1 + nz * f2
+            np.maximum(dfill, 0.0, out=dfill)
+            dh = nx * hv0 + ny * hv1 + nz * hv2
+            np.maximum(dh, 0.0, out=dh)
+            spec = _fast_pow(dh, shininess)
+            spec *= spec_w
+            diff += ambient
+            dfill *= fill_w
+            diff += dfill
+            if depth_cue > 0:
+                fog = (depth - np.float32(zmin)) * np.float32(1.0 / zspan)
+                np.maximum(fog, 0.0, out=fog)
+                np.minimum(fog, 1.0, out=fog)
+                fog *= depth_cue
+                fog += 1.0 - depth_cue
+                diff *= fog
+                spec *= fog
+            rgb = albedo * diff[..., None]
+            rgb += spec[..., None]
+            np.copyto(sub_c, rgb, where=win[..., None])
+            np.copyto(sub_z, depth, where=win)
+
         radii = _atom_radii(mol, style)
-
         draw_bonds = style.representation in ("ball_and_stick", "wireframe", "licorice")
-        if draw_bonds and mol.bonds:
-            self._draw_bonds(mol, vpos, zoom, ox_s, oy_s, style, base_colors,
-                             color, zbuf, shade, zmin, zspan)
-
-        # atoms drawn after bonds; z-buffer keeps whichever is nearer
         inv_zoom = 1.0 / zoom
         order = np.argsort(sz)  # far to near so specular highlights aren't clobbered oddly
-        for a in order:
-            r = radii[a]
-            if r <= 0:
-                continue
-            sr = r * zoom
-            if sr < 0.5:
-                sr = 0.5
-            cx, cy, cz = sx[a], sy[a], sz[a]
-            x0 = max(int(np.floor(cx - sr)), 0)
-            x1 = min(int(np.ceil(cx + sr)) + 1, W)
-            y0 = max(int(np.floor(cy - sr)), 0)
-            y1 = min(int(np.ceil(cy + sr)) + 1, H)
-            if x0 >= x1 or y0 >= y1:
-                continue
-            # squared screen-space distance to the atom centre, via broadcasting
-            # a row and a column (cheaper than materializing a full meshgrid).
-            dxr = np.arange(x0, x1) - cx          # (w,)
-            dyr = np.arange(y0, y1) - cy          # (h,)
-            d2 = (dxr * dxr)[None, :] + (dyr * dyr)[:, None]   # (h,w)
-            mask = d2 <= sr * sr
-            if not mask.any():
-                continue
-            # sphere depth: front-surface height above the view plane
-            h2 = r * r - d2 * (inv_zoom * inv_zoom)
-            np.maximum(h2, 0.0, out=h2)
-            depth = cz + np.sqrt(h2)
-            sub_z = zbuf[y0:y1, x0:x1]
-            win = mask & (depth > sub_z)
-            if not win.any():
-                continue
-            # build normals + shade only the fragments that survive the z-test
-            wy, wx = np.nonzero(win)
-            dw = depth[wy, wx]
-            inv_r = 1.0 / r
-            normals = np.empty((wy.size, 3), np.float64)
-            normals[:, 0] = dxr[wx] * (inv_zoom * inv_r)
-            normals[:, 1] = -dyr[wy] * (inv_zoom * inv_r)
-            normals[:, 2] = (dw - cz) * inv_r
-            rgb = shade(normals, base_colors[a])
-            self._apply_fog(rgb, dw, style, zmin, zspan)
-            sub_c = color[y0:y1, x0:x1]
-            sub_c[wy, wx] = rgb
-            sub_z[wy, wx] = dw
 
-        if has_arrows:
-            self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
-            self._draw_arrow_heads(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
+        # Per-primitive screen y-intervals, precomputed once so each band only
+        # touches the primitives that actually reach its rows -- the python
+        # per-primitive setup is GIL-serialized across bands, so handing every
+        # band the whole primitive list would tax exactly the part threads
+        # can't parallelize.
+        sr_all = np.maximum(radii * zoom, 0.5)
+        atom_ylo = sy - sr_all
+        atom_yhi = sy + sr_all
+        bond_list = list(mol.bonds) if (draw_bonds and mol.bonds) else []
+        if bond_list:
+            bi = np.array([b[0] for b in bond_list])
+            bj = np.array([b[1] for b in bond_list])
+            rb = style.bond_radius if style.representation != "licorice" else style.bond_radius * 1.6
+            srb = rb * zoom
+            bond_ylo = np.minimum(sy[bi], sy[bj]) - srb
+            bond_yhi = np.maximum(sy[bi], sy[bj]) + srb
+
+        def draw_band(y_lo: int, y_hi: int) -> None:
+            """Raycast the band's primitives into rows [y_lo, y_hi).
+
+            Bands own disjoint row ranges of the shared color/z buffers, so
+            they can run on a thread pool with no locking; each band draws
+            its primitives in the same global order, so per-pixel results are
+            identical to a single full-height pass (the z-test decides every
+            pixel independently). numpy releases the GIL inside its array
+            ops, which is where nearly all of the time goes.
+            """
+            if bond_list:
+                hit = np.nonzero((bond_yhi >= y_lo) & (bond_ylo < y_hi))[0]
+                for k in hit:
+                    i, j, _o = bond_list[k]
+                    self._draw_cylinder_segment(
+                        vpos[i], vpos[j], rb, base_colors[i], base_colors[j],
+                        zoom, ox_s, oy_s, style, color, zbuf, shade_write,
+                        zmin, zspan, y_lo, y_hi)
+
+            # atoms drawn after bonds; z-buffer keeps whichever is nearer
+            in_band = (atom_yhi[order] >= y_lo) & (atom_ylo[order] < y_hi)
+            for a in order[in_band]:
+                r = radii[a]
+                if r <= 0:
+                    continue
+                sr = r * zoom
+                if sr < 0.5:
+                    sr = 0.5
+                cx, cy, cz = sx[a], sy[a], sz[a]
+                x0 = max(int(np.floor(cx - sr)), 0)
+                x1 = min(int(np.ceil(cx + sr)) + 1, W)
+                y0 = max(int(np.floor(cy - sr)), y_lo)
+                y1 = min(int(np.ceil(cy + sr)) + 1, y_hi)
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                # squared screen-space distance to the atom centre, via
+                # broadcasting a row and a column (cheaper than materializing
+                # a full meshgrid). float32 per-pixel math: python-float
+                # scalars don't upcast it, and it halves the bandwidth of
+                # every full-bbox pass.
+                dxr = np.arange(x0, x1, dtype=np.float32)
+                dxr -= np.float32(cx)                 # (w,)
+                dyr = np.arange(y0, y1, dtype=np.float32)
+                dyr -= np.float32(cy)                 # (h,)
+                d2 = (dxr * dxr)[None, :] + (dyr * dyr)[:, None]   # (h,w)
+                mask = d2 <= sr * sr
+                if not mask.any():
+                    continue
+                # sphere depth: front-surface height above the view plane
+                h2 = float(r * r) - d2 * float(inv_zoom * inv_zoom)
+                np.maximum(h2, 0.0, out=h2)
+                hgt = np.sqrt(h2)             # height above view plane == r * nz
+                depth = hgt + np.float32(cz)
+                sub_z = zbuf[y0:y1, x0:x1]
+                win = mask & (depth > sub_z)
+                if not win.any():
+                    continue
+                # normals as broadcastable row/column/full pieces --
+                # shade_write combines them without ever materializing an
+                # (h, w, 3) stack or gathering/scattering fragment lists.
+                inv_r = 1.0 / r
+                nx = (dxr * np.float32(inv_zoom * inv_r))[None, :]
+                ny = (dyr * np.float32(-inv_zoom * inv_r))[:, None]
+                nz = hgt * np.float32(inv_r)
+                shade_write(color[y0:y1, x0:x1], sub_z, win, depth,
+                            nx, ny, nz, base_colors[a])
+
+            if has_arrows:
+                self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color,
+                                        zbuf, shade_write, zmin, zspan, y_lo, y_hi)
+                self._draw_arrow_heads(geom, zoom, ox_s, oy_s, style, color,
+                                       zbuf, shade, zmin, zspan, y_lo, y_hi)
+
+        bands = self._band_ranges(H, W, len(mol.bonds) + mol.n_atoms)
+        if len(bands) == 1:
+            draw_band(0, H)
+        else:
+            futures = [self._threads().submit(draw_band, lo, hi) for lo, hi in bands]
+            for f in futures:
+                f.result()
 
         return self._finish(color, zbuf, transparent)
 
+    def _band_ranges(self, H: int, W: int, n_primitives: int):
+        """Split the frame into horizontal bands for the render thread pool.
+
+        Threads only pay off when there is real per-band work: small frames
+        or near-empty scenes run single-banded (the per-primitive python
+        overhead is serialized by the GIL and would dominate).
+        """
+        if H * W < 2_000_000 or n_primitives < 8 or _POOL_WORKERS < 2:
+            return [(0, H)]
+        n = min(_POOL_WORKERS, max(2, H * W // 800_000))
+        edges = np.linspace(0, H, n + 1).astype(int)
+        return [(int(edges[i]), int(edges[i + 1])) for i in range(n)
+                if edges[i] < edges[i + 1]]
+
+    def _threads(self):
+        if self._pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._pool = ThreadPoolExecutor(max_workers=_POOL_WORKERS)
+        return self._pool
+
     @staticmethod
     def _finish(color: np.ndarray, zbuf: np.ndarray, transparent: bool) -> np.ndarray:
+        # NOTE: the copying np.clip is deliberate -- np.clip(..., out=...) goes
+        # through numpy's slow deprecated-casting path (~4x the copying form),
+        # and the copy also keeps the renderer's persistent buffer pristine.
         img = np.clip(color, 0.0, 1.0)
-        rgb = (img * 255).astype(np.uint8)
+        img *= 255.0
+        rgb = img.astype(np.uint8)
         if not transparent:
             return rgb
-        alpha = np.where(zbuf > -np.inf, 255, 0).astype(np.uint8)
+        alpha = (zbuf > -np.inf).astype(np.uint8)
+        alpha *= 255
         return np.dstack([rgb, alpha])
 
     # ------------------------------------------------------------------
-    def _draw_bonds(self, mol, vpos, zoom, ox_s, oy_s, style, base_colors,
-                    color, zbuf, shade, zmin, zspan):
-        rb = style.bond_radius if style.representation != "licorice" else style.bond_radius * 1.6
-        for (i, j, order) in mol.bonds:
-            self._draw_cylinder_segment(vpos[i], vpos[j], rb, base_colors[i], base_colors[j],
-                                        zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
-
     def _draw_arrow_shafts(self, geom: ArrowGeometry, zoom, ox_s, oy_s, style,
-                           color, zbuf, shade, zmin, zspan):
+                           color, zbuf, shade_write, zmin, zspan, y_lo, y_hi):
         for k in range(geom.shaft_a.shape[0]):
             c = geom.shaft_color[k].astype(np.float32)
             self._draw_cylinder_segment(geom.shaft_a[k], geom.shaft_b[k], float(geom.shaft_radius[k]),
-                                        c, c, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
+                                        c, c, zoom, ox_s, oy_s, style, color, zbuf, shade_write, zmin, zspan,
+                                        y_lo, y_hi)
 
     def _draw_arrow_heads(self, geom: ArrowGeometry, zoom, ox_s, oy_s, style,
-                          color, zbuf, shade, zmin, zspan):
+                          color, zbuf, shade, zmin, zspan, y_lo, y_hi):
         for k in range(geom.head_base.shape[0]):
             self._draw_cone_segment(geom.head_base[k], geom.head_apex[k], float(geom.head_radius[k]),
                                     geom.head_color[k], zoom, ox_s, oy_s, style, color, zbuf, shade,
-                                    zmin, zspan)
+                                    zmin, zspan, y_lo, y_hi)
 
     # ------------------------------------------------------------------
     def _draw_cylinder_segment(self, a, b, radius, color_a, color_b, zoom, ox_s, oy_s,
-                               style, color, zbuf, shade, zmin, zspan):
+                               style, color, zbuf, shade_write, zmin, zspan,
+                               y_lo=0, y_hi=None):
         """Rasterize one capped-cylinder impostor from view-space *a* to *b*.
 
         Shared by real bonds (``_draw_bonds``, two atom colors split at the
         midpoint) and arrow shafts (``_draw_arrow_shafts``, one uniform color).
         """
         W, H = self.width, self.height
-        ax, ay, az = a
-        bx, by, bz = b
-        axis = np.array([bx - ax, by - ay, bz - az])
-        L = np.linalg.norm(axis)
+        ax, ay, az = (float(v) for v in a)
+        bx, by, bz = (float(v) for v in b)
+        ux_, uy_, uz = bx - ax, by - ay, bz - az
+        L = (ux_ * ux_ + uy_ * uy_ + uz * uz) ** 0.5
         if L < 1e-6 or radius <= 0:
             return
-        u = axis / L
+        ux_, uy_, uz = ux_ / L, uy_ / L, uz / L
+        radius = float(radius)
         srb = radius * zoom
         sax, say = ox_s + ax * zoom, oy_s - ay * zoom
         sbx, sby = ox_s + bx * zoom, oy_s - by * zoom
         x0 = max(int(np.floor(min(sax, sbx) - srb)), 0)
         x1 = min(int(np.ceil(max(sax, sbx) + srb)) + 1, W)
-        y0 = max(int(np.floor(min(say, sby) - srb)), 0)
-        y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
+        y0 = max(int(np.floor(min(say, sby) - srb)), y_lo)
+        y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H if y_hi is None else y_hi)
         if x0 >= x1 or y0 >= y1:
             return
-        # pixel -> view-plane coordinates (angstrom), broadcasting a row/column
-        gx = np.arange(x0, x1)[None, :]
-        gy = np.arange(y0, y1)[:, None]
-        vx = (gx - ox_s) / zoom
-        vy = (oy_s - gy) / zoom
-        ex = vx - ax
-        ey = vy - ay
-        uz = u[2]
-        A0 = ex * u[0] + ey * u[1]
+        # pixel -> view-plane coordinates (angstrom), broadcasting a row/column.
+        # All full-bbox math in float32 (python-float scalars don't upcast it);
+        # per-fragment quantities (normals, albedo) are materialized only for
+        # the winners of the z-test further down, never over the whole box.
+        ex = np.arange(x0, x1, dtype=np.float32)
+        ex -= np.float32(ox_s)
+        ex *= np.float32(1.0 / zoom)
+        ex -= np.float32(ax)                 # (w,) view-plane x offset from a
+        ey = np.arange(y0, y1, dtype=np.float32)
+        ey *= np.float32(-1.0 / zoom)
+        ey += np.float32(oy_s / zoom - ay)   # (h,) view-plane y offset from a
+        exr = ex[None, :]
+        eyc = ey[:, None]
+        A0 = exr * np.float32(ux_) + eyc * np.float32(uy_)
         a2 = 1.0 - uz * uz
-        b2 = -2.0 * A0 * uz
-        c2 = ex * ex + ey * ey - A0 * A0 - radius * radius
+        b2 = A0 * np.float32(-2.0 * uz)
+        c2 = exr * exr + eyc * eyc - A0 * A0 - np.float32(radius * radius)
         if abs(a2) < 1e-9:
             # cylinder axis ~ parallel to view direction: treat as disc
-            disc = -c2  # = radius^2 - (ex^2+ey^2-A0^2)
-            mask = disc >= 0
-            s = np.zeros_like(ex)
+            mask = c2 <= 0                   # radius^2 >= ex^2+ey^2-A0^2
+            s = np.zeros_like(A0)
         else:
-            disc = b2 * b2 - 4 * a2 * c2
+            disc = b2 * b2 - a2 * 4.0 * c2
             mask = disc >= 0
-            sq = np.sqrt(np.clip(disc, 0, None))
-            s = (-b2 + sq) / (2 * a2)  # front (larger z) root
+            np.maximum(disc, 0.0, out=disc)
+            sq = np.sqrt(disc)
+            s = (sq - b2) * np.float32(0.5 / a2)  # front (larger z) root
         if not mask.any():
             return
-        zview = az + s
+        zview = s + np.float32(az)
         # axial coordinate to clamp to the segment and pick the color half
-        t = A0 + uz * s  # (P-a).u
-        within = (t >= 0) & (t <= L)
-        mask = mask & within
+        t = A0 + s * np.float32(uz)          # (P-a).u
+        mask &= (t >= 0) & (t <= L)
         if not mask.any():
             return
-        # surface normal = (w - (w.u)u)/radius
-        wx = ex
-        wy = ey
-        wz = s  # (z-az)
-        proj = t  # w.u
-        nx = (wx - proj * u[0]) / radius
-        ny = (wy - proj * u[1]) / radius
-        nz = (wz - proj * u[2]) / radius
-        normals = np.stack([nx, ny, nz], axis=-1)
+        sub_z = zbuf[y0:y1, x0:x1]
+        win = mask & (zview > sub_z)
+        if not win.any():
+            return
+        # full-bbox normals ((w-(w.u)u)/radius, w = P - a) for shade_write's
+        # contiguous shade-and-masked-write path (see its docstring).
+        inv_r = np.float32(1.0 / radius)
+        nx = (exr - t * np.float32(ux_)) * inv_r
+        ny = (eyc - t * np.float32(uy_)) * inv_r
+        nz = (s - t * np.float32(uz)) * inv_r
         # split color at midpoint
-        frac = t / L
-        albedo = np.where((frac < 0.5)[..., None], color_a, color_b).astype(np.float32)
-        self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
-                        normals, albedo, shade, style, zmin, zspan)
+        albedo = np.where((t < np.float32(0.5 * L))[..., None], color_a, color_b)
+        shade_write(color[y0:y1, x0:x1], sub_z, win, zview, nx, ny, nz,
+                    albedo.astype(np.float32, copy=False))
 
     # ------------------------------------------------------------------
     def _draw_cone_segment(self, base, apex, radius, color_rgb, zoom, ox_s, oy_s,
-                           style, color, zbuf, shade, zmin, zspan):
+                           style, color, zbuf, shade, zmin, zspan,
+                           y_lo=0, y_hi=None):
         """Rasterize one cone impostor: *radius* at *base*, tapering linearly
         to a point at *apex* (view space). Used for arrow heads.
 
@@ -317,8 +489,8 @@ class Renderer:
         sbx, sby = ox_s + bx * zoom, oy_s - by * zoom
         x0 = max(int(np.floor(min(sax, sbx) - srb)), 0)
         x1 = min(int(np.ceil(max(sax, sbx) + srb)) + 1, W)
-        y0 = max(int(np.floor(min(say, sby) - srb)), 0)
-        y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
+        y0 = max(int(np.floor(min(say, sby) - srb)), y_lo)
+        y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H if y_hi is None else y_hi)
         if x0 >= x1 or y0 >= y1:
             return
         gx = np.arange(x0, x1)[None, :]
