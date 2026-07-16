@@ -63,6 +63,7 @@ _HELP_HEAD = [
 # Shown only when editing is disabled (the classic bindings).
 _HELP_VIEW = [
     "  s .................. cycle style       a .................. autospin",
+    "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
 ]
 # Shown only when editing is enabled (Viewer(editable=True), the vimol CLI default).
 _HELP_EDIT = [
@@ -73,6 +74,7 @@ _HELP_EDIT = [
     "  u .................. undo",
     "     option-drag atom -> atom ... draw a bond (kept beyond auto range)",
     "  c .................. cleanup clashes / long bonds",
+    "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
 ]
 _HELP_TAIL = [
     "  n / p .............. next/prev frame   d .................. depth cue",
@@ -87,7 +89,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "\x03"}
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
 
@@ -166,6 +168,25 @@ class Viewer:
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
         self._old_termios = None
         self._geometry_established = False   # True once the real (not placeholder) size is known
+        # True while WE own a pushed OSC-22 pointer shape (delete's crosshair,
+        # measure's cell). Pushes and pops must pair exactly: an unbalanced pop
+        # would clobber a shape pushed by something outside vimol (tmux, the
+        # hosting app), and an unbalanced push leaks ours onto their stack.
+        self._pointer_pushed = False
+
+    # -- pointer shape (OSC 22 push/pop stack) -----------------------------
+    def _push_pointer(self, shape: str) -> None:
+        """Push a pointer *shape*, first popping any shape we already own."""
+        if self._pointer_pushed:
+            kitty.write_bytes(kitty.reset_pointer_shape(), self.fd_out)
+        kitty.write_bytes(kitty.set_pointer_shape(shape), self.fd_out)
+        self._pointer_pushed = True
+
+    def _pop_pointer(self) -> None:
+        """Pop our pushed pointer shape; a no-op when we own none."""
+        if self._pointer_pushed:
+            kitty.write_bytes(kitty.reset_pointer_shape(), self.fd_out)
+            self._pointer_pushed = False
 
     # -- terminal lifecycle ----------------------------------------------
     def _enter(self):
@@ -186,10 +207,13 @@ class Viewer:
     def _exit(self):
         import termios
         cleanup = kitty.delete_image(self._img_id)
-        # unconditionally clear the crosshair pointer so a quit/kill mid-delete
-        # never leaves the terminal's cursor stuck as one.
+        # pop our pointer shape iff we pushed one (quit/kill mid-delete or
+        # mid-measure must not leave the cursor stuck) -- but never a bare
+        # unbalanced pop, which would clobber a shape pushed outside vimol.
+        pointer = kitty.reset_pointer_shape() if self._pointer_pushed else b""
+        self._pointer_pushed = False
         kitty.write_bytes(_input.disable_mouse(pixel=True) + cleanup
-                          + kitty.reset_pointer_shape()
+                          + pointer
                           + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
         if self._old_termios is not None:
             termios.tcsetattr(self.fd_in, termios.TCSADRAIN, self._old_termios)
@@ -678,7 +702,12 @@ class Viewer:
             return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
         mol = self.widget.molecule
         hov = self.widget.atom_info(self.widget.hovered)
-        raw_left = hov if hov else (self._msg or
+        # a live measurement readout (2+ picks in measure mode) outranks the
+        # hover text; with 0-1 picks measurement() is "" and the normal
+        # left-segment behavior applies.
+        measure = (editor.measurement(mol, self.widget.measure_sel)
+                   if self.widget.measure_mode else "")
+        raw_left = measure or hov or (self._msg or
             f"{(mol.name or 'molecule')[:22]}  {mol.formula()}  {mol.n_atoms} atoms")
         # Fixed-width, not just truncated: hover text changes on every mouse
         # move and can be shorter *or* longer than the previous frame's, so
@@ -696,6 +725,7 @@ class Viewer:
         hint = "  s save  q quit" if self.editable else "  q quit"
         show_buttons = self.editable and self.widget.append_mode
         show_delete = self.editable and self.widget.delete_mode
+        show_measure = self.widget.measure_mode      # read-only-safe: no editable gate
 
         # Everything from the representation tag onward is a "trailer" built
         # from (escaped, visible_len) pieces and right-anchored via padding
@@ -709,6 +739,8 @@ class Viewer:
             pieces.append((f"  {base}\x1b[1m✎APPEND\x1b[22m", 9))          # "  ✎APPEND"
         elif show_delete:
             pieces.append((f"  {base}\x1b[1m✗DELETE\x1b[22m", 9))          # "  ✗DELETE"
+        elif show_measure:
+            pieces.append((f"  {base}\x1b[1m∡MEASURE\x1b[22m", 10))        # "  ∡MEASURE"
         pieces.append((mod, len(mod)))
         # Cleanup hint: recomputed from model state every render (no hover
         # dependence), so it appears/disappears exactly like [MODIFIED] does
@@ -843,22 +875,29 @@ class Viewer:
             return False
         elif key == "a":
             if self.editable:
-                was_delete = self.widget.delete_mode
                 self.widget.set_append_mode(not self.widget.append_mode)
                 self._msg = ""
-                if was_delete:
-                    # switching delete -> append via 'a': drop the crosshair so
-                    # it doesn't linger into append mode.
-                    kitty.write_bytes(kitty.reset_pointer_shape(), self.fd_out)
+                # append owns no pointer shape: switching here from delete or
+                # measure must drop theirs so it doesn't linger (no-op if
+                # nothing is pushed).
+                self._pop_pointer()
             else:
                 self.autospin = not self.autospin        # classic binding
+        elif key == "m":
+            # measuring is read-only-safe, so 'm' works without --edit too
+            self.widget.set_measure_mode(not self.widget.measure_mode)
+            self._msg = ""
+            if self.widget.measure_mode:
+                self._push_pointer("cell")               # precision plus-cross
+            else:
+                self._pop_pointer()
         elif key == "x" and self.editable:
             self.widget.set_delete_mode(not self.widget.delete_mode)
             self._msg = ""
-            # arm/disarm the crosshair pointer on every delete-mode transition
-            shape = (kitty.set_pointer_shape("crosshair") if self.widget.delete_mode
-                     else kitty.reset_pointer_shape())
-            kitty.write_bytes(shape, self.fd_out)
+            if self.widget.delete_mode:
+                self._push_pointer("crosshair")
+            else:
+                self._pop_pointer()
         elif key == "o" and self.editable:
             self.autospin = not self.autospin            # relocated while editing
         elif key == "s" and self.editable:

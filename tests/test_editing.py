@@ -1176,14 +1176,107 @@ def test_switching_to_append_via_a_resets_pointer(monkeypatch):
 
 
 def test_exit_resets_pointer_shape(monkeypatch):
+    # _exit pops the pointer shape iff this viewer actually pushed one --
+    # see _pointer_pushed / _push_pointer / _pop_pointer. Deliberately arm
+    # delete mode first so there is a push to unwind; the balance is what
+    # keeps a stray pop from clobbering a shape pushed by something outside
+    # vimol (an outer tmux/terminal push), see the no-op counterpart below.
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("x")])                 # delete on -> crosshair pushed
+    captured = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: captured.extend(data))
+    v._exit()                                    # quit mid-delete un-sets the crosshair
+    assert kitty.reset_pointer_shape() in bytes(captured)
+
+
+def test_exit_does_not_pop_pointer_when_nothing_was_pushed(monkeypatch):
     import vimol.kitty as kitty
     from vimol.viewer import Viewer
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     v = Viewer(mol, backend="cpu", editable=True)
     captured = bytearray()
     monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: captured.extend(data))
-    v._exit()                                    # cleanup always un-sets the crosshair
-    assert kitty.reset_pointer_shape() in bytes(captured)
+    v._exit()                                    # never armed delete/measure -> no pop
+    assert kitty.reset_pointer_shape() not in bytes(captured)
+
+
+def test_m_toggles_measure_mode_in_readonly_and_editable_viewers():
+    from vimol.viewer import Viewer
+    for editable in (False, True):
+        mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+        v = Viewer(mol, backend="cpu", editable=editable)
+        v.widget.set_pixel_size(200, 200)
+        v._cols, v._rows = 100, 30
+        v._dispatch([KeyEvent("m")])
+        assert v.widget.measure_mode, f"editable={editable}"
+        v._dispatch([KeyEvent("m")])
+        assert not v.widget.measure_mode, f"editable={editable}"
+
+
+def test_measure_mode_mutually_exclusive_with_append_and_delete():
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("a")])
+    v._dispatch([KeyEvent("m")])
+    assert v.widget.measure_mode and not v.widget.append_mode
+    v._dispatch([KeyEvent("x")])
+    assert v.widget.delete_mode and not v.widget.measure_mode
+    v._dispatch([KeyEvent("m")])
+    assert v.widget.measure_mode and not v.widget.delete_mode
+
+
+def test_status_bar_shows_measure_badge_and_readout():
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=False)   # read-only: badge still shows
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    assert "∡MEASURE" not in v._status_bar()
+    v._dispatch([KeyEvent("m")])
+    assert "∡MEASURE" in v._status_bar()
+    v.widget.measure_sel = [0, 1]                    # as if two atoms were clicked
+    assert "d(#0–#1) = 1.500 Å" in v._status_bar()
+
+
+def test_measure_pointer_pushes_cell_and_pops_balanced_across_transitions(monkeypatch):
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    pushes, pops = [], []
+
+    def capture(data, fd=1):
+        push_cell = kitty.set_pointer_shape("cell")
+        push_cross = kitty.set_pointer_shape("crosshair")
+        pop = kitty.reset_pointer_shape()
+        buf = bytes(data)
+        for token, sink in ((push_cell, pushes), (push_cross, pushes), (pop, pops)):
+            start = 0
+            while (at := buf.find(token, start)) != -1:
+                sink.append(token)
+                start = at + len(token)
+    monkeypatch.setattr(kitty, "write_bytes", capture)
+
+    v._dispatch([KeyEvent("m")])                 # arm measure -> push cell
+    assert pushes == [kitty.set_pointer_shape("cell")] and not pops
+    v._dispatch([KeyEvent("x")])                 # measure -> delete: pop, then push crosshair
+    assert pops == [kitty.reset_pointer_shape()]
+    assert pushes[-1] == kitty.set_pointer_shape("crosshair")
+    v._dispatch([KeyEvent("m")])                 # delete -> measure: pop, push cell
+    v._dispatch([KeyEvent("a")])                 # measure -> append: pop, no push
+    v._dispatch([KeyEvent("a")])                 # append off: nothing pushed -> no pop
+    assert len(pushes) == len(pops), "every push must have exactly one matching pop"
 
 
 def test_pointer_shape_helpers_build_osc22_push_pop_sequences():

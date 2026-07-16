@@ -127,6 +127,7 @@ host app that puts its own chrome above the molecule and routes the mouse.
 | Roll | `[` / `]` |
 | Representation | `1` ball · `2` space · `3` licorice · `4` wire · `s` cycle |
 | Autospin | `a` |
+| Measure | `m` toggles; click 2 atoms → distance (Å), 3 → angle, 4 → dihedral; click empty space to reset |
 | Trajectory frame | `n` / `p` |
 | Transparent background | `t` |
 | Depth cue / hi-quality / re-fit / reset | `d` / `g` / `f` / `r` |
