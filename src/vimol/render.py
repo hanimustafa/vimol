@@ -68,7 +68,8 @@ class Renderer:
             color = np.zeros((H, W, 3), np.float32)
         else:
             bg = np.array(style.background, np.float32)
-            color = np.tile(bg, (H, W, 1)).astype(np.float32)
+            color = np.empty((H, W, 3), np.float32)
+            color[...] = bg  # broadcast-fill (cheaper than np.tile's repeat)
         zbuf = np.full((H, W), -np.inf, np.float32)
         if mol.n_atoms == 0:
             return self._finish(color, zbuf, transparent)
@@ -110,15 +111,20 @@ class Renderer:
         zmax = float(z_all.max()) if z_all.size else 1.0
         zspan = max(zmax - zmin, 1e-6)
 
+        # columns are the three lighting directions, so a single (M,3)@(3,3)
+        # matmul yields all three dot products at once (one BLAS call instead
+        # of three), which is cheaper per fragment than dotting separately.
+        shade_mat = np.stack([light, fill, halfv], axis=1)
+
         def shade(normals, albedo):
-            # normals: (...,3) view-space unit; albedo: (...,3)
-            nl = np.clip(normals @ light, 0, 1)
-            nf = np.clip(normals @ fill, 0, 1) * style.fill_light
-            nh = np.clip(normals @ halfv, 0, 1)
-            spec = np.power(nh, style.shininess) * style.specular_strength
-            diff = (style.ambient + nl + nf)[..., None]
-            out = albedo * diff + spec[..., None]
-            return out
+            # normals: (M,3) view-space unit; albedo: (M,3) or (3,)
+            # dots of unit vectors never exceed 1, so a lower clamp at 0 is all
+            # that's needed -- np.maximum avoids np.clip's per-call overhead.
+            d = normals @ shade_mat                       # (M,3): n·light, n·fill, n·halfv
+            np.maximum(d, 0.0, out=d)
+            spec = np.power(d[:, 2], style.shininess) * style.specular_strength
+            diff = (style.ambient + d[:, 0] + d[:, 1] * style.fill_light)[:, None]
+            return albedo * diff + spec[:, None]
 
         radii = _atom_radii(mol, style)
 
@@ -128,6 +134,7 @@ class Renderer:
                              color, zbuf, shade, zmin, zspan)
 
         # atoms drawn after bonds; z-buffer keeps whichever is nearer
+        inv_zoom = 1.0 / zoom
         order = np.argsort(sz)  # far to near so specular highlights aren't clobbered oddly
         for a in order:
             r = radii[a]
@@ -143,26 +150,35 @@ class Renderer:
             y1 = min(int(np.ceil(cy + sr)) + 1, H)
             if x0 >= x1 or y0 >= y1:
                 continue
-            xs = np.arange(x0, x1)
-            ys = np.arange(y0, y1)
-            gx, gy = np.meshgrid(xs, ys)
-            dx = gx - cx
-            dy = gy - cy
-            d2 = dx * dx + dy * dy
+            # squared screen-space distance to the atom centre, via broadcasting
+            # a row and a column (cheaper than materializing a full meshgrid).
+            dxr = np.arange(x0, x1) - cx          # (w,)
+            dyr = np.arange(y0, y1) - cy          # (h,)
+            d2 = (dxr * dxr)[None, :] + (dyr * dyr)[:, None]   # (h,w)
             mask = d2 <= sr * sr
             if not mask.any():
                 continue
-            # view-plane offsets in angstrom
-            ox = dx / zoom
-            oy = -dy / zoom
-            h2 = r * r - ox * ox - oy * oy
-            np.clip(h2, 0.0, None, out=h2)
-            h = np.sqrt(h2)
-            depth = cz + h
-            normals = np.stack([ox / r, oy / r, h / r], axis=-1)
-            albedo = np.broadcast_to(base_colors[a], normals.shape).astype(np.float32)
-            shaded = shade(normals, albedo)
-            self._composite(color, zbuf, x0, x1, y0, y1, mask, depth, shaded, style, cz, zmin, zspan)
+            # sphere depth: front-surface height above the view plane
+            h2 = r * r - d2 * (inv_zoom * inv_zoom)
+            np.maximum(h2, 0.0, out=h2)
+            depth = cz + np.sqrt(h2)
+            sub_z = zbuf[y0:y1, x0:x1]
+            win = mask & (depth > sub_z)
+            if not win.any():
+                continue
+            # build normals + shade only the fragments that survive the z-test
+            wy, wx = np.nonzero(win)
+            dw = depth[wy, wx]
+            inv_r = 1.0 / r
+            normals = np.empty((wy.size, 3), np.float64)
+            normals[:, 0] = dxr[wx] * (inv_zoom * inv_r)
+            normals[:, 1] = -dyr[wy] * (inv_zoom * inv_r)
+            normals[:, 2] = (dw - cz) * inv_r
+            rgb = shade(normals, base_colors[a])
+            self._apply_fog(rgb, dw, style, zmin, zspan)
+            sub_c = color[y0:y1, x0:x1]
+            sub_c[wy, wx] = rgb
+            sub_z[wy, wx] = dw
 
         if has_arrows:
             self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color, zbuf, shade, zmin, zspan)
@@ -226,10 +242,9 @@ class Renderer:
         y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
         if x0 >= x1 or y0 >= y1:
             return
-        xs = np.arange(x0, x1)
-        ys = np.arange(y0, y1)
-        gx, gy = np.meshgrid(xs, ys)
-        # pixel -> view-plane coordinates (angstrom)
+        # pixel -> view-plane coordinates (angstrom), broadcasting a row/column
+        gx = np.arange(x0, x1)[None, :]
+        gy = np.arange(y0, y1)[:, None]
         vx = (gx - ox_s) / zoom
         vy = (oy_s - gy) / zoom
         ex = vx - ax
@@ -270,9 +285,8 @@ class Renderer:
         # split color at midpoint
         frac = t / L
         albedo = np.where((frac < 0.5)[..., None], color_a, color_b).astype(np.float32)
-        shaded = shade(normals, albedo)
         self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
-                        shaded, style, None, zmin, zspan)
+                        normals, albedo, shade, style, zmin, zspan)
 
     # ------------------------------------------------------------------
     def _draw_cone_segment(self, base, apex, radius, color_rgb, zoom, ox_s, oy_s,
@@ -307,9 +321,8 @@ class Renderer:
         y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H)
         if x0 >= x1 or y0 >= y1:
             return
-        xs = np.arange(x0, x1)
-        ys = np.arange(y0, y1)
-        gx, gy = np.meshgrid(xs, ys)
+        gx = np.arange(x0, x1)[None, :]
+        gy = np.arange(y0, y1)[:, None]
         vx = (gx - ox_s) / zoom
         vy = (oy_s - gy) / zoom
         ex = vx - ax
@@ -369,24 +382,47 @@ class Renderer:
         nlen = np.sqrt(nx * nx + ny * ny + nz * nz)
         nlen = np.where(nlen < 1e-9, 1.0, nlen)
         normals = np.stack([nx / nlen, ny / nlen, nz / nlen], axis=-1)
-        albedo = np.broadcast_to(np.asarray(color_rgb, np.float32), normals.shape)
-        shaded = shade(normals, albedo)
+        albedo = np.asarray(color_rgb, np.float32)
         self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
-                        shaded, style, None, zmin, zspan)
+                        normals, albedo, shade, style, zmin, zspan)
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _composite(color, zbuf, x0, x1, y0, y1, mask, depth, shaded, style, _cz, zmin, zspan):
+    def _composite(color, zbuf, x0, x1, y0, y1, mask, depth, normals, albedo,
+                   shade, style, zmin, zspan):
+        """Depth-test the primitive's bounding box, then shade only the pixels
+        that survive.
+
+        Shading (dot products, specular power) and fog are the expensive part,
+        so they run *after* the visibility test on the surviving 1-D fragment
+        list rather than over the whole rectangle -- pixels outside the mask or
+        hidden behind a nearer surface are never shaded at all.
+        """
         sub_z = zbuf[y0:y1, x0:x1]
         win = mask & (depth > sub_z)
         if not win.any():
             return
-        rgb = shaded
-        if style.depth_cue > 0:
-            # fog toward the back: fragments with smaller depth get darker/bluer
-            f = (depth - zmin) / zspan  # 0 back .. 1 front
-            fog = 1.0 - style.depth_cue * (1.0 - np.clip(f, 0, 1))
-            rgb = rgb * fog[..., None]
+        nrm = normals[win]                                   # (M,3)
+        alb = albedo if albedo.ndim == 1 else albedo[win]    # (3,) or (M,3)
+        rgb = shade(nrm, alb)                                # (M,3)
+        dw = depth[win]
+        Renderer._apply_fog(rgb, dw, style, zmin, zspan)
         sub_c = color[y0:y1, x0:x1]
-        sub_c[win] = rgb[win]
-        sub_z[win] = depth[win]
+        sub_c[win] = rgb
+        sub_z[win] = dw
+
+    @staticmethod
+    def _apply_fog(rgb, depth_win, style, zmin, zspan):
+        """Darken fragments toward the back of the scene, in place.
+
+        ``rgb`` is the (M,3) list of surviving fragment colors; ``depth_win``
+        their depths. Uses ``maximum``/``minimum`` ufuncs rather than
+        ``np.clip`` to avoid the latter's per-call scalar checks, which are a
+        measurable cost when invoked once per primitive per frame.
+        """
+        if style.depth_cue <= 0:
+            return
+        f = (depth_win - zmin) / zspan  # 0 back .. 1 front
+        np.maximum(f, 0.0, out=f)
+        np.minimum(f, 1.0, out=f)
+        rgb *= (1.0 - style.depth_cue * (1.0 - f))[:, None]
