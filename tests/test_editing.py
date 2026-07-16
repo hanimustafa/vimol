@@ -524,6 +524,48 @@ def test_cleanup_relaxes_distorted_angles_toward_tetrahedral():
     assert (1, 4) not in pairs_after                          # false bond gone
 
 
+def test_cleanup_registered_coordination_still_hits_ideal_angle():
+    # Regression: the repulsion fallback must not disturb the registered
+    # path -- a distorted tetrahedral carbon still lands on ~109.47 deg.
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
+    ch = elements.covalent_radius("C") + elements.covalent_radius("H")
+    d1 = mol.positions[1] / np.linalg.norm(mol.positions[1])
+    d4 = mol.positions[4] / np.linalg.norm(mol.positions[4])
+    perp = d4 - np.dot(d4, d1) * d1
+    perp /= np.linalg.norm(perp)
+    mol.positions[4] = ch * (np.cos(np.radians(55.0)) * d1 + np.sin(np.radians(55.0)) * perp)
+    editor._reperceive(mol)
+    assert editor.cleanup(mol) is True
+    v1 = mol.positions[1] - mol.positions[c]
+    v4 = mol.positions[4] - mol.positions[c]
+    assert abs(_angle(v1, v4) - 109.47) < 2.0                 # registered path unchanged
+
+
+def test_cleanup_spreads_unregistered_coordination_by_repulsion():
+    # Link two methanes at their carbons -> a 5-coordinate carbon, which has
+    # no (C, 5) template. Without a repulsion fallback its neighbors stay
+    # clumped; with theta=180 the law-of-cosines target becomes La+Lb (pure
+    # repulsion), spreading them toward a trigonal bipyramid.
+    mol = Molecule()
+    c0 = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
+    c1 = editor.birth_molecule(mol, [10.0, 0.0, 0.0])         # a second CH4, far off
+    editor.add_manual_bond(mol, c0, c1)                       # C0 now 5-coordinate
+    neigh0 = editor._neighbors(mol, c0)
+    assert len(neigh0) == 5
+
+    def min_neighbor_angle(center, neigh):
+        c = mol.positions[center]
+        vs = [mol.positions[n] - c for n in neigh]
+        return min(_angle(vs[a], vs[b])
+                   for a in range(len(vs)) for b in range(a + 1, len(vs)))
+
+    editor.cleanup(mol)
+    neigh0 = editor._neighbors(mol, c0)
+    assert len(neigh0) == 5                                   # still 5-coordinate
+    assert min_neighbor_angle(c0, neigh0) > 80.0             # spread, not clumped
+
+
 def test_cleanup_returns_false_and_moves_nothing_when_nothing_to_clean():
     mol = Molecule()
     editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # only ideal-length bonds

@@ -354,9 +354,11 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
     (Urey-Bradley) springs around each *center* in ``mol.new_atoms`` plus
     the endpoints of stretched manual bonds, so bond-length springs cannot
     collapse the local geometry. The center's template
-    (``TEMPLATES[(symbol, n_neighbors)]``; no entry -> skip) gives the ideal
-    angle theta, and each pair of its bonded neighbors gets a spring at the
-    law-of-cosines distance for theta over the two bond springs' targets.
+    (``TEMPLATES[(symbol, n_neighbors)]``) gives the ideal angle theta; a
+    coordination with no registered template falls back to theta=180 (pure
+    repulsion -- see the loop body). Each pair of the center's bonded
+    neighbors gets a spring at the law-of-cosines distance for theta over
+    the two bond springs' targets.
     Old, uninvolved centers get none -- loaded geometry is still not ours
     to judge. A neighbor pair that already carries a bond spring keeps it:
     a clash spring's target is raised to the angle target when the angle
@@ -391,9 +393,16 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
         if len(neigh) < 2:
             continue
         tmpl = templates.TEMPLATES.get((mol.symbols[k], len(neigh)))
-        if tmpl is None:               # hypervalent / unknown coordination
-            continue
-        cos_t = float(np.dot(tmpl.directions[0], tmpl.directions[1]))
+        if tmpl is None:
+            # Unregistered coordination (e.g. a 5-coordinate carbon from
+            # linking two methanes): fall back to pure repulsion. theta=180
+            # makes each pair's law-of-cosines target the antipodal chord
+            # La+Lb, which can only push apart, and every pair pushing
+            # equally settles into the maximally-spread arrangement
+            # (trigonal-bipyramidal for 5, octahedral for 6, ...).
+            cos_t = -1.0
+        else:
+            cos_t = float(np.dot(tmpl.directions[0], tmpl.directions[1]))
         neigh = sorted(neigh)
         for x in range(len(neigh)):
             for y in range(x + 1, len(neigh)):
