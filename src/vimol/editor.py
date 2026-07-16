@@ -202,6 +202,11 @@ def delete_atom(mol: Molecule, idx: int) -> None:
     for j in _neighbors(mol, idx):
         if mol.symbols[j] == "H" and _neighbors(mol, j) == [idx]:
             victims.add(j)
+    # Surviving neighbors of a deleted atom just lost a bond -- their local
+    # geometry may no longer be ideal (e.g. a tetrahedral center left with 3
+    # neighbors still at 109.47 deg instead of a relaxed trigonal 120 deg),
+    # so they need the same cleanup attention as a freshly created atom.
+    affected = {j for v in victims for j in _neighbors(mol, v) if j not in victims}
     keep = [i for i in range(mol.n_atoms) if i not in victims]
     # Remap manual bonds across the row removal *before* rebuilding symbols/
     # positions below: drop any pair touching a deleted atom, and shift the
@@ -213,7 +218,8 @@ def delete_atom(mol: Molecule, idx: int) -> None:
         for i, j, order in mol.manual_bonds
         if i not in victims and j not in victims
     ]
-    mol.new_atoms = {remap[i] for i in mol.new_atoms if i not in victims}
+    mol.new_atoms = {remap[i] for i in mol.new_atoms if i not in victims} \
+        | {remap[j] for j in affected}
     mol.symbols = [mol.symbols[i] for i in keep]
     # fancy-index the surviving rows (a copy); empty keep -> a clean (0, 3) array
     mol.positions = mol.positions[keep]
@@ -438,19 +444,40 @@ class RelaxState:
     weights: np.ndarray
 
 
+# A spring is considered "already at target" below this displacement -- well
+# under chemical significance, just enough to absorb floating-point noise.
+_PREPARE_EPS = 1e-3
+
+
 def cleanup_prepare(mol: Molecule) -> Optional[RelaxState]:
     """Set up a cleanup relaxation, or None when there is nothing to fix.
 
-    Computes :func:`cleanup_targets` and freezes the full spring set and
-    per-atom weights into a :class:`RelaxState` for :func:`cleanup_advance`
-    to step through. Atoms in ``mol.new_atoms`` get weight 1.0 and the rest
-    0.15 (~7x less): the new segment does almost all the moving, but old
-    atoms are not frozen solid (a fully pinned clash could be unresolvable).
+    Builds the full spring set (see :func:`_build_springs`) and freezes it,
+    with per-atom weights, into a :class:`RelaxState` for
+    :func:`cleanup_advance` to step through. Atoms in ``mol.new_atoms`` get
+    weight 1.0 and the rest 0.15 (~7x less): the new/edited segment does
+    almost all the moving, but old atoms are not frozen solid (a fully
+    pinned clash could be unresolvable).
+
+    Available any time there is a real spring to relax -- not just the
+    urgent clash/stretched-manual-bond cases :func:`cleanup_targets` flags
+    for the status-bar hint. A spring on an already-ideal bond or angle has
+    its target equal to the current geometry by construction, so it never
+    trips this check; one only fires when a bond is a clash/stretched, or
+    when a center in ``mol.new_atoms`` (which :func:`delete_atom` also
+    populates with a deletion's surviving neighbors) sits away from its
+    ideal angle -- e.g. three leftover substituents still at a tetrahedral
+    spacing after their fourth was deleted.
     """
     clash_pairs, stretched = cleanup_targets(mol)
-    if not clash_pairs and not stretched:
-        return None
     springs = _build_springs(mol, clash_pairs, stretched)
+    pos = mol.positions
+    deviated = any(
+        abs(float(np.linalg.norm(pos[j] - pos[i])) - target) > _PREPARE_EPS
+        for i, j, target, _stiff in springs
+    )
+    if not deviated:
+        return None
     weights = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
     return RelaxState(springs=springs, weights=weights)
 

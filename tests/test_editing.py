@@ -574,6 +574,31 @@ def test_cleanup_returns_false_and_moves_nothing_when_nothing_to_clean():
     np.testing.assert_allclose(mol.positions, before)
 
 
+def test_cleanup_available_after_delete_even_with_no_new_atoms():
+    # a settled (not "new") tetrahedral methane, then delete one H -- no atom
+    # was added, so the old clash/stretched-only gate would find nothing to
+    # fix and 'c' would silently do nothing. Deletion should mark the
+    # survivors as needing attention so cleanup is available "anytime".
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])     # perfect CH4
+    mol.new_atoms.clear()                               # simulate an accepted/loaded molecule
+    editor.delete_atom(mol, 1)                          # C + 3 H left, still at tetrahedral angles
+    assert editor.cleanup_targets(mol) == ([], [])       # no clash, no stretched manual bond
+    assert editor.cleanup_prepare(mol) is not None        # yet cleanup is available
+    assert editor.cleanup(mol) is True
+
+    remaining_h = [i for i, s in enumerate(mol.symbols) if s == "H"]
+    assert len(remaining_h) == 3
+    angles = []
+    for x in range(3):
+        for y in range(x + 1, 3):
+            a = mol.positions[remaining_h[x]] - mol.positions[c]
+            b = mol.positions[remaining_h[y]] - mol.positions[c]
+            angles.append(_angle(a, b))
+    # relaxed toward trigonal (120 deg), not left at the old tetrahedral 109.47
+    assert min(angles) > 115.0
+
+
 # -- xyz writer ------------------------------------------------------------
 def test_xyz_dumps_roundtrip():
     mol = Molecule()
