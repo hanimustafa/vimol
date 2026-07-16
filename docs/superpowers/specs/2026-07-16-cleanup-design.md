@@ -236,3 +236,48 @@ autospin-style block — while `widget.cleanup_active`, call
 - Viewer: `KeyEvent("c")` dispatch starts the animation
   (`widget.cleanup_active`); the existing hint/read-only tests keep
   passing.
+
+## Revision 3 (2026-07-16, post-review by user)
+
+**Defect:** cleanup does not spread the neighbors of a center whose
+coordination number has no registered template (e.g. a 5-coordinate
+carbon made by linking two methanes). `_build_springs` looks up
+`TEMPLATES[(element, n_neighbors)]` and `continue`s past the center when
+there is no entry, so no 1-3 springs are added and the hydrogens stay
+clumped where they were built.
+
+**Fix — repulsion fallback via θ = 180°.** The angle springs already
+target the law-of-cosines chord
+`sqrt(La² + Lb² − 2·La·Lb·cos θ)`. "Spread the neighbors apart by mutual
+repulsion" is exactly `cos θ = −1` (θ = 180°), which makes each pair's
+target `La + Lb` — the antipodal chord. Since the real chord can never
+exceed `La + Lb` (triangle inequality), such a spring only ever pushes
+apart, and the equilibrium where every pair pushes equally is the
+maximally-spread arrangement: trigonal-bipyramidal for 5, octahedral for
+6, and so on (VSEPR as point repulsion, emergent from one setpoint).
+
+So in `_build_springs`, at the center loop:
+
+- `tmpl = TEMPLATES.get((symbol(k), len(neigh)))`.
+- Registered (`tmpl is not None`): unchanged — `cos_t =
+  dot(tmpl.directions[0], tmpl.directions[1])` (exact ideal angle;
+  tetrahedral stays exactly 109.47°).
+- Unregistered (`tmpl is None`): `cos_t = -1.0` instead of `continue`.
+
+Everything downstream is identical: same `t = sqrt(la² + lb² − 2·la·lb·
+cos_t)`, same half stiffness (`_ANGLE_STIFFNESS`), same
+clash-pair/ring/`angle_targets` handling, same per-atom weights, same
+"only centers in `new_atoms` ∪ stretched-manual endpoints" scope (loaded
+geometry still untouched). No coordination cap — repulsion handles
+arbitrary N harmlessly.
+
+### Revision-3 tests
+
+- A 5-coordinate carbon (build two methanes far apart, `add_manual_bond`
+  their carbons, `cleanup`) ends with its five neighbors spread out: the
+  minimum pairwise neighbor angle at the carbon rises well above the
+  clumped starting value, toward the ~90° floor of a trigonal
+  bipyramid (assert, say, min angle > 80°).
+- Regression: a plain tetrahedral carbon (`birth_molecule`, distort one
+  H into a clash, `cleanup`) still relaxes to within a couple degrees of
+  109.47° — the registered path is unchanged.
