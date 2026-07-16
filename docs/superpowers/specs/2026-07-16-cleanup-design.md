@@ -281,3 +281,26 @@ arbitrary N harmlessly.
 - Regression: a plain tetrahedral carbon (`birth_molecule`, distort one
   H into a clash, `cleanup`) still relaxes to within a couple degrees of
   109.47° — the registered path is unchanged.
+
+## Revision 4 (2026-07-16, post-review by user)
+
+**Principle: connectivity is frozen input to a cleanup.** At the moment
+'c' is pressed, the connectivity is fully known — the implicit
+(distance-perceived) bonds of old atoms plus the explicit manual bonds
+of edited atoms, as they stand in `mol.bonds`. Cleanup must NEVER change
+that connectivity, implicitly or explicitly, beyond the one change it
+exists to make: removing the identified clash pairs. In particular, two
+hydrogens the relaxation happens to push within bonding range must NOT
+gain a bond.
+
+**Defect fixed:** `cleanup_finish` re-perceived bonds from the relaxed
+geometry, so relaxation motion could mint phantom bonds (drifted-close
+pairs) or silently drop stretched ones.
+
+**Fix:** `cleanup_prepare` freezes `final_bonds` — the press-time bond
+list minus the clash pairs — into the `RelaxState`, and
+`cleanup_finish(mol, state)` assigns it verbatim instead of
+re-perceiving. Consequences the tests pin down: no bond is ever added
+for drifted atoms; no press-time bond is ever dropped however far it
+stretched; clash bonds are removed even if the frame budget ran out
+before their pair fully cleared the perception cutoff.

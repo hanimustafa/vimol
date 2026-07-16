@@ -509,12 +509,16 @@ class RelaxState:
 
     ``springs`` is the (i, j, target, stiffness, repulsive_only) list from
     :func:`_build_springs`; ``weights`` is the per-atom mobility vector (1.0
-    for new atoms, 0.15 otherwise). Both stay constant across
-    :func:`cleanup_advance` calls -- targets are never re-derived from the
-    moving geometry.
+    for new atoms, 0.15 otherwise); ``final_bonds`` is the connectivity the
+    molecule will have when the relaxation finishes -- the press-time bond
+    list minus the clash pairs, frozen here so :func:`cleanup_finish` can
+    assign it verbatim. All three stay constant across
+    :func:`cleanup_advance` calls -- nothing is re-derived from the moving
+    geometry.
     """
     springs: List[Tuple[int, int, float, float, bool]]
     weights: np.ndarray
+    final_bonds: List[Tuple[int, int, int]]
 
 
 # A spring is considered "already at target" below this displacement -- well
@@ -555,7 +559,15 @@ def cleanup_prepare(mol: Molecule) -> Optional[RelaxState]:
     if not any(_spring_deviates(i, j, t, rep) for i, j, t, _stiff, rep in springs):
         return None
     weights = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
-    return RelaxState(springs=springs, weights=weights)
+    # Connectivity is FROZEN input to a cleanup: the implicit distance bonds
+    # of old atoms plus the explicit manual bonds, as they stand right now.
+    # The only change cleanup may make to it is removing the clash pairs --
+    # cleanup_finish assigns this list verbatim rather than re-perceiving,
+    # so relaxation motion can neither mint a bond (two hydrogens drifting
+    # within range) nor drop one (a bond stretched past the cutoff).
+    clash_set = set(clash_pairs)
+    final_bonds = [(i, j, o) for i, j, o in mol.bonds if (i, j) not in clash_set]
+    return RelaxState(springs=springs, weights=weights, final_bonds=final_bonds)
 
 
 def cleanup_advance(mol: Molecule, state: RelaxState,
@@ -597,14 +609,19 @@ def cleanup_advance(mol: Molecule, state: RelaxState,
     return float(np.linalg.norm(pos - start, axis=1).max())
 
 
-def cleanup_finish(mol: Molecule) -> None:
-    """Accept a relaxed geometry: re-perceive bonds, clear ``new_atoms``.
+def cleanup_finish(mol: Molecule, state: RelaxState) -> None:
+    """Accept a relaxed geometry: assign the frozen connectivity, clear ``new_atoms``.
 
-    The false clash bonds -- now stretched past the perception cutoff --
-    disappear here, and clearing ``new_atoms`` means repeated 'c' presses
-    do not keep kneading the molecule (and the status-bar hint goes away).
+    Connectivity was decided when the cleanup was prepared (press-time bonds
+    minus the clash pairs -- see :class:`RelaxState`); it is assigned here
+    VERBATIM, never re-perceived. Where the atoms ended up cannot change what
+    is bonded: two hydrogens the relaxation happened to push within range do
+    not gain a bond, a bond it stretched past the cutoff does not lose one,
+    and the clash bonds are gone even if their pair didn't quite clear the
+    threshold in the frame budget. Clearing ``new_atoms`` means repeated 'c'
+    presses do not keep kneading the molecule (and the hint goes away).
     """
-    _reperceive(mol)
+    mol.bonds = list(state.final_bonds)
     mol.new_atoms.clear()
 
 
@@ -618,12 +635,12 @@ def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
     the three stages themselves, a few iterations per frame.
 
     Returns False (no change) when there is nothing to fix; otherwise
-    relaxes, re-perceives, "accepts" the result by clearing
-    ``mol.new_atoms``, and returns True.
+    relaxes, assigns the frozen press-time connectivity (minus clash pairs),
+    "accepts" the result by clearing ``mol.new_atoms``, and returns True.
     """
     state = cleanup_prepare(mol)
     if state is None:
         return False
     cleanup_advance(mol, state, iterations=iterations, step=step)
-    cleanup_finish(mol)
+    cleanup_finish(mol, state)
     return True

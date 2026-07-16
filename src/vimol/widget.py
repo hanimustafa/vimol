@@ -511,16 +511,17 @@ class MoleculeWidget:
 
         Runs a few spring iterations; when the frame budget runs out or the
         motion settles (max displacement below :data:`_CLEANUP_SETTLED`),
-        finishes via :func:`editor.cleanup_finish` -- re-perceiving bonds and
-        accepting the geometry -- and returns False from then on.
+        finishes via :func:`editor.cleanup_finish` -- assigning the frozen
+        press-time connectivity (never re-perceiving: relaxation motion must
+        not mint or drop bonds) -- and returns False from then on.
         """
         if self._cleanup_state is None:
             return False
         disp = editor.cleanup_advance(self.scene.molecule, self._cleanup_state)
         self._cleanup_budget -= 1
         if self._cleanup_budget <= 0 or disp < _CLEANUP_SETTLED:
-            self._cleanup_state = None
-            editor.cleanup_finish(self.scene.molecule)
+            state, self._cleanup_state = self._cleanup_state, None
+            editor.cleanup_finish(self.scene.molecule, state)
         self._refresh_dirty()
         return True
 

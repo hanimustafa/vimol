@@ -587,6 +587,54 @@ def test_cleanup_unregistered_repulsion_does_not_overstretch_real_bonds():
             assert d < ch + 0.12                         # was drifting to ch+0.18..0.19
 
 
+# -- cleanup connectivity freeze ---------------------------------------------
+# Pressing 'c' treats connectivity as FROZEN input: the implicit (distance)
+# bonds of old atoms plus the explicit manual bonds of new atoms, as they
+# stand at press time. The relaxation may move atoms wherever it needs to,
+# but the only connectivity change cleanup is allowed to make is removing
+# the identified clash bonds -- never adding a bond because two atoms
+# happened to drift close, never dropping one because it got stretched.
+def _prepared_cleanup_scene():
+    """An old two-hydroxyl scene + a new clashing methane, cleanup prepared."""
+    mol = Molecule(symbols=["O", "H", "O", "H"],
+                   positions=np.array([[0.0, 0.0, 0.0], [0.97, 0.0, 0.0],
+                                       [3.14, 0.0, 0.0], [2.17, 0.0, 0.0]]))
+    ensure_bonds(mol)                       # O0-H1, O2-H3; H1..H3 at 1.2 A: no bond
+    c = editor.birth_molecule(mol, [0.0, 6.0, 0.0])
+    mol.positions[c + 1] = mol.positions[0] + np.array([0.0, 1.3, 0.0])  # fake a clash
+    editor._reperceive(mol)
+    state = editor.cleanup_prepare(mol)
+    assert state is not None
+    return mol, state
+
+
+def test_cleanup_finish_never_adds_bonds_for_drifted_atoms():
+    mol, state = _prepared_cleanup_scene()
+    # simulate the relaxation having nudged the two old H's within H-H cutoff
+    mol.positions[3] = mol.positions[1] + np.array([0.9, 0.0, 0.0])
+    editor.cleanup_finish(mol, state)
+    hh = [(i, j) for i, j, _o in mol.bonds
+          if {mol.symbols[i], mol.symbols[j]} == {"H"}]
+    assert hh == []                          # no phantom H-H bond, ever
+
+
+def test_cleanup_finish_never_drops_stretched_press_time_bonds():
+    mol, state = _prepared_cleanup_scene()
+    # simulate the relaxation having stretched an old implicit O-H past cutoff
+    mol.positions[3] = mol.positions[2] + np.array([2.5, 0.0, 0.0])
+    editor.cleanup_finish(mol, state)
+    assert (2, 3, 1) in mol.bonds            # press-time connectivity is kept
+
+
+def test_cleanup_finish_removes_clash_bonds_even_if_still_in_range():
+    mol, state = _prepared_cleanup_scene()
+    clash, _stretched = editor.cleanup_targets(mol)
+    assert clash                             # the faked methane-H / O contact
+    editor.cleanup_finish(mol, state)        # finish without moving anything
+    for i, j in clash:
+        assert not any(a == i and b == j for a, b, _o in mol.bonds)
+
+
 def test_cleanup_returns_false_and_moves_nothing_when_nothing_to_clean():
     mol = Molecule()
     editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # only ideal-length bonds
