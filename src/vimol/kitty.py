@@ -243,18 +243,22 @@ def clear_all_images() -> bytes:
 
 
 def set_pointer_shape(shape: str) -> bytes:
-    """OSC 22 bytes to set the OS mouse-pointer icon to a CSS-cursor *shape*.
+    """OSC 22 bytes to PUSH the OS mouse-pointer icon to a CSS-cursor *shape*.
 
     Kitty-family terminals honor this while focused; others ignore an OSC they
     don't recognize, so it's safe to write unconditionally (like the mouse-mode
-    sequences). Returns raw bytes for the caller to write.
+    sequences). Pushing (rather than a plain set) pairs with
+    :func:`reset_pointer_shape`'s pop, so disarming restores whatever shape
+    was actually active before -- not just the terminal's generic default,
+    which a plain set/reset pair would revert to instead. Returns raw bytes
+    for the caller to write.
     """
-    return f"\x1b]22;{shape}\x1b\\".encode()
+    return f"\x1b]22;>{shape}\x1b\\".encode()
 
 
 def reset_pointer_shape() -> bytes:
-    """OSC 22 bytes restoring the terminal's default mouse-pointer shape."""
-    return b"\x1b]22;\x1b\\"
+    """OSC 22 bytes to POP the pointer shape pushed by :func:`set_pointer_shape`."""
+    return b"\x1b]22;<\x1b\\"
 
 
 def write_bytes(data: bytes, fd: int = 1) -> None:

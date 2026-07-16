@@ -1186,10 +1186,14 @@ def test_exit_resets_pointer_shape(monkeypatch):
     assert kitty.reset_pointer_shape() in bytes(captured)
 
 
-def test_pointer_shape_helpers_build_osc22_sequences():
+def test_pointer_shape_helpers_build_osc22_push_pop_sequences():
+    # Plain set/reset only restores the terminal's generic default shape,
+    # not whatever was actually active before -- push/pop is OSC 22's
+    # purpose-built mechanism for "temporarily override, then perfectly
+    # restore", so arming uses a push and disarming a matching pop.
     from vimol import kitty
-    assert kitty.set_pointer_shape("crosshair") == b"\x1b]22;crosshair\x1b\\"
-    assert kitty.reset_pointer_shape() == b"\x1b]22;\x1b\\"
+    assert kitty.set_pointer_shape("crosshair") == b"\x1b]22;>crosshair\x1b\\"
+    assert kitty.reset_pointer_shape() == b"\x1b]22;<\x1b\\"
 
 
 # -- periodic-table layout --------------------------------------------------
