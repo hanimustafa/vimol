@@ -37,6 +37,12 @@ REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
 _BOND_PREVIEW_COLOR = (1.0, 0.85, 0.3)
 _BOND_PREVIEW_RADIUS = 0.06
 
+# Cleanup animation ('c'): frames before the relaxation is forced to finish,
+# and the per-tick max displacement (angstrom) below which it counts as
+# settled -- together roughly half a second of visible motion at 60 fps.
+_CLEANUP_FRAME_BUDGET = 30
+_CLEANUP_SETTLED = 1e-3
+
 
 class MoleculeWidget:
     def __init__(self, molecule: Molecule, width: int = 320, height: int = 240,
@@ -64,6 +70,10 @@ class MoleculeWidget:
         # and the widget's own rubber-band preview VectorField, if installed.
         self._bond_anchor: Optional[int] = None
         self._bond_field: Optional[VectorField] = None
+        # in-flight cleanup animation ('c'): the editor's RelaxState (None
+        # when idle) and how many frames it may still run before finishing.
+        self._cleanup_state = None
+        self._cleanup_budget = 0
         # cell metrics used only to convert cell-based events to pixels
         self.cell_w = 9.0
         self.cell_h = 18.0
@@ -88,9 +98,11 @@ class MoleculeWidget:
         self._saved_sig = self._signature()
         self.dirty = False
         # Drop any in-flight bond gesture -- its anchor index and preview
-        # field both belong to the molecule being replaced.
+        # field both belong to the molecule being replaced -- and any
+        # in-flight cleanup animation, whose springs index into it too.
         self._bond_anchor = None
         self._bond_field = None
+        self._cleanup_state = None
 
     def set_pixel_size(self, width: int, height: int, refit: bool = False) -> None:
         self.scene.set_size(width, height, refit=refit)
@@ -299,9 +311,12 @@ class MoleculeWidget:
             return False
         # Undo can shrink the molecule under a live bond gesture; cancel it
         # (removing its preview arrow too) so a stale anchor index can't be
-        # dereferenced by the next drag event.
+        # dereferenced by the next drag event. An in-flight cleanup animation
+        # is cancelled the same way (dropped, not finished): its springs were
+        # built against the geometry this undo is about to replace.
         if self._bond_anchor is not None:
             self._cancel_bond_gesture()
+        self._cleanup_state = None
         symbols, positions, bonds, manual_bonds, new_atoms = self._undo_stack.pop()
         mol = self.scene.molecule
         # restore in place so the Scene keeps referencing the same object
@@ -419,21 +434,62 @@ class MoleculeWidget:
         return True
 
     # -- cleanup ('c') ------------------------------------------------------
-    def cleanup(self) -> bool:
-        """Relax steric clashes / stretched manual bonds. Returns True if
-        anything moved.
+    @property
+    def cleanup_active(self) -> bool:
+        """True while a cleanup animation is in flight (started, not finished)."""
+        return self._cleanup_state is not None
 
-        Same snapshot-then-commit-on-change pattern as :meth:`_end_bond_gesture`:
-        the snapshot is taken before mutating, but only pushed to the undo
-        stack if :func:`editor.cleanup` actually changed the geometry.
+    def start_cleanup(self) -> bool:
+        """Begin an animated cleanup relaxation. Returns True if one started.
+
+        Returns False -- and pushes no undo entry -- when an animation is
+        already running (a 'c' press mid-animation is ignored) or there is
+        nothing to fix. Otherwise the undo snapshot is committed up front,
+        so a single 'u' undoes the whole animation no matter how many
+        :meth:`cleanup_tick` frames it ran.
         """
-        mol = self.scene.molecule
+        if self._cleanup_state is not None:
+            return False
         snapshot = self._snapshot()          # taken before mutating
-        if editor.cleanup(mol):
-            self._commit_undo(snapshot)
-            self._refresh_dirty()
-            return True
-        return False
+        state = editor.cleanup_prepare(self.scene.molecule)
+        if state is None:
+            return False
+        self._commit_undo(snapshot)
+        self._cleanup_state = state
+        self._cleanup_budget = _CLEANUP_FRAME_BUDGET
+        return True
+
+    def cleanup_tick(self) -> bool:
+        """Advance the cleanup animation one frame. Returns True if it moved.
+
+        Runs a few spring iterations; when the frame budget runs out or the
+        motion settles (max displacement below :data:`_CLEANUP_SETTLED`),
+        finishes via :func:`editor.cleanup_finish` -- re-perceiving bonds and
+        accepting the geometry -- and returns False from then on.
+        """
+        if self._cleanup_state is None:
+            return False
+        disp = editor.cleanup_advance(self.scene.molecule, self._cleanup_state)
+        self._cleanup_budget -= 1
+        if self._cleanup_budget <= 0 or disp < _CLEANUP_SETTLED:
+            self._cleanup_state = None
+            editor.cleanup_finish(self.scene.molecule)
+        self._refresh_dirty()
+        return True
+
+    def cleanup(self) -> bool:
+        """Relax steric clashes / stretched manual bonds in one shot.
+
+        The synchronous convenience over :meth:`start_cleanup` +
+        :meth:`cleanup_tick`: runs the whole animation to completion at
+        once. Returns True if anything moved (one undo entry), False when
+        there was nothing to fix (no undo entry).
+        """
+        if not self.start_cleanup():
+            return False
+        while self.cleanup_active:
+            self.cleanup_tick()
+        return True
 
     # -- picking ----------------------------------------------------------
     def pick(self, px: float, py: float) -> Optional[int]:

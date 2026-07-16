@@ -1526,13 +1526,16 @@ def test_widget_cleanup_returns_false_when_nothing_to_clean():
     assert not w.undo()                               # no snapshot was pushed
 
 
-def test_viewer_c_key_triggers_cleanup_only_when_editable():
+def test_viewer_c_key_starts_cleanup_only_when_editable():
     from vimol.viewer import Viewer
     mol = _clashy_molecule()
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(200, 200)
     v._cols, v._rows = 100, 30
     assert v._dispatch([KeyEvent("c")])
+    assert v.widget.cleanup_active               # 'c' starts the animation...
+    while v.widget.cleanup_active:               # ...the run loop ticks it out
+        v.widget.cleanup_tick()
     assert v.widget.dirty
     assert v.widget.molecule.new_atoms == set()
 
@@ -1540,6 +1543,7 @@ def test_viewer_c_key_triggers_cleanup_only_when_editable():
     v2.widget.set_pixel_size(200, 200)
     v2._cols, v2._rows = 100, 30
     assert not v2._dispatch([KeyEvent("c")])
+    assert not v2.widget.cleanup_active
     assert not v2.widget.dirty
 
 
@@ -1551,7 +1555,82 @@ def test_status_bar_shows_cleanup_hint_when_clash_exists_and_hides_after_c():
     v._cols, v._rows = 100, 30
     assert "cleanup" in v._status_bar()
     v._dispatch([KeyEvent("c")])
+    while v.widget.cleanup_active:
+        v.widget.cleanup_tick()
     assert "cleanup" not in v._status_bar()
+
+
+# -- widget cleanup animation (rev 2c) ---------------------------------------
+def test_widget_start_cleanup_animates_ticks_then_finishes():
+    mol = _clashy_molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    pos0 = mol.positions.copy()
+    assert w.start_cleanup() is True
+    assert w.cleanup_active
+    frames = []
+    for _ in range(100):                          # safety bound; budget is ~30
+        if not w.cleanup_tick():
+            break
+        frames.append(mol.positions.copy())
+    assert not w.cleanup_active
+    # at least two distinct intermediate states -- it animates, not teleports
+    distinct = [f for i, f in enumerate(frames)
+                if i == 0 or not np.allclose(f, frames[i - 1])]
+    assert len(distinct) >= 2
+    pairs = [(i, j) for i, j, _o in mol.bonds]
+    assert (0, 2) not in pairs                    # clash resolved at finish
+    assert mol.new_atoms == set()
+    assert w.dirty
+    assert w.undo()                               # a single 'u' undoes it all
+    np.testing.assert_allclose(mol.positions, pos0)
+    assert not w.dirty
+
+
+def test_widget_start_cleanup_nothing_to_fix_returns_false():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])   # nothing to clean
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    assert w.start_cleanup() is False
+    assert not w.cleanup_active
+    assert not w.cleanup_tick()                   # inert when nothing started
+    assert not w.undo()                           # no undo entry was pushed
+
+
+def test_widget_undo_mid_animation_cancels_cleanup():
+    mol = _clashy_molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    pos0 = mol.positions.copy()
+    assert w.start_cleanup()
+    assert w.cleanup_tick()                       # partway through
+    assert w.undo()                               # cancel + restore, no finish
+    assert not w.cleanup_active
+    np.testing.assert_allclose(mol.positions, pos0)
+    before = mol.positions.copy()
+    assert not w.cleanup_tick()                   # no further tick mutates
+    np.testing.assert_allclose(mol.positions, before)
+
+
+def test_widget_c_during_animation_is_ignored():
+    mol = _clashy_molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    pos0 = mol.positions.copy()
+    assert w.start_cleanup() is True
+    w.cleanup_tick()
+    assert w.start_cleanup() is False             # mid-animation press ignored
+    while w.cleanup_active:
+        w.cleanup_tick()
+    assert w.undo()                               # exactly one undo entry...
+    np.testing.assert_allclose(mol.positions, pos0)
+    assert not w.undo()                           # ...not two
+
+
+def test_widget_set_molecule_cancels_animation():
+    mol = _clashy_molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    assert w.start_cleanup()
+    w.set_molecule(Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]])))
+    assert not w.cleanup_active
+    assert not w.cleanup_tick()                   # inert against the new molecule
 
 
 def test_status_bar_shows_cleanup_hint_after_over_long_manual_bond():

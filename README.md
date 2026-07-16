@@ -198,11 +198,14 @@ are mutually exclusive: arming one disarms the other.
 Bond perception is distance-based, so freshly-built atoms can appear "bonded"
 to whatever they merely landed near, and an option-drag manual bond can be
 far longer than a real one. Press `c` to **cleanup**: it relaxes those two
-cases with a simple spring — pushing steric-clash bonds apart until the false
-bond disappears, and pulling over-long manual bonds toward a real bond
-length — moving the atoms you just placed far more than the rest of the
-structure. The status bar hints `⚠ c cleanup` whenever there's something for
-it to fix, and it's undoable like any other edit.
+cases with simple springs — pushing steric-clash bonds apart until the false
+bond disappears, pulling over-long manual bonds toward a real bond length,
+and nudging the angles around the affected atoms back toward their template
+geometry — moving the atoms you just placed far more than the rest of the
+structure. The relaxation animates over roughly half a second, so you watch
+the molecule settle rather than teleport. The status bar hints `⚠ c cleanup`
+whenever there's something for it to fix, and one `u` undoes the whole thing
+like any other edit.
 
 Any edit marks the model `[MODIFIED]`; `u` undoes step by step. Press `s` to
 save — the prompt is pre-filled with the source path, saves straight to a new

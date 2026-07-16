@@ -19,6 +19,7 @@ valency with new ones.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -414,32 +415,55 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
     return springs
 
 
-def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
-    """Relax steric clashes and stretched manual bonds ('c').
+@dataclass
+class RelaxState:
+    """An in-flight cleanup relaxation, fixed at :func:`cleanup_prepare` time.
 
-    A deliberately simple fixed-target spring relaxation -- a cosmetic tidy-
-    up, not a force field. The spring set (bond springs per bonded pair,
-    angle springs around new/stretched centers) is fixed once up front; see
-    :func:`_build_springs`.
+    ``springs`` is the (i, j, target, stiffness) list from
+    :func:`_build_springs`; ``weights`` is the per-atom mobility vector (1.0
+    for new atoms, 0.15 otherwise). Both stay constant across
+    :func:`cleanup_advance` calls -- targets are never re-derived from the
+    moving geometry.
+    """
+    springs: List[Tuple[int, int, float, float]]
+    weights: np.ndarray
 
-    Atoms in ``mol.new_atoms`` move ~7x more than the rest (weight 1.0 vs
-    0.15): the new segment does almost all the moving, but old atoms are not
-    frozen solid (a fully pinned clash could be unresolvable).
 
-    Returns False (no change) if :func:`cleanup_targets` finds nothing to
-    fix; otherwise relaxes, re-perceives, "accepts" the result by clearing
-    ``mol.new_atoms``, and returns True.
+def cleanup_prepare(mol: Molecule) -> Optional[RelaxState]:
+    """Set up a cleanup relaxation, or None when there is nothing to fix.
+
+    Computes :func:`cleanup_targets` and freezes the full spring set and
+    per-atom weights into a :class:`RelaxState` for :func:`cleanup_advance`
+    to step through. Atoms in ``mol.new_atoms`` get weight 1.0 and the rest
+    0.15 (~7x less): the new segment does almost all the moving, but old
+    atoms are not frozen solid (a fully pinned clash could be unresolvable).
     """
     clash_pairs, stretched = cleanup_targets(mol)
     if not clash_pairs and not stretched:
-        return False
-
+        return None
     springs = _build_springs(mol, clash_pairs, stretched)
-    weight = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
+    weights = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
+    return RelaxState(springs=springs, weights=weights)
+
+
+def cleanup_advance(mol: Molecule, state: RelaxState,
+                    iterations: int = 4, step: float = 0.15) -> float:
+    """Run a few spring iterations in place; return the max atom displacement.
+
+    Each iteration accumulates the axial force ``stiffness * (L - target) *
+    unit(i->j)`` per spring (attractive when too long, repulsive when too
+    short; pairs with ``L < 1e-6`` are skipped) and moves every atom by
+    ``step * weight * force``. The return value -- the largest single-atom
+    displacement over the whole call -- is the caller's convergence signal.
+    Bonds are deliberately NOT re-perceived here: mid-animation the clash
+    bond visibly stretches as the fragments separate, and pops off in
+    :func:`cleanup_finish`.
+    """
     pos = mol.positions
+    start = pos.copy()
     for _ in range(iterations):
         forces = np.zeros_like(pos)
-        for i, j, target, stiff in springs:
+        for i, j, target, stiff in state.springs:
             delta = pos[j] - pos[i]
             length = float(np.linalg.norm(delta))
             if length < 1e-6:      # perception already rejects sub-0.4A contacts
@@ -447,9 +471,40 @@ def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
             f = (stiff * (length - target)) * (delta / length)
             forces[i] += f
             forces[j] -= f
-        pos = pos + step * weight[:, None] * forces
+        pos = pos + step * state.weights[:, None] * forces
     mol.positions = pos
+    if mol.n_atoms == 0:
+        return 0.0
+    return float(np.linalg.norm(pos - start, axis=1).max())
 
+
+def cleanup_finish(mol: Molecule) -> None:
+    """Accept a relaxed geometry: re-perceive bonds, clear ``new_atoms``.
+
+    The false clash bonds -- now stretched past the perception cutoff --
+    disappear here, and clearing ``new_atoms`` means repeated 'c' presses
+    do not keep kneading the molecule (and the status-bar hint goes away).
+    """
     _reperceive(mol)
     mol.new_atoms.clear()
+
+
+def cleanup(mol: Molecule, iterations: int = 100, step: float = 0.2) -> bool:
+    """Relax steric clashes and stretched manual bonds ('c'), in one shot.
+
+    The convenience composition of :func:`cleanup_prepare` ->
+    :func:`cleanup_advance` -> :func:`cleanup_finish` -- a deliberately
+    simple fixed-target spring relaxation (see :func:`_build_springs`), not
+    a force field. Interactive hosts that want the relaxation animated call
+    the three stages themselves, a few iterations per frame.
+
+    Returns False (no change) when there is nothing to fix; otherwise
+    relaxes, re-perceives, "accepts" the result by clearing
+    ``mol.new_atoms``, and returns True.
+    """
+    state = cleanup_prepare(mol)
+    if state is None:
+        return False
+    cleanup_advance(mol, state, iterations=iterations, step=step)
+    cleanup_finish(mol)
     return True

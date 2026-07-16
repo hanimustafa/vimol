@@ -866,7 +866,8 @@ class Viewer:
         elif key == "u" and self.editable:
             return self.widget.undo()
         elif key == "c" and self.editable:
-            return self.widget.cleanup()
+            # starts the animation; the run loop ticks it frame by frame
+            return self.widget.start_cleanup()
         elif key == "?":
             self._show_help = not self._show_help
             if not self._show_help:
@@ -965,6 +966,12 @@ class Viewer:
                     changed = True
                 if self.autospin:
                     self.widget.scene.camera.orbit(1.4, 0)  # ~0.014 rad/frame
+                    self._last_interact = time.time()
+                    changed = True
+                if self.widget.cleanup_active:
+                    # animate the 'c' relaxation: one tick per frame, kept in
+                    # fast (non-supersampled) mode while the atoms settle.
+                    self.widget.cleanup_tick()
                     self._last_interact = time.time()
                     changed = True
                 if changed:
