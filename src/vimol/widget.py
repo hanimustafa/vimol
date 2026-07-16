@@ -60,6 +60,8 @@ class MoleculeWidget:
         self.editable = editable
         self.append_mode = False                # 'a': click to build atoms
         self.delete_mode = False                # 'x': click to remove atoms
+        self.measure_mode = False               # 'm': click to build a measurement pick list
+        self.measure_sel: list = []             # ordered atom indices picked in measure mode
         self.build_element = "C"                # element placed while appending
         self.build_template = None              # chosen geometry/valence; None -> element default
         self.dirty = False                      # True once the model is edited
@@ -94,6 +96,7 @@ class MoleculeWidget:
         self.scene.camera.rotation = rot
         self._base_colors = molecule.element_colors()
         self.hovered = self.selected = None
+        self.measure_sel = []                   # stale indices into the old molecule
         self._undo_stack.clear()
         self._saved_sig = self._signature()
         self.dirty = False
@@ -204,6 +207,12 @@ class MoleculeWidget:
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
                     return self._delete_at(x, y)
+            # measure mode has no editable gate -- it is read-only-safe.
+            elif self.measure_mode and was_left and not ev.shift:
+                dx = x - self._press[0]
+                dy = y - self._press[1]
+                if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
+                    return self._measure_click(x, y)
             return False
         if ev.action == "drag":
             if self._bond_anchor is not None:
@@ -271,12 +280,23 @@ class MoleculeWidget:
         self.append_mode = bool(on) and self.editable
         if self.append_mode:
             self.delete_mode = False            # one active build tool at a time
+            self.set_measure_mode(False)
 
     def set_delete_mode(self, on: bool) -> None:
         # delete mode is meaningless (and stays off) unless editing is enabled
         self.delete_mode = bool(on) and self.editable
         if self.delete_mode:
             self.append_mode = False            # one active build tool at a time
+            self.set_measure_mode(False)
+
+    def set_measure_mode(self, on: bool) -> None:
+        # unlike append/delete, measuring is non-destructive -- no editable gate.
+        self.measure_mode = bool(on)
+        if self.measure_mode:
+            self.append_mode = False            # one active tool at a time
+            self.delete_mode = False
+        else:
+            self.measure_sel = []               # disarming always clears the pick list
 
     # -- undo / dirty tracking -------------------------------------------
     def _signature(self):
@@ -327,6 +347,7 @@ class MoleculeWidget:
         mol.new_atoms = set(new_atoms)
         self._base_colors = mol.element_colors()
         self.hovered = self.selected = None
+        self.measure_sel = []                    # stale indices into the reverted geometry
         self._refresh_dirty()
         return True
 
@@ -380,6 +401,32 @@ class MoleculeWidget:
         self._base_colors = mol.element_colors()
         self.hovered = self.selected = None
         self._refresh_dirty()
+        return True
+
+    def _measure_click(self, px: float, py: float) -> bool:
+        """Extend/clear the measurement pick list at a widget-local pixel.
+
+        * empty space -> clear the selection (a no-op, no redraw, if it was
+          already empty).
+        * an atom already in the selection -> no-op (no redraw).
+        * a fresh atom, selection under 4 -> append it.
+        * a fresh atom, selection already has 4 -> RESET first: the clicked
+          atom becomes the sole, first pick of a new selection, not an empty
+          one -- see the measure-mode spec's "5th click" rule.
+        """
+        mol = self.scene.molecule
+        idx = self.pick(px, py) if mol.n_atoms else None
+        if idx is None:
+            if self.measure_sel:
+                self.measure_sel = []
+                return True
+            return False
+        if idx in self.measure_sel:
+            return False
+        if len(self.measure_sel) >= 4:
+            self.measure_sel = [idx]
+        else:
+            self.measure_sel = self.measure_sel + [idx]
         return True
 
     # -- manual-bond gesture (option/alt-drag) -----------------------------
@@ -528,14 +575,21 @@ class MoleculeWidget:
     # -- rendering --------------------------------------------------------
     def _apply_highlight(self) -> None:
         hi = self.hovered if self.hovered is not None else self.selected
-        if hi is None:
+        if hi is None and not self.measure_sel:
             self.style.color_override = None
             return
         cols = self._base_colors.copy()
-        # brighten + tint the highlighted atom: red in delete mode (a preview of
-        # "this disappears if you click here"), yellow otherwise.
-        tint = np.array([1.0, 0.2, 0.2]) if self.delete_mode else np.array([1.0, 0.95, 0.3])
-        cols[hi] = np.clip(cols[hi] * 0.4 + tint * 0.9, 0, 1)
+        yellow = np.array([1.0, 0.95, 0.3])
+        # every picked atom in the live measurement selection gets the same
+        # yellow tint as a hover -- hover (below) is applied on top, so it
+        # still shows through even for an atom that is also selected.
+        for sel_idx in self.measure_sel:
+            cols[sel_idx] = np.clip(cols[sel_idx] * 0.4 + yellow * 0.9, 0, 1)
+        if hi is not None:
+            # brighten + tint the highlighted atom: red in delete mode (a preview of
+            # "this disappears if you click here"), yellow otherwise.
+            tint = np.array([1.0, 0.2, 0.2]) if self.delete_mode else yellow
+            cols[hi] = np.clip(cols[hi] * 0.4 + tint * 0.9, 0, 1)
         self.style.color_override = cols
 
     def render(self) -> np.ndarray:

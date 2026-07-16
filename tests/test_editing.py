@@ -1196,6 +1196,185 @@ def test_pointer_shape_helpers_build_osc22_push_pop_sequences():
     assert kitty.reset_pointer_shape() == b"\x1b]22;<\x1b\\"
 
 
+# -- measurement math (editor.measurement) ----------------------------------
+def test_measurement_below_two_atoms_is_empty():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    assert editor.measurement(mol, []) == ""
+    assert editor.measurement(mol, [0]) == ""
+
+
+def test_measurement_distance():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.523, 0.0, 0.0]]))
+    s = editor.measurement(mol, [0, 1])
+    assert s.startswith("d(")
+    assert "1.523" in s
+    assert "Å" in s
+
+
+def test_measurement_angle_90():
+    mol = Molecule(symbols=["C", "C", "C"],
+                   positions=np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+    s = editor.measurement(mol, [0, 1, 2])
+    assert s.startswith("∠(")
+    assert "90.0" in s
+    assert "°" in s
+
+
+def test_measurement_angle_10947():
+    d = templates.default_template("C").directions
+    mol = Molecule(symbols=["C", "C", "C"],
+                   positions=np.array([d[0], [0.0, 0.0, 0.0], d[1]]))
+    s = editor.measurement(mol, [0, 1, 2])
+    assert "109.5" in s
+
+
+def test_measurement_dihedral_60_magnitude():
+    import math
+    theta = math.radians(60.0)
+    i = np.array([1.0, 0.0, 0.0])
+    j = np.array([0.0, 0.0, 0.0])
+    k = np.array([0.0, 0.0, 1.0])
+    l = k + np.array([math.cos(theta), math.sin(theta), 0.0])
+    mol = Molecule(symbols=["C", "C", "C", "C"], positions=np.array([i, j, k, l]))
+    s = editor.measurement(mol, [0, 1, 2, 3])
+    assert s.startswith("φ(")
+    m = re.search(r"=\s*(-?[\d.]+)°", s)
+    assert m is not None
+    assert abs(abs(float(m.group(1))) - 60.0) < 0.15
+
+
+def test_measurement_dihedral_planar_0_and_180():
+    i = np.array([1.0, 0.0, 0.0])
+    j = np.array([0.0, 0.0, 0.0])
+    k = np.array([0.0, 0.0, 1.0])
+    l_syn = k + np.array([1.0, 0.0, 0.0])
+    l_anti = k + np.array([-1.0, 0.0, 0.0])
+    mol_syn = Molecule(symbols=["C", "C", "C", "C"], positions=np.array([i, j, k, l_syn]))
+    mol_anti = Molecule(symbols=["C", "C", "C", "C"], positions=np.array([i, j, k, l_anti]))
+    s_syn = editor.measurement(mol_syn, [0, 1, 2, 3])
+    s_anti = editor.measurement(mol_anti, [0, 1, 2, 3])
+    m_syn = re.search(r"=\s*(-?[\d.]+)°", s_syn)
+    m_anti = re.search(r"=\s*(-?[\d.]+)°", s_anti)
+    assert abs(float(m_syn.group(1))) < 0.15
+    assert abs(abs(float(m_anti.group(1))) - 180.0) < 0.15
+
+
+# -- widget measure mode ------------------------------------------------------
+def test_measure_mode_available_without_editable():
+    mol = Molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")   # editable defaults False
+    w.set_measure_mode(True)
+    assert w.measure_mode                  # no editable gate, unlike append/delete
+
+
+def test_measure_mode_mutually_exclusive_with_append_and_delete():
+    mol = Molecule()
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    w.set_measure_mode(True)
+    assert w.measure_mode and not w.append_mode
+    w.set_delete_mode(True)
+    assert w.delete_mode and not w.measure_mode
+    w.set_measure_mode(True)
+    assert w.measure_mode and not w.delete_mode
+    w.set_append_mode(True)
+    assert w.append_mode and not w.measure_mode
+
+
+def test_measure_click_sequence_builds_ordered_selection():
+    mol = Molecule(symbols=["C", "C", "C", "C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [0.0, 5.0, 0.0],
+                                        [-5.0, 0.0, 0.0], [0.0, -5.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    w.set_measure_mode(True)
+    order = [0, 1, 2, 3]
+    for idx in order:
+        px, py = _atom_px(w, idx)
+        changed = _click(w, px, py)
+        assert changed
+    assert w.measure_sel == order
+    # re-clicking an already-selected atom is a no-op
+    px, py = _atom_px(w, 1)
+    changed = _click(w, px, py)
+    assert not changed
+    assert w.measure_sel == order
+    # a 5th distinct atom resets to a fresh single-atom selection
+    px, py = _atom_px(w, 4)
+    changed = _click(w, px, py)
+    assert changed
+    assert w.measure_sel == [4]
+
+
+def test_measure_click_empty_space_clears_selection():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    w.set_measure_mode(True)
+    px, py = _atom_px(w, 0)
+    _click(w, px, py)
+    assert w.measure_sel == [0]
+    changed = _click(w, 190, 190)          # empty corner
+    assert changed
+    assert w.measure_sel == []
+
+
+def test_measure_drag_does_not_select():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    w.set_measure_mode(True)
+    px, py = _atom_px(w, 0)
+    w.handle_event(MouseEvent("down", px, py, button=0, pixel=True))
+    w.handle_event(MouseEvent("drag", px + 40, py, button=0, pixel=True))
+    w.handle_event(MouseEvent("up", px + 40, py, button=0, pixel=True))
+    assert w.measure_sel == []
+
+
+def test_measure_highlight_covers_all_selected_atoms():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    w.set_measure_mode(True)
+    for idx in (0, 1):
+        px, py = _atom_px(w, idx)
+        _click(w, px, py)
+    w._apply_highlight()
+    cols = w.style.color_override
+    assert cols is not None
+    base = w._base_colors
+    assert not np.allclose(cols[0], base[0])
+    assert not np.allclose(cols[1], base[1])
+
+
+def test_measure_selection_cleared_by_undo_and_set_molecule():
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]), )
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    _click(w, 100, 100)                     # a real edit, so undo has something to revert
+    w.set_measure_mode(True)
+    px, py = _atom_px(w, 0)
+    _click(w, px, py)
+    assert w.measure_sel == [0]
+    w.undo()
+    assert w.measure_sel == []
+    w.set_measure_mode(True)
+    _click(w, px, py)
+    assert w.measure_sel == [0]
+    w.set_molecule(Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]])))
+    assert w.measure_sel == []
+
+
+def test_measure_mode_disarm_clears_selection():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    w.set_measure_mode(True)
+    px, py = _atom_px(w, 0)
+    _click(w, px, py)
+    assert w.measure_sel == [0]
+    w.set_measure_mode(False)
+    assert w.measure_sel == []
+
+
 # -- periodic-table layout --------------------------------------------------
 def test_periodic_table_covers_all_118_elements_once():
     seen = set()

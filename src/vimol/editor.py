@@ -20,7 +20,7 @@ valency with new ones.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -97,6 +97,56 @@ def add_manual_bond(mol: Molecule, i: int, j: int, order: int = 1) -> bool:
         return False
     _reperceive(mol)
     return True
+
+
+def measurement(mol: Molecule, sel: Sequence[int]) -> str:
+    """Render a live distance/angle/dihedral readout for an ordered pick list.
+
+    Pure and side-effect-free (no terminal, no widget state) so it is
+    testable on its own; the widget only owns *which* atoms are selected
+    (``measure_sel``), this just formats what they mean:
+
+    * < 2 atoms -> "" (nothing to report yet).
+    * 2 atoms   -> euclidean distance, 3 decimals.
+    * 3 atoms   -> the angle at the middle atom between it and the other two,
+      1 decimal.
+    * 4 atoms   -> the standard (signed) dihedral about the middle bond -- the
+      angle between the (i, j, k) and (j, k, l) planes, 1 decimal. The sign
+      convention is whatever ``atan2`` gives; callers that care about an
+      absolute value should take one themselves.
+
+    Extra picks beyond the first four are ignored (the widget itself never
+    lets the live selection grow past 4 -- see ``MoleculeWidget._measure_click``
+    -- but this stays defensive rather than raising on a longer sequence).
+    Indices are rendered with the same ``#idx`` convention as the hover
+    readout (:meth:`MoleculeWidget.atom_info`).
+    """
+    n = len(sel)
+    if n < 2:
+        return ""
+    pos = mol.positions
+    if n == 2:
+        i, j = sel[0], sel[1]
+        d = float(np.linalg.norm(pos[i] - pos[j]))
+        return f"d(#{i}–#{j}) = {d:.3f} Å"
+    if n == 3:
+        i, j, k = sel[0], sel[1], sel[2]
+        v1 = pos[i] - pos[j]
+        v2 = pos[k] - pos[j]
+        cos_a = float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+        angle = np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0)))
+        return f"∠(#{i}–#{j}–#{k}) = {angle:.1f}°"
+    i, j, k, l = sel[0], sel[1], sel[2], sel[3]
+    b1 = pos[j] - pos[i]
+    b2 = pos[k] - pos[j]
+    b3 = pos[l] - pos[k]
+    n1 = np.cross(b1, b2)
+    n2 = np.cross(b2, b3)
+    m1 = np.cross(n1, b2 / np.linalg.norm(b2))
+    x = float(np.dot(n1, n2))
+    y = float(np.dot(m1, n2))
+    phi = np.degrees(np.arctan2(y, x))
+    return f"φ(#{i}–#{j}–#{k}–#{l}) = {phi:.1f}°"
 
 
 def _cap(mol: Molecule, center_idx: int, center: np.ndarray, dirs: np.ndarray,
