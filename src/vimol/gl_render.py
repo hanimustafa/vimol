@@ -477,6 +477,25 @@ void main() {
 """
 
 
+def _create_standalone_context() -> moderngl.Context:
+    """Create a standalone context, preferring EGL over moderngl's default.
+
+    On Linux, ``moderngl.create_context(standalone=True)`` always picks the
+    GLX/X11 backend (see ``glcontext.default_backend``) regardless of
+    whether ``DISPLAY`` actually has working GL behind it -- an SSH session
+    with X11 forwarding sets ``DISPLAY`` to a forwarded/virtual X server
+    that has no real (or even software) GLX support, so GLX context
+    creation fails with a real GPU sitting right there. EGL's device
+    platform talks to the GPU directly via ``/dev/dri/renderD*``, bypassing
+    X entirely, so try it first and fall back to moderngl's default (GLX on
+    Linux, CGL on macOS) if EGL isn't available.
+    """
+    try:
+        return moderngl.create_context(standalone=True, backend="egl")
+    except Exception:
+        return moderngl.create_context(standalone=True)
+
+
 class GLRenderer:
     """GPU sphere/cylinder impostor renderer.
 
@@ -487,7 +506,7 @@ class GLRenderer:
     """
 
     def __init__(self, width: int, height: int):
-        self.ctx = moderngl.create_context(standalone=True)
+        self.ctx = _create_standalone_context()
         self.width = int(width)
         self.height = int(height)
         self._quad_vbo = self.ctx.buffer(_QUAD_CORNERS.tobytes())
