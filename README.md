@@ -1,27 +1,37 @@
 # vimol
 
-A **fully-featured molecular viewer that runs in the terminal**, using the
-[Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
-It renders real 3D molecular structures — shaded spheres and cylinders with a
-depth buffer, specular highlights and depth cueing — entirely in software
-(pure Python + numpy). No GPU, no OpenGL, no windowing system.
+A molecular viewer that runs **in your terminal**. Open an `.xyz`, `.pdb`,
+`.mol`, or `.sdf` file and get a shaded, rotatable 3D structure right where
+you're already working — over SSH, in tmux, next to your editor — without a
+windowing system, a GPU, or a browser.
 
-It is built as **two layers**:
-
-* **`vimol` — an embeddable library.** Drop it into any terminal application
-  to render molecules to pixels or a Kitty escape stream, and forward
-  intercepted mouse/key events to it to make them interactive.
-* **the `vimol` CLI** (`src/vimol/app.py`) — the driver application. Opens a
-  molecule full-screen with mouse control and interactive editing on by
-  default, and also handles batch rendering (stills, styles, PNG).
-
-```
-vimol                                           # opens the bundled C60 demo (checkout only)
-vimol examples/benzene.xyz --spin --style spacefill
-vimol protein.pdb --render out.png --size 1200x900
+```bash
+pip install vimol
+vimol caffeine.sdf          # rotate with the mouse, hover an atom to identify it
 ```
 
-The CLI is a thin wrapper — everything else is in `src/vimol/`:
+vimol renders with the
+[Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/),
+so it needs a terminal that speaks it — **kitty, Ghostty, or WezTerm**. The
+image is drawn entirely in software (pure Python + numpy); OpenGL is an
+optional accelerator, not a requirement.
+
+**What you can do with it:**
+
+- **Look at a structure** without leaving the terminal — mouse-drag to rotate,
+  wheel to zoom, hover to read off an element and coordinates.
+- **Measure** distances, angles, and dihedrals by clicking atoms (`m`).
+- **Edit** a molecule interactively — grow fragments, swap elements, draw
+  bonds, delete atoms, and relax clashes — then save back to `.xyz`.
+- **Render stills to PNG** in scripts or on a headless box (no terminal
+  needed for `--render`).
+- **Embed the viewer** in your own terminal app — it's a library first, a
+  CLI second.
+
+```bash
+vimol protein.pdb --render out.png --size 1200x900   # batch still, works headless
+vimol trajectory.xyz --spin --style spacefill        # spin a space-filling model
+```
 
 ```python
 import vimol
@@ -53,25 +63,35 @@ NGL) use — just done on the CPU.
 - **Pixel-precise mouse:** uses SGR-Pixels (DECSET 1016) when the terminal
   supports it — probed at startup, with automatic fallback to cell coordinates —
   for smooth dragging and accurate **hover-to-identify** atom picking.
-- **Rendering:** Phong lighting (key + fill + specular), depth cueing, adaptive
-  supersampling (crisp when idle, fast while dragging), and an optional
-  **transparent background** — RGBA cutout with premultiplied-alpha edge
-  anti-aliasing, so the molecule composites straight onto your terminal
+- **Rendering:** Phong lighting (key + fill + specular), depth cueing, and an
+  optional **transparent background** — RGBA cutout with premultiplied-alpha
+  edge anti-aliasing, so the molecule composites straight onto your terminal
   background (any theme, light or dark). On by default in the interactive viewer.
+- **Interactive by default:** the software renderer drops resolution while you
+  drag and supersamples once you stop, so motion stays responsive on the CPU and
+  the resting frame is crisp. An optional OpenGL backend (`vimol[gl]`) renders on
+  the GPU where one is available.
 - **Output:** live terminal, one-shot Kitty frame to stdout (pipeable), or PNG
   (via a built-in stdlib PNG encoder — no Pillow needed).
 
 ## Install
 
 ```bash
-pip install -e .          # then: vimol examples/c60.xyz
-# or run straight from the checkout with no install:
-PYTHONPATH=src python -m vimol examples/c60.xyz
+pip install vimol            # core viewer + CLI
+pip install "vimol[gl]"      # + optional OpenGL backend (needs a GL driver)
 ```
 
-Requires Python ≥ 3.8 and numpy. A terminal that speaks the Kitty graphics
-protocol (kitty, Ghostty, WezTerm) is needed for *interactive* use; `--render`
-to PNG works anywhere.
+Requires Python ≥ 3.8; the only runtime dependency is numpy. A terminal that
+speaks the Kitty graphics protocol (kitty, Ghostty, WezTerm) is needed for
+*interactive* use; `--render` to PNG works anywhere, including headless.
+
+From a checkout, for development:
+
+```bash
+pip install -e ".[test,gl]"      # editable install with test + GL extras
+# or run without installing:
+PYTHONPATH=src python -m vimol examples/c60.xyz
+```
 
 ## Library usage
 
