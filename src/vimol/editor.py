@@ -207,6 +207,16 @@ def delete_atom(mol: Molecule, idx: int) -> None:
     # neighbors still at 109.47 deg instead of a relaxed trigonal 120 deg),
     # so they need the same cleanup attention as a freshly created atom.
     affected = {j for v in victims for j in _neighbors(mol, v) if j not in victims}
+    # Marking a survivor as needing cleanup makes its bonds eligible for
+    # clash scrutiny (see cleanup_targets) -- but its OTHER bonds predate
+    # this deletion and are untouched by it, so they can never be a
+    # proximity accident. Promote them to manual now, before that
+    # eligibility exists, or a later cleanup could mistake perfectly good
+    # connectivity for a false bond and push it past the perception cutoff.
+    for a in affected:
+        for b in _neighbors(mol, a):
+            if b not in victims:
+                _record_intended_bond(mol, a, b)
     keep = [i for i in range(mol.n_atoms) if i not in victims]
     # Remap manual bonds across the row removal *before* rebuilding symbols/
     # positions below: drop any pair touching a deleted atom, and shift the
@@ -340,12 +350,20 @@ def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[in
 # they shape, the bond springs place -- and halving keeps the iteration stable
 # for 4-coordinate centers, which gain several extra springs per atom.
 _ANGLE_STIFFNESS = 0.5
+# The unregistered-coordination repulsion fallback (theta=180) targets a
+# configuration no arrangement of >2 points can actually reach -- every pair
+# simultaneously antipodal is geometrically impossible past 2 neighbors -- so
+# it never settles to zero force. Kept soft and repulsive-only (see
+# cleanup_advance) so it stops pulling once neighbors are reasonably spread,
+# instead of perpetually over-stretching the real bonds to those neighbors.
+_REPULSION_STIFFNESS = 0.08
 
 
-def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int, float, float]]:
-    """The fixed spring set for one cleanup run: (i, j, target, stiffness).
+def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int, float, float, bool]]:
+    """The fixed spring set for one cleanup run: (i, j, target, stiffness, repulsive_only).
 
-    Bond springs (stiffness 1.0), one per currently bonded pair:
+    Bond springs (stiffness 1.0, not repulsive-only), one per currently
+    bonded pair:
 
     * clash pairs are pushed to just past the perception cutoff, so the
       false bond they created disappears on re-perception;
@@ -356,13 +374,15 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
       simply keeping the rest of the molecule from falling apart while the
       two groups above move.
 
-    Angle springs (stiffness :data:`_ANGLE_STIFFNESS`): classic 1-3
-    (Urey-Bradley) springs around each *center* in ``mol.new_atoms`` plus
-    the endpoints of stretched manual bonds, so bond-length springs cannot
-    collapse the local geometry. The center's template
-    (``TEMPLATES[(symbol, n_neighbors)]``) gives the ideal angle theta; a
-    coordination with no registered template falls back to theta=180 (pure
-    repulsion -- see the loop body). Each pair of the center's bonded
+    Angle springs: classic 1-3 (Urey-Bradley) springs around each *center*
+    in ``mol.new_atoms`` plus the endpoints of stretched manual bonds, so
+    bond-length springs cannot collapse the local geometry. The center's
+    template (``TEMPLATES[(symbol, n_neighbors)]``) gives the ideal angle
+    theta, at :data:`_ANGLE_STIFFNESS`; a coordination with no registered
+    template falls back to theta=180 (repulsion) at the much gentler
+    :data:`_REPULSION_STIFFNESS`, and *repulsive-only* -- it never pulls a
+    pair back together once they're already past the (unreachable) target,
+    only pushes apart when closer. Each pair of the center's bonded
     neighbors gets a spring at the law-of-cosines distance for theta over
     the two bond springs' targets.
     Old, uninvolved centers get none -- loaded geometry is still not ours
@@ -393,22 +413,25 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
         centers.add(i)
         centers.add(j)
 
-    angle_targets = {}                 # (a, b) -> 1-3 target, a < b
+    angle_targets = {}                 # (a, b) -> (1-3 target, repulsive_only, stiffness)
     for k in sorted(centers):
         neigh = neighbors.get(k, [])
         if len(neigh) < 2:
             continue
         tmpl = templates.TEMPLATES.get((mol.symbols[k], len(neigh)))
-        if tmpl is None:
+        repulsive_only = tmpl is None
+        if repulsive_only:
             # Unregistered coordination (e.g. a 5-coordinate carbon from
             # linking two methanes): fall back to pure repulsion. theta=180
             # makes each pair's law-of-cosines target the antipodal chord
-            # La+Lb, which can only push apart, and every pair pushing
-            # equally settles into the maximally-spread arrangement
-            # (trigonal-bipyramidal for 5, octahedral for 6, ...).
+            # La+Lb -- unreachable for >2 neighbors, so this floor is kept
+            # repulsive-only and gentle (see cleanup_advance / the module
+            # constant above).
             cos_t = -1.0
+            stiff = _REPULSION_STIFFNESS
         else:
             cos_t = float(np.dot(tmpl.directions[0], tmpl.directions[1]))
+            stiff = _ANGLE_STIFFNESS
         neigh = sorted(neigh)
         for x in range(len(neigh)):
             for y in range(x + 1, len(neigh)):
@@ -423,10 +446,10 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
                 elif (a, b) in targets:
                     continue           # a real neighbor-neighbor bond (a ring)
                 elif (a, b) not in angle_targets:
-                    angle_targets[(a, b)] = t
+                    angle_targets[(a, b)] = (t, repulsive_only, stiff)
 
-    springs = [(i, j, t, 1.0) for (i, j), t in targets.items()]
-    springs += [(a, b, t, _ANGLE_STIFFNESS) for (a, b), t in angle_targets.items()]
+    springs = [(i, j, t, 1.0, False) for (i, j), t in targets.items()]
+    springs += [(a, b, t, stiff, rep) for (a, b), (t, rep, stiff) in angle_targets.items()]
     return springs
 
 
@@ -434,13 +457,13 @@ def _build_springs(mol: Molecule, clash_pairs, stretched) -> List[Tuple[int, int
 class RelaxState:
     """An in-flight cleanup relaxation, fixed at :func:`cleanup_prepare` time.
 
-    ``springs`` is the (i, j, target, stiffness) list from
+    ``springs`` is the (i, j, target, stiffness, repulsive_only) list from
     :func:`_build_springs`; ``weights`` is the per-atom mobility vector (1.0
     for new atoms, 0.15 otherwise). Both stay constant across
     :func:`cleanup_advance` calls -- targets are never re-derived from the
     moving geometry.
     """
-    springs: List[Tuple[int, int, float, float]]
+    springs: List[Tuple[int, int, float, float, bool]]
     weights: np.ndarray
 
 
@@ -472,11 +495,14 @@ def cleanup_prepare(mol: Molecule) -> Optional[RelaxState]:
     clash_pairs, stretched = cleanup_targets(mol)
     springs = _build_springs(mol, clash_pairs, stretched)
     pos = mol.positions
-    deviated = any(
-        abs(float(np.linalg.norm(pos[j] - pos[i])) - target) > _PREPARE_EPS
-        for i, j, target, _stiff in springs
-    )
-    if not deviated:
+
+    def _spring_deviates(i, j, target, rep):
+        length = float(np.linalg.norm(pos[j] - pos[i]))
+        if rep and length >= target:    # repulsive-only: already spread enough
+            return False
+        return abs(length - target) > _PREPARE_EPS
+
+    if not any(_spring_deviates(i, j, t, rep) for i, j, t, _stiff, rep in springs):
         return None
     weights = np.array([1.0 if k in mol.new_atoms else 0.15 for k in range(mol.n_atoms)])
     return RelaxState(springs=springs, weights=weights)
@@ -489,22 +515,29 @@ def cleanup_advance(mol: Molecule, state: RelaxState,
     Each iteration accumulates the axial force ``stiffness * (L - target) *
     unit(i->j)`` per spring (attractive when too long, repulsive when too
     short; pairs with ``L < 1e-6`` are skipped) and moves every atom by
-    ``step * weight * force``. The return value -- the largest single-atom
-    displacement over the whole call -- is the caller's convergence signal.
-    Bonds are deliberately NOT re-perceived here: mid-animation the clash
-    bond visibly stretches as the fragments separate, and pops off in
-    :func:`cleanup_finish`.
+    ``step * weight * force``. A repulsive-only spring (the unregistered-
+    coordination fallback -- see :func:`_build_springs`) contributes nothing
+    once ``L >= target``: its target is a geometrically unreachable ideal
+    for >2 neighbors, so without this it would pull forever and
+    over-stretch the real bonds to those neighbors as a side effect. The
+    return value -- the largest single-atom displacement over the whole
+    call -- is the caller's convergence signal. Bonds are deliberately NOT
+    re-perceived here: mid-animation the clash bond visibly stretches as
+    the fragments separate, and pops off in :func:`cleanup_finish`.
     """
     pos = mol.positions
     start = pos.copy()
     for _ in range(iterations):
         forces = np.zeros_like(pos)
-        for i, j, target, stiff in state.springs:
+        for i, j, target, stiff, rep in state.springs:
             delta = pos[j] - pos[i]
             length = float(np.linalg.norm(delta))
             if length < 1e-6:      # perception already rejects sub-0.4A contacts
                 continue
-            f = (stiff * (length - target)) * (delta / length)
+            deviation = length - target
+            if rep and deviation >= 0:
+                continue
+            f = (stiff * deviation) * (delta / length)
             forces[i] += f
             forces[j] -= f
         pos = pos + step * state.weights[:, None] * forces

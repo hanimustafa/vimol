@@ -566,12 +566,83 @@ def test_cleanup_spreads_unregistered_coordination_by_repulsion():
     assert min_neighbor_angle(c0, neigh0) > 80.0             # spread, not clumped
 
 
+def test_cleanup_unregistered_repulsion_does_not_overstretch_real_bonds():
+    # The theta=180 (full antipodal) target used for unregistered coordination
+    # is geometrically unreachable for any pair once there are >2 neighbors
+    # (no arrangement of 5 points can have every pair 180 deg apart), so a
+    # naive symmetric spring toward it never reaches zero force and keeps
+    # dragging the real C-H bonds outward. It must be repulsive-only (and
+    # gentle) so it stops pulling once the neighbors are already reasonably
+    # spread, instead of perpetually over-stretching real bonds.
+    mol = Molecule()
+    c0 = editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    c1 = editor.birth_molecule(mol, [8.0, 0.0, 0.0])
+    editor.add_manual_bond(mol, c0, c1)
+    editor.cleanup(mol)   # both carbons now 5-coordinate (unregistered)
+
+    ch = elements.covalent_radius("C") + elements.covalent_radius("H")
+    for i, j, _o in mol.bonds:
+        if {mol.symbols[i], mol.symbols[j]} == {"C", "H"}:
+            d = np.linalg.norm(mol.positions[i] - mol.positions[j])
+            assert d < ch + 0.12                         # was drifting to ch+0.18..0.19
+
+
 def test_cleanup_returns_false_and_moves_nothing_when_nothing_to_clean():
     mol = Molecule()
     editor.birth_molecule(mol, [0.0, 0.0, 0.0])         # only ideal-length bonds
     before = mol.positions.copy()
     assert editor.cleanup(mol) is False
     np.testing.assert_allclose(mol.positions, before)
+
+
+def test_delete_atom_promotes_survivors_existing_bonds_to_manual():
+    # A pair of methanes NOT built via the editor (plain construction +
+    # distance perception, like a loaded file) -- their C-H bonds are
+    # ordinary perceived bonds, not recorded as manual/intended. Deleting
+    # one H marks the survivor carbon as needing cleanup attention; its
+    # OTHER, untouched bonds predate the deletion and must be promoted to
+    # manual so a later cleanup can never mistake them for proximity
+    # accidents just because their carbon is now "new".
+    tmpl = templates.default_template("C")
+    r = elements.covalent_radius("C") + elements.covalent_radius("H")
+    syms = ["C"]; pos = [[0.0, 0.0, 0.0]]
+    for d in tmpl.free_directions():
+        syms.append("H"); pos.append(np.array([0.0, 0.0, 0.0]) + d * r)
+    mol = Molecule(symbols=syms, positions=np.array(pos))
+    ensure_bonds(mol)
+    assert mol.manual_bonds == []                     # none recorded, as if loaded
+
+    editor.delete_atom(mol, 1)                          # C + 3 H left
+    remaining_h = [i for i, s in enumerate(mol.symbols) if s == "H"]
+    assert len(remaining_h) == 3
+    manual_pairs = {(i, j) for i, j, _o in mol.manual_bonds}
+    for h in remaining_h:
+        assert (0, h) in manual_pairs                   # promoted, not left exposed
+
+
+def test_two_linked_methanes_survive_delete_then_cleanup_without_losing_bonds():
+    # The reported bug: link two methanes, cleanup (5-coordinate carbons),
+    # delete one H per carbon (back to 4-coordinate), cleanup again -- no
+    # C-H bond should ever vanish.
+    mol = Molecule()
+    c0 = editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    c1 = editor.birth_molecule(mol, [8.0, 0.0, 0.0])
+    editor.add_manual_bond(mol, c0, c1)
+    editor.cleanup(mol)
+
+    def neigh(mol, k):
+        return [j for i, j, _o in mol.bonds if i == k] + [i for i, j, _o in mol.bonds if j == k]
+
+    h0 = next(x for x in neigh(mol, c0) if mol.symbols[x] == "H")
+    h1 = next(x for x in neigh(mol, c1) if mol.symbols[x] == "H")
+    editor.delete_atom(mol, h0)
+    if h0 < h1:
+        h1 -= 1
+    editor.delete_atom(mol, h1)
+    editor.cleanup(mol)
+
+    assert len(mol.bonds) == 7                          # nothing lost
+    assert mol.formula() == "C2H6"
 
 
 def test_cleanup_available_after_delete_even_with_no_new_atoms():
