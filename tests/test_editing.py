@@ -1747,13 +1747,50 @@ def test_picker_mouse_click_selects_cell_under_cursor():
     assert v.widget.build_element == "He"
 
 
-def test_picker_click_outside_panel_is_a_no_op():
+def test_picker_click_outside_panel_closes_it_without_picking():
     v = _viewer_in_append_mode()
+    before = v.widget.build_element
     row, c0, c1 = v._elem_button_span
     v._dispatch([MouseEvent("down", c0 + 0.5, row, button=0, pixel=False)])
-    changed = v._dispatch([MouseEvent("down", 0, 0, button=0, pixel=False)])
-    assert not changed
     assert v._mode == "periodic_table"
+    changed = v._dispatch([MouseEvent("down", 0, 0, button=0, pixel=False)])
+    assert changed
+    assert v._mode == "normal"
+    assert v.widget.build_element == before   # closed, nothing picked
+
+
+def test_geometry_picker_click_outside_panel_closes_it_without_picking():
+    v = _viewer_in_append_mode()
+    before = v.widget.build_template
+    row, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "geometry_picker"
+    changed = v._dispatch([MouseEvent("down", 0, 0, button=0, pixel=False)])
+    assert changed
+    assert v._mode == "normal"
+    assert v.widget.build_template is before  # closed, nothing picked
+
+
+def test_clicking_geometry_pill_while_periodic_table_open_switches_pickers():
+    v = _viewer_in_append_mode()
+    row, ec0, ec1 = v._elem_button_span
+    _grow, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", ec0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "geometry_picker"       # switched, not closed-and-stuck
+    assert v._geom_opts[v._geom_idx].geometry == "tetrahedral"  # C's default
+
+
+def test_clicking_element_pill_while_geometry_picker_open_switches_pickers():
+    v = _viewer_in_append_mode()
+    row, ec0, ec1 = v._elem_button_span
+    _grow, gc0, gc1 = v._geom_button_span
+    v._dispatch([MouseEvent("down", gc0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "geometry_picker"
+    v._dispatch([MouseEvent("down", ec0 + 0.5, row, button=0, pixel=False)])
+    assert v._mode == "periodic_table"        # switched, not closed-and-stuck
+    assert (v._pt_row, v._pt_col) == pt.position_of(v.widget.build_element)
 
 
 def test_picker_anchors_above_the_button_not_screen_center():

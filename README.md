@@ -169,8 +169,9 @@ which still rotates — builds structure:
 The status bar shows what you're placing as two colored, button-styled tokens —
 `adding [ C ] [ tetrahedral ]`. Both are clickable, and each opens a picker
 anchored right above the button you clicked (not centered on screen) so it
-appears where you're already looking; click the same pill again, or press `Esc`,
-to dismiss it without changing anything.
+appears where you're already looking; click the same pill again, click
+anywhere outside the panel, or press `Esc`, to dismiss it without changing
+anything — or click the *other* pill to switch straight to that picker.
 
 - **Click the element pill** (`[ C ]`) to open a **periodic-table picker**: a
   bordered overlay colored by each element's CPK color. Drive it with the arrow

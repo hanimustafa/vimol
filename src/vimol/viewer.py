@@ -515,6 +515,12 @@ class Viewer:
             col, row = self._event_cell(ev)
             i = self._geom_row_at_screen(row, col)
             if i is None:
+                if ev.action == "down":
+                    # a click outside the list (the pills were already
+                    # intercepted in _dispatch) closes the picker without
+                    # picking anything -- same as Escape.
+                    self._close_geometry_picker(None)
+                    return True
                 return False
             if ev.action == "move":
                 if i != self._geom_idx:
@@ -622,6 +628,12 @@ class Viewer:
             col, row = self._event_cell(ev)
             cell = self._pt_cell_at_screen(row, col)
             if cell is None:
+                if ev.action == "down":
+                    # a click outside the grid (the pills were already
+                    # intercepted in _dispatch) closes the picker without
+                    # picking anything -- same as Escape.
+                    self._close_periodic_table(pick=None)
+                    return True
                 return False
             if ev.action == "move":
                 if (cell.row, cell.col) != (self._pt_row, self._pt_col):
@@ -814,16 +826,28 @@ class Viewer:
         changed = False
         for ev in events:
             if self._mode in ("periodic_table", "geometry_picker"):
-                # Clicking the same pill that opened a picker closes it again
-                # -- a normal toggle button, not a one-way switch.
+                # Clicking the pill that opened the current picker closes it
+                # again -- a normal toggle button, not a one-way switch.
+                # Clicking the OTHER pill instead switches straight to it:
+                # close whichever is open, open the one just clicked.
                 if isinstance(ev, _input.MouseEvent) and ev.action == "down":
                     col, row = self._event_cell(ev)
-                    if self._mode == "periodic_table" and self._span_hit(self._elem_button_span, col, row):
-                        self._close_periodic_table(pick=None)
+                    if self._span_hit(self._elem_button_span, col, row):
+                        was_pt = self._mode == "periodic_table"
+                        if was_pt:
+                            self._close_periodic_table(pick=None)
+                        else:
+                            self._close_geometry_picker(None)
+                            self._open_periodic_table()
                         changed = True
                         continue
-                    if self._mode == "geometry_picker" and self._span_hit(self._geom_button_span, col, row):
-                        self._close_geometry_picker(None)
+                    if self._span_hit(self._geom_button_span, col, row):
+                        was_geom = self._mode == "geometry_picker"
+                        if was_geom:
+                            self._close_geometry_picker(None)
+                        else:
+                            self._close_periodic_table(pick=None)
+                            self._open_geometry_picker()
                         changed = True
                         continue
                 handler = (self._handle_pt_event if self._mode == "periodic_table"
