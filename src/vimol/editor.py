@@ -62,6 +62,26 @@ def _reperceive(mol: Molecule) -> None:
     mol.bonds = bonds
 
 
+def _record_intended_bond(mol: Molecule, i: int, j: int, order: int = 1) -> bool:
+    """Append a deliberate bond to ``mol.manual_bonds`` without re-perceiving.
+
+    Normalizes to ``i < j`` and dedupes; returns False (no change) when
+    ``i == j`` or the pair is already recorded. Every bond the editor
+    *intends* -- the ones it creates on purpose, as opposed to what distance
+    perception happens to find -- goes through here, so cleanup can tell
+    intended connectivity from proximity accidents. Callers are responsible
+    for the (single) :func:`_reperceive` that unions these into ``mol.bonds``.
+    """
+    if i == j:
+        return False
+    if i > j:
+        i, j = j, i
+    if any(a == i and b == j for a, b, _order in mol.manual_bonds):
+        return False
+    mol.manual_bonds.append((i, j, order))
+    return True
+
+
 def add_manual_bond(mol: Molecule, i: int, j: int, order: int = 1) -> bool:
     """Record an explicit bond between *i* and *j* that survives re-perception.
 
@@ -72,31 +92,28 @@ def add_manual_bond(mol: Molecule, i: int, j: int, order: int = 1) -> bool:
     is still recorded -- that is what makes the drawn bond robust to later
     geometry changes that pull the atoms apart.
     """
-    if i == j:
+    if not _record_intended_bond(mol, i, j, order):
         return False
-    if i > j:
-        i, j = j, i
-    if any(a == i and b == j for a, b, _order in mol.manual_bonds):
-        return False
-    mol.manual_bonds.append((i, j, order))
     _reperceive(mol)
     return True
 
 
-def _cap(mol: Molecule, center: np.ndarray, dirs: np.ndarray,
+def _cap(mol: Molecule, center_idx: int, center: np.ndarray, dirs: np.ndarray,
          center_elem: str, cap_elem: str) -> None:
     """Place a *cap_elem* atom along each unit direction in *dirs*.
 
-    Every atom placed here is editor-created, so it joins ``mol.new_atoms``
-    -- this single spot covers the caps for :func:`birth_molecule`,
-    :func:`replace_atom`'s valence fill, and :func:`_promote_hydrogen`'s
-    freed valences all at once.
+    Every atom placed here is editor-created, so it joins ``mol.new_atoms``,
+    and its bond to *center_idx* is deliberate, so it is recorded as a
+    manual (intended) bond -- this single spot covers the caps for
+    :func:`birth_molecule`, :func:`replace_atom`'s valence fill, and
+    :func:`_promote_hydrogen`'s freed valences all at once.
     """
     r = _bond_length(center_elem, cap_elem)
     for d in dirs:
         p = center + np.asarray(d, float) * r
         idx = mol.add_atom(cap_elem, p[0], p[1], p[2])
         mol.new_atoms.add(idx)
+        _record_intended_bond(mol, center_idx, idx)
 
 
 # Sample density for the fallback direction search: fine enough that the
@@ -160,10 +177,10 @@ def replace_atom(mol: Molecule, idx: int, element: str = "C",
     n_add = tmpl.valence - len(neigh)
     if n_add > 0:
         if not neigh:       # lone atom: full template, like birth_molecule
-            _cap(mol, pos, tmpl.free_directions(), element, tmpl.cap)
+            _cap(mol, idx, pos, tmpl.free_directions(), element, tmpl.cap)
         else:
             existing = [templates._normalize(mol.positions[j] - pos) for j in neigh]
-            _cap(mol, pos, _fill_directions(existing, n_add), element, tmpl.cap)
+            _cap(mol, idx, pos, _fill_directions(existing, n_add), element, tmpl.cap)
     _reperceive(mol)
     return idx
 
@@ -213,7 +230,7 @@ def birth_molecule(mol: Molecule, position, element: str = "C",
     p = np.asarray(position, float)
     center = mol.add_atom(element, p[0], p[1], p[2])
     mol.new_atoms.add(center)
-    _cap(mol, p, tmpl.free_directions(), element, tmpl.cap)
+    _cap(mol, center, p, tmpl.free_directions(), element, tmpl.cap)
     _reperceive(mol)
     return center
 
@@ -232,7 +249,7 @@ def _promote_hydrogen(mol: Molecule, h_idx: int, element: str,
         # lone hydrogen: reuse it as the center of a free molecule
         mol.symbols[h_idx] = elements.normalize_symbol(element)
         mol.new_atoms.add(h_idx)     # moved and changed element -> new segment
-        _cap(mol, mol.positions[h_idx].copy(), template.free_directions(),
+        _cap(mol, h_idx, mol.positions[h_idx].copy(), template.free_directions(),
              element, template.cap)
         _reperceive(mol)
         return h_idx
@@ -244,8 +261,9 @@ def _promote_hydrogen(mol: Molecule, h_idx: int, element: str,
     mol.symbols[h_idx] = elements.normalize_symbol(element)
     mol.positions[h_idx] = center
     mol.new_atoms.add(h_idx)         # moved and changed element -> new segment
+    _record_intended_bond(mol, parent, h_idx)   # the bond being grown across
     opens = template.open_directions(-d)
-    _cap(mol, center, opens, element, template.cap)
+    _cap(mol, h_idx, center, opens, element, template.cap)
     _reperceive(mol)
     return h_idx
 
@@ -273,9 +291,6 @@ _PERCEPTION_TOLERANCE = 0.45
 # How far a clash pair is pushed past the perception cutoff during cleanup,
 # so the false bond is unambiguously gone (not just barely) on re-perception.
 _CLASH_CLEARANCE = 0.2
-# A new-atom bond within this many angstrom of the ideal length is treated as
-# an editor-intended bond, not a proximity accident.
-_CLASH_SLOP = 0.05
 
 
 def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
@@ -286,12 +301,12 @@ def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[in
     get an honest answer.
 
     * clash pair: a perceived bond with at least one endpoint in
-      ``mol.new_atoms``, not itself a manual bond, whose length deviates from
-      the covalent-sum ideal by more than :data:`_CLASH_SLOP`. The editor
-      places every bond it *intends* at exactly the ideal length and nothing
-      moves atoms afterward, so a new-atom bond at a non-ideal length can
-      only be a proximity accident. Old-old bonds are never flagged --
-      loaded geometry is not ours to judge.
+      ``mol.new_atoms`` whose pair is NOT in ``mol.manual_bonds``. Every
+      bond the editor deliberately creates is recorded as a manual bond
+      (see :func:`_record_intended_bond`), so intent is recorded rather
+      than inferred: any unrecorded new-atom bond is a proximity accident,
+      even one at exactly the ideal length. Old-old bonds are never
+      flagged -- loaded geometry is not ours to judge.
     * stretched manual bond: a manual bond longer than
       ``ideal + _PERCEPTION_TOLERANCE`` -- i.e. one that only exists because
       it is manual, not because the atoms are actually close.
@@ -302,10 +317,7 @@ def cleanup_targets(mol: Molecule) -> Tuple[List[Tuple[int, int]], List[Tuple[in
             continue
         if any(mi == i and mj == j for mi, mj, _mo in mol.manual_bonds):
             continue
-        ideal = _bond_length(mol.symbols[i], mol.symbols[j])
-        length = float(np.linalg.norm(mol.positions[i] - mol.positions[j]))
-        if abs(length - ideal) > _CLASH_SLOP:
-            clash_pairs.append((i, j))
+        clash_pairs.append((i, j))
 
     stretched: List[Tuple[int, int]] = []
     for i, j, _order in mol.manual_bonds:

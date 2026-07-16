@@ -374,6 +374,51 @@ def test_delete_atom_drops_new_atoms_touching_deleted_atom():
     assert mol.new_atoms == set()
 
 
+# -- editor: intended bonds are recorded as manual bonds (rev 2a) ------------
+def test_birth_molecule_records_intended_bonds_as_manual():
+    mol = Molecule()
+    c = editor.birth_molecule(mol, [0.0, 0.0, 0.0])          # CH4
+    pairs = {(i, j) for i, j, _o in mol.manual_bonds}
+    assert pairs == {(c, h) for h in range(1, 5)}            # center <-> each cap
+
+
+def test_promote_hydrogen_records_parent_and_cap_bonds():
+    mol = Molecule(symbols=["C", "H"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.09, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    editor.grow_at_atom(mol, 1)          # promote the H -> ethane-like
+    pairs = {(i, j) for i, j, _o in mol.manual_bonds}
+    # parent <-> promoted, and promoted <-> each of its 3 caps
+    assert pairs == {(0, 1), (1, 2), (1, 3), (1, 4)}
+
+
+def test_replace_atom_records_anchor_fill_bonds_not_preexisting():
+    # C-C stub; replace atom 0 with O -> one fill H added and recorded; the
+    # pre-existing heavy C-C bond stays perception-owned (NOT manual).
+    mol = Molecule(symbols=["C", "C"],
+                   positions=np.array([[0.0, 0.0, 0.0], [1.52, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    editor.replace_atom(mol, 0, "O")
+    pairs = {(i, j) for i, j, _o in mol.manual_bonds}
+    assert pairs == {(0, 2)}             # anchor <-> fill hydrogen only
+
+
+def test_cleanup_targets_flags_clash_at_exactly_ideal_distance():
+    # A new atom that lands at *exactly* the ideal bonding distance from an
+    # unrelated old atom is still an accident -- intent is recorded, not
+    # inferred, so it must be flagged (the old slop heuristic missed this).
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    ensure_bonds(mol)
+    ideal = elements.covalent_radius("C") * 2
+    idx = mol.add_atom("C", ideal, 0.0, 0.0)
+    mol.new_atoms.add(idx)
+    editor._reperceive(mol)
+    assert (0, idx, 1) in mol.bonds      # perceived, at exactly ideal length
+    clash, stretched = editor.cleanup_targets(mol)
+    assert clash == [(0, idx)]
+    assert stretched == []
+
+
 # -- editor: cleanup_targets --------------------------------------------------
 def test_cleanup_targets_ignores_old_old_bonds_flags_new_atom_clash():
     # two old atoms, already bonded (loaded geometry) -- never flagged regardless
