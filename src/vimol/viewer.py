@@ -494,7 +494,10 @@ class Viewer:
         put(top, left, f"{border}┌{title}┐\x1b[0m")
         for i, opt in enumerate(self._geom_opts):
             is_active = (opt.valence == active.valence and opt.geometry == active.geometry)
-            marker = "●" if is_active else " "
+            # ASCII, not "●": that bullet's East Asian Width is Ambiguous, and a
+            # terminal rendering it 2 columns wide misaligns the right border by
+            # 1 column (same class of bug as the status-bar ellipsis below).
+            marker = "*" if is_active else " "
             label = f" {marker} {opt.label()}".ljust(inner_w)
             if i == self._geom_idx:
                 row_s = f"{bg_only}\x1b[1m\x1b[7m{label}\x1b[27m\x1b[22m"
@@ -766,7 +769,18 @@ class Viewer:
         # only a constant width (never just a cap) keeps the trailer -- and
         # the clickable element button in it -- from drifting sideways as
         # the cursor merely moves around the molecule.
-        left = (raw_left[:_LEFT_WIDTH - 1] + "…") if len(raw_left) > _LEFT_WIDTH else raw_left.ljust(_LEFT_WIDTH)
+        #
+        # The truncation marker MUST be a single-column-guaranteed ASCII
+        # character, not the Unicode ellipsis "…" (U+2026): its East Asian
+        # Width is "Ambiguous", and terminals/fonts that render it 2 columns
+        # wide push this line 1 column past _LEFT_WIDTH on the LAST row of
+        # the screen. With no row below to wrap into, that overflow scrolls
+        # the whole terminal up instead -- and since hover text is stable
+        # while the mouse sits still, every subsequent redraw (each edit
+        # forces one) re-triggers it, which is what actually produced the
+        # "status line duplicates on every edit" bug: not a second draw, but
+        # the same line scrolling up and leaving its old position visible.
+        left = (raw_left[:_LEFT_WIDTH - 1] + ">") if len(raw_left) > _LEFT_WIDTH else raw_left.ljust(_LEFT_WIDTH)
         rep = self.style.representation
         frame = f"  {self.frame_index+1}/{len(self.frames)}" if len(self.frames) > 1 else ""
         spin = " ⟳" if self.autospin else ""

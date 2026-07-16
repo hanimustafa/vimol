@@ -1892,6 +1892,36 @@ def test_status_bar_button_column_stable_across_hover_and_name_changes():
     assert v._elem_button_span == baseline, "a transient status message must not move the button"
 
 
+def test_truncated_hover_text_uses_ascii_marker_not_wide_ellipsis():
+    # Regression: the truncation marker used to be "…" (U+2026), whose East
+    # Asian Width is Ambiguous -- terminals/fonts that render it 2 columns
+    # wide push the fixed-width left field 1 column past _LEFT_WIDTH. On the
+    # status bar's row (the terminal's last line) that overflow has nowhere
+    # to wrap to, so the terminal scrolls the whole screen up instead; since
+    # hover text is stable while the mouse sits still, every redraw (each
+    # edit forces one) re-triggers it, which read as the status line
+    # "duplicating with every edit". The marker must be plain ASCII.
+    from vimol.viewer import Viewer, _LEFT_WIDTH
+    # multi-digit negative coordinates (like a real hover far from the
+    # origin -- see the bug report's "#3 H (-0.63, 0.63, -0.6...)") push
+    # atom_info() comfortably past _LEFT_WIDTH=24, forcing truncation.
+    mol = Molecule(symbols=["C"], positions=np.array([[-12.34, 56.78, -90.12]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(240, 200)
+    v._cols, v._rows = 100, 30
+    v.widget.hovered = 0
+    long_hov = v.widget.atom_info(0)
+    assert len(long_hov) > _LEFT_WIDTH
+    bar = v._status_bar()
+    assert "…" not in bar
+    # the visible left field is ASCII-truncated with '>' and exactly _LEFT_WIDTH wide
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", bar)
+    visible_left = plain[1:1 + _LEFT_WIDTH]   # bar starts with a leading space (see _status_bar's seg)
+    assert visible_left == long_hov[:_LEFT_WIDTH - 1] + ">"
+    assert all(ord(c) < 128 for c in visible_left)
+
+
 # -- status-bar dead zone: protect it from accidental 3D-viewport clicks ---
 def test_status_zone_click_opens_picker_even_one_row_off():
     v = _viewer_in_append_mode()
