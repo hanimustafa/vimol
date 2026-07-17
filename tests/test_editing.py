@@ -1369,36 +1369,121 @@ def test_mouse_setup_keeps_wire_format_and_decoder_consistent(monkeypatch):
     # Regression for the SSH dead-mouse bug: the terminal was put in pixel
     # (SGR-Pixels, 1016) reporting mode while a raced DECRQM probe told the
     # decoder to expect cells -- so pixel coords got scaled by the cell size
-    # and every click landed off-screen. _setup_mouse must enable exactly the
-    # mode the probe reports, so the wire format and decoder can never split.
+    # and every click landed off-screen. Startup must enable exactly the mode
+    # the probe reports, so the wire format and decoder can never split.
     import vimol.kitty as kitty
-    from vimol import input as vinput
     from vimol.viewer import Viewer
     mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
     v = Viewer(mol, backend="cpu")
-    monkeypatch.setattr(kitty, "query_cell_size_px", lambda *a, **k: None)
+    v._old_termios = "raw"                       # pretend _enter ran on a tty
     writes = bytearray()
     monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: writes.extend(data))
 
-    # probe fails (the SSH-timeout case): NO pixel mode on the wire, decoder cells
-    monkeypatch.setattr(vinput, "supports_pixel_mouse", lambda *a, **k: False)
-    writes.clear()
-    v._setup_mouse(probe=True)
+    # probe reports no pixel mouse: NO pixel mode on the wire, decoder cells
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, False, None, rtt=0.001))
+    v._probe = None
+    v._finish_startup()
     assert v.decoder.pixel is False
     assert b"1016h" not in bytes(writes)         # pixel reporting NOT enabled
 
-    # probe succeeds: pixel mode on the wire AND in the decoder
-    monkeypatch.setattr(vinput, "supports_pixel_mouse", lambda *a, **k: True)
+    # probe reports pixel mouse: pixel mode on the wire AND in the decoder,
+    # and the exact cell size is adopted
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, True, (10.0, 20.0), rtt=0.001))
     writes.clear()
-    v._setup_mouse(probe=True)
+    v._probe = None
+    v._finish_startup()
     assert v.decoder.pixel is True
     assert b"1016h" in bytes(writes)             # pixel reporting enabled
+    assert v._cell_px == (10.0, 20.0)
 
-    # no probe at all (stdin not a tty): default to cells, still consistent
+    # no probe possible (stdin not a tty): default to cells, still consistent
     writes.clear()
-    v._setup_mouse(probe=False)
+    v._probe = None
+    v._old_termios = None
+    called = []
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k: called.append(1))
+    v._finish_startup()
+    assert not called                            # nothing to ask
     assert v.decoder.pixel is False
     assert b"1016h" not in bytes(writes)
+
+
+def test_startup_seeds_idle_resolution_from_link_latency(monkeypatch):
+    # (B): a clearly-local probe round trip keeps full-resolution settle
+    # frames; a slow or unanswered one starts at half resolution and lets the
+    # idle controller earn it back from measured settle times.
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    v._old_termios = "raw"
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, True, None, rtt=0.002))
+    v._probe = None
+    v._finish_startup()
+    assert v._idle_scale == 1.0                  # ~2ms: clearly local
+
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, True, None, rtt=0.15))
+    v._probe = None
+    v._finish_startup()
+    assert v._idle_scale == 0.5                  # WAN-ish SSH: start halved
+
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(None, False, None, rtt=None))
+    v._probe = None
+    v._finish_startup()
+    assert v._idle_scale == 0.5                  # no answer: assume slow
+
+
+def test_startup_probe_preserves_early_keystrokes(monkeypatch):
+    # Keys typed while the startup probe's reply is in flight must be
+    # dispatched, not swallowed with the reply bytes.
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    v._old_termios = "raw"
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, False, None, rtt=0.001,
+                                            leftover=b"?"))
+    assert v._show_help is False
+    v._finish_startup()
+    assert v._show_help is True                  # the '?' reached _dispatch
+
+
+def test_first_frame_is_interactive_quality():
+    # (C): the first frame ever drawn must be a cheap interactive one (ss=1,
+    # conservative render scale), NOT the full-resolution supersampled still
+    # -- that crisp frame arrives via the normal settle path moments later.
+    import time
+    from vimol.viewer import Viewer, _STARTUP_SCALE
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    assert v._interact_scale == _STARTUP_SCALE < 1.0
+    # run() stamps _last_interact before the first draw; with it stamped,
+    # the frame is interactive: supersample 1 at the startup scale.
+    v._last_interact = time.time()
+    assert v._target_ss() == 1
+
+
+def test_idle_scale_controller_tracks_settle_budget():
+    from vimol.viewer import Viewer, _IDLE_BUDGET
+    # a blown budget steps the scale down (square-root correction)...
+    step_down = Viewer._next_idle_scale(1.0, _IDLE_BUDGET * 4)
+    assert step_down == 0.5
+    # ...never below the legibility floor...
+    assert Viewer._next_idle_scale(0.35, _IDLE_BUDGET * 100) == 0.35
+    # ...and comfortable settles ease it back toward full resolution.
+    step_up = Viewer._next_idle_scale(0.5, _IDLE_BUDGET * 0.2)
+    assert 0.5 < step_up <= 1.0
+    assert Viewer._next_idle_scale(1.0, _IDLE_BUDGET * 0.2) == 1.0   # ceiling
+    assert Viewer._next_idle_scale(0.7, _IDLE_BUDGET * 0.8) == 0.7   # in band
 
 
 def test_switching_to_append_via_a_resets_pointer(monkeypatch):
@@ -2076,6 +2161,81 @@ def test_query_cell_size_px_returns_none_without_reply(monkeypatch):
     monkeypatch.setattr(_os, "write", lambda fd, data: len(data))
     monkeypatch.setattr(_select, "select", lambda r, w, x, t: ([], [], []))  # never ready
     assert kitty.query_cell_size_px(0, 1, timeout=0.01) is None
+
+
+# -- combined startup probe (graphics + pixel mouse + cell size + DA1 fence) --
+def test_probe_query_carries_all_four_questions():
+    import vimol.kitty as kitty
+    q = kitty.probe_query_bytes()
+    assert q.startswith(b"\x1b_G") and b"a=q" in q       # graphics *query*, never displayed
+    assert b"\x1b[?1016$p" in q                          # DECRQM: SGR-Pixels mouse
+    assert b"\x1b[16t" in q                              # exact cell size
+    assert q.endswith(b"\x1b[c")                         # DA1 fence, sent last
+
+
+def test_probe_reply_full_kitty_style():
+    import vimol.kitty as kitty
+    reply = (b"\x1b_Gi=31;OK\x1b\\"        # graphics supported
+             b"\x1b[?1016;2$y"              # pixel mouse recognized
+             b"\x1b[6;20;10t"               # cells are 10x20 px (height;width)
+             b"\x1b[?62;4c")                # DA1 fence
+    p = kitty.parse_probe_reply(reply)
+    assert p is not None
+    assert p.graphics is True
+    assert p.pixel_mouse is True
+    assert p.cell_px == (10.0, 20.0)
+    assert p.leftover == b""
+
+
+def test_probe_reply_waits_for_fence_and_reads_plain_terminals():
+    import vimol.kitty as kitty
+    # graphics reply alone: fence not yet in -> keep reading
+    assert kitty.parse_probe_reply(b"\x1b_Gi=31;OK\x1b\\") is None
+    # a DECRQM reply must not be mistaken for the DA1 fence (both start CSI ?)
+    assert kitty.parse_probe_reply(b"\x1b[?1016;2$y") is None
+    # a plain xterm answers only the fence: definitive "no graphics"
+    p = kitty.parse_probe_reply(b"\x1b[?1;2c")
+    assert p.graphics is False and p.pixel_mouse is False and p.cell_px is None
+    # an error response to the graphics query is also a "no"
+    p = kitty.parse_probe_reply(b"\x1b_Gi=31;ENOTSUP\x1b\\\x1b[?6c")
+    assert p.graphics is False
+
+
+def test_probe_reply_keeps_early_keystroke_bytes():
+    import vimol.kitty as kitty
+    p = kitty.parse_probe_reply(b"q\x1b_Gi=31;OK\x1b\\x\x1b[?6c")
+    assert p.graphics is True
+    assert p.leftover == b"qx"
+
+
+def test_probe_terminal_measures_rtt_and_parses(monkeypatch):
+    import vimol.kitty as kitty
+    import os as _os
+    import select as _select
+    reply = {"data": b"\x1b_Gi=31;OK\x1b\\\x1b[?1016;1$y\x1b[6;18;9t\x1b[?62c"}
+    monkeypatch.setattr(_os, "write", lambda fd, data: len(data))
+    monkeypatch.setattr(_select, "select", lambda r, w, x, t: ([r[0]], [], []))
+
+    def fake_read(fd, n):
+        d = reply["data"]
+        reply["data"] = b""
+        return d
+    monkeypatch.setattr(_os, "read", fake_read)
+    p = kitty.probe_terminal(0, 1)
+    assert p.graphics is True and p.pixel_mouse is True
+    assert p.cell_px == (9.0, 18.0)
+    assert p.rtt is not None and p.rtt >= 0.0
+
+
+def test_probe_terminal_timeout_returns_unknown(monkeypatch):
+    import vimol.kitty as kitty
+    import os as _os
+    import select as _select
+    monkeypatch.setattr(_os, "write", lambda fd, data: len(data))
+    monkeypatch.setattr(_select, "select", lambda r, w, x, t: ([], [], []))  # never ready
+    p = kitty.probe_terminal(0, 1, timeout=0.01)
+    assert p.graphics is None                     # unknown, NOT a refusal
+    assert p.rtt is None
 
 
 # -- taller status-bar dead zone (guard pushed higher) ----------------------

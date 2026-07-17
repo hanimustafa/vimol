@@ -105,6 +105,29 @@ def _print_info(mol: Molecule):
     print("composition: " + ", ".join(f"{k}:{v}" for k, v in sorted(comp.items())))
 
 
+def _probe_terminal_raw() -> Optional["kitty.TerminalProbe"]:
+    """Ask the terminal itself about Kitty graphics support, briefly raw.
+
+    Used when the environment heuristics (kitty.supports_kitty) come up
+    empty -- typically over SSH, where TERM is rewritten and the kitty/
+    ghostty env vars are stripped even though the terminal at the other end
+    renders graphics fine. The probe needs raw mode to read the reply;
+    restore the tty exactly as found. Returns None when stdin isn't a tty
+    (nothing to ask).
+    """
+    import termios
+    import tty
+    try:
+        old = termios.tcgetattr(0)
+    except (OSError, termios.error):
+        return None
+    try:
+        tty.setraw(0)
+        return kitty.probe_terminal(0, 1)
+    finally:
+        termios.tcsetattr(0, termios.TCSADRAIN, old)
+
+
 def _default_demo_path() -> Optional[str]:
     """Path to the bundled C60 demo, for `vimol` with no file argument.
 
@@ -193,12 +216,18 @@ def main(argv: List[str] | None = None) -> int:
     if not sys.stdout.isatty():
         print("error: interactive mode needs a terminal (use --render or --kitty)", file=sys.stderr)
         return 4
+    probe = None
     if not kitty.supports_kitty():
-        print("warning: this terminal may not support the Kitty graphics protocol.",
-              file=sys.stderr)
-        print("         Set VIMOL_FORCE_KITTY=1 to try anyway, or use --render out.png.",
-              file=sys.stderr)
-        return 5
+        # The environment says nothing (common over SSH) -- ask the terminal
+        # itself. Only an answered probe that lacks graphics support, or no
+        # terminal to ask, refuses; a confirmed terminal proceeds normally.
+        probe = _probe_terminal_raw()
+        if probe is None or probe.graphics is not True:
+            print("warning: this terminal does not appear to support the Kitty "
+                  "graphics protocol.", file=sys.stderr)
+            print("         Set VIMOL_FORCE_KITTY=1 to try anyway, or use --render out.png.",
+                  file=sys.stderr)
+            return 5
 
     # interactive defaults to a terminal-matching transparent background
     if not args.opaque and args.background is None:
@@ -206,7 +235,8 @@ def main(argv: List[str] | None = None) -> int:
 
     from .viewer import Viewer
     viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin,
-                    backend=args.backend, source_path=args.file, editable=True)
+                    backend=args.backend, source_path=args.file, editable=True,
+                    probe=probe)   # reuse the detection probe: no second round trip
     viewer.frame_index = idx
     # apply initial rotation
     viewer.widget.scene.camera.orbit(args.rotate[0], args.rotate[1])

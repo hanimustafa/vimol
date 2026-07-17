@@ -125,8 +125,11 @@ def supports_pixel_mouse(fd_in: int = 0, fd_out: int = 1, timeout: float = 0.5) 
     is one-time startup cost, but over SSH a tight timeout loses the race and
     reports "no pixel mouse" for a terminal that in fact supports it. A wrong
     answer here no longer breaks the mouse -- the viewer keeps the wire format
-    and the decoder consistent either way (see Viewer._setup_mouse) -- but a
+    and the decoder consistent either way (see Viewer._enable_mouse) -- but a
     right answer preserves pixel-precise dragging and picking over SSH.
+    (The viewer itself now learns this from kitty.probe_terminal's combined
+    round trip; this helper remains for embedders driving InputDecoder
+    directly, e.g. examples/embed_demo.py.)
     """
     val = query_decset(1016, fd_in, fd_out, timeout=timeout)
     return val in (1, 2, 3, 4)

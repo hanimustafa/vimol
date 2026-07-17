@@ -96,6 +96,25 @@ _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
 # Interactive frame budget (seconds) for the dynamic-resolution controller:
 # ~120 fps, minus headroom for encode/transmit.
 _INTERACT_BUDGET = 1.0 / 120.0
+# Budget (seconds) for a *settle* frame: render + encode + transmit of the
+# crisp full-quality still that lands after you stop moving. On a slow link
+# (SSH) a full-resolution frame is megabytes and can take seconds to arrive;
+# the idle-scale controller trades resolution to keep the settle under this.
+_IDLE_BUDGET = 0.30
+# A probe round trip at or under this is "clearly local" (same machine or
+# LAN): start idle frames at full resolution. Anything slower -- or no
+# answer -- starts at half resolution and earns its way up via the idle
+# controller as fast settles are actually measured.
+_LOCAL_RTT = 0.02
+# Starting interactive render scale. Deliberately conservative: the FIRST
+# frame is drawn with it before any timing data exists, and it must clear
+# the 50 ms time-to-first-image target even cold (first-call numpy warmup,
+# ~25 ms) on a full-screen Retina terminal -- measured ~40 ms at 0.3, vs
+# ~180 ms at 0.5 and ~880 ms for the old full-quality first frame. The
+# controller then ramps it to whatever this machine actually sustains
+# within a few frames, and the settle path replaces it with a crisp still
+# ~0.25 s after startup anyway.
+_STARTUP_SCALE = 0.3
 
 # Warm warning color for the status bar's "press c to cleanup" hint.
 _CLEANUP_HINT_FG = (255, 170, 60)
@@ -113,7 +132,8 @@ class Viewer:
                  style: Optional[Style] = None, fd_in: int = 0, fd_out: int = 1,
                  autospin: bool = False, target_fps: float = 120.0, picking: bool = True,
                  transparent: bool = True, backend: str = "auto",
-                 source_path: Optional[str] = None, editable: bool = False):
+                 source_path: Optional[str] = None, editable: bool = False,
+                 probe: Optional[kitty.TerminalProbe] = None):
         self.frames = frames or [molecule]
         self.source_path = source_path
         self.editable = editable
@@ -169,7 +189,15 @@ class Viewer:
         # pointer strays back over the molecule mid-drag.
         self._status_zone_press = False
         self._last_interact = 0.0
-        self._interact_scale = 1.0   # dynamic-resolution factor while moving
+        # dynamic-resolution factor while moving; starts conservative so the
+        # very first frame (drawn before any timing data exists) stays fast.
+        self._interact_scale = _STARTUP_SCALE
+        # resolution factor for the crisp settle frame; probe-seeded in
+        # _finish_startup, then adapted by _next_idle_scale measurements.
+        self._idle_scale = 1.0
+        # capability probe handed in by the CLI (it may have probed already
+        # to decide whether to launch at all); None -> probe in _finish_startup.
+        self._probe = probe
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
@@ -203,35 +231,56 @@ class Viewer:
         if self._old_termios is not None:
             tty.setraw(self.fd_in)
         kitty.write_bytes(_ALT_SCREEN_ON + _HIDE_CURSOR + _CLEAR, self.fd_out)
-        self._setup_mouse(probe=self._old_termios is not None)
 
-    def _setup_mouse(self, probe: bool) -> None:
-        """Enable mouse reporting in a coordinate mode the decoder agrees with.
+    def _enable_mouse(self, pixel: bool) -> None:
+        """Turn on mouse reporting with the wire format and the decoder locked
+        to the same coordinate mode.
 
         The terminal reports mouse coordinates in *pixels* (SGR-Pixels, DECSET
-        1016) or *cells*, and the decoder must be told which. Historically we
-        always requested pixel mode and then set ``decoder.pixel`` from a
-        DECRQM probe -- but that probe races a fixed timeout, and over SSH the
-        reply routinely arrives late, so the probe said "no pixels" while the
-        terminal was already reporting pixels. The decoder then scaled every
-        event by the cell size and threw all clicks off-screen: a dead mouse
-        that worked fine locally.
-
-        The fix is to decide ONCE and keep both sides consistent: probe first,
-        then enable mouse reporting in exactly the mode the probe confirmed. A
-        timed-out probe now falls back to *cell* coordinates on both the wire
-        and the decoder -- coarser (vim-level) but fully working -- instead of
-        the split that broke it.
+        1016) or *cells*, and the decoder must be told which. One flag drives
+        both sides here, so they can never disagree -- the invariant behind
+        the SSH dead-mouse fix (a raced probe once told the decoder "cells"
+        while the wire was in pixel mode, scaling every click off-screen).
         """
-        pixel = False
-        if probe:
-            # ask (in raw mode) for pixel-mouse support and the exact cell size
-            # so pixel->cell hit-testing lines up with where glyphs are drawn.
-            pixel = _input.supports_pixel_mouse(self.fd_in, self.fd_out)
-            self._cell_px = kitty.query_cell_size_px(self.fd_in, self.fd_out)
         self.decoder.pixel = pixel
         kitty.write_bytes(_input.enable_mouse(pixel=pixel, hover=self.widget.picking),
                           self.fd_out)
+
+    def _finish_startup(self) -> None:
+        """Probe the terminal and arm the mouse -- AFTER the first paint.
+
+        Runs the combined capability probe (pixel mouse, exact cell size, link
+        round-trip time -- one write, one reply, see kitty.probe_terminal)
+        deliberately after the first frame is already on screen: the probe
+        costs a link round trip, and nothing it answers is needed to *draw* --
+        only to point, click, and pick the settle resolution. So startup shows
+        pixels immediately and spends the RTT while the user is still looking
+        at them. Keystrokes typed during the probe are preserved (the reply
+        parser returns them as leftover bytes) and dispatched, not dropped.
+        """
+        probe = self._probe
+        if probe is None and self._old_termios is not None:
+            probe = kitty.probe_terminal(self.fd_in, self.fd_out)
+            self._probe = probe
+        if probe is not None:
+            if probe.cell_px is not None:
+                self._cell_px = probe.cell_px
+            self._enable_mouse(probe.pixel_mouse)
+            # Seed the settle resolution from the measured link latency: a
+            # clearly-local terminal starts crisp at full resolution; a
+            # remote/unknown link starts at half (its megabyte-scale full-res
+            # stills are what made SSH feel frozen) and the idle controller
+            # raises it as fast settles are actually observed.
+            self._idle_scale = 1.0 if (probe.rtt is not None
+                                       and probe.rtt <= _LOCAL_RTT) else 0.5
+            if probe.leftover:
+                # mouse reporting was off during the probe, so leftover bytes
+                # can only be keystrokes -- deliver them.
+                self._dispatch(self.decoder.feed(probe.leftover))
+        else:
+            # no way to probe (stdin not a tty): cells on both sides, and
+            # keep full-resolution settles (the status quo for local use).
+            self._enable_mouse(False)
 
     def _exit(self):
         import termios
@@ -301,6 +350,25 @@ class Viewer:
             return min(1.0, current * 1.15)
         return current
 
+    @staticmethod
+    def _next_idle_scale(current: float, elapsed: float) -> float:
+        """Settle-frame resolution controller: the next idle render scale.
+
+        Same square-root correction as :meth:`_next_render_scale`, but aimed
+        at the much larger settle budget (see _IDLE_BUDGET) and measured on
+        the crisp still drawn after motion stops -- whose cost is dominated
+        by *transmitting* megabytes over the terminal link, not rendering.
+        Locally the write returns in milliseconds and the scale rides at 1.0;
+        over SSH the blocking write exposes the real link speed and the scale
+        settles wherever a still arrives within budget. The 0.35 floor keeps
+        even a very slow link legible (~1/8 of the pixels).
+        """
+        if elapsed > _IDLE_BUDGET:
+            return max(0.35, current * max((_IDLE_BUDGET / elapsed) ** 0.5, 0.5))
+        if elapsed < _IDLE_BUDGET * 0.5:
+            return min(1.0, current * 1.15)
+        return current
+
     def _draw(self):
         want_ss = self._target_ss()
         interacting = want_ss == 1
@@ -308,9 +376,12 @@ class Viewer:
         if scene.supersample != want_ss:
             scene.set_supersample(want_ss)
         # dynamic resolution (CPU backend only -- GL is fast at full size):
-        # render interactive frames at the adaptive scale, idle ones crisp.
+        # interactive frames at the ~120fps adaptive scale, settle frames at
+        # the link-speed-adaptive idle scale (1.0 locally; lower over SSH,
+        # where a full-resolution still is megabytes on the wire).
         if scene.backend == "cpu":
-            scene.set_render_scale(self._interact_scale if interacting else 1.0)
+            scene.set_render_scale(self._interact_scale if interacting
+                                   else self._idle_scale)
         self._drawn_ss = want_ss
 
         # Time the WHOLE frame -- render *and* the encode/transmit that follow.
@@ -330,9 +401,13 @@ class Viewer:
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
-        if interacting and scene.backend == "cpu":
-            self._interact_scale = self._next_render_scale(
-                self._interact_scale, time.perf_counter() - frame_start)
+        if scene.backend == "cpu":
+            elapsed = time.perf_counter() - frame_start
+            if interacting:
+                self._interact_scale = self._next_render_scale(
+                    self._interact_scale, elapsed)
+            else:
+                self._idle_scale = self._next_idle_scale(self._idle_scale, elapsed)
         if self._show_help:
             self._draw_help()
         elif self._mode == "periodic_table":
@@ -1126,8 +1201,17 @@ class Viewer:
         self._enter()
         self._running = True
         try:
+            # First paint before anything that waits on the terminal: geometry
+            # comes from a local ioctl, and stamping _last_interact makes the
+            # first frame an *interactive* one (supersample 1, conservative
+            # render scale, fast zlib) -- milliseconds, not the full-quality
+            # still, which the normal settle path delivers ~0.25s later. The
+            # capability probe (a link round trip) runs only after the image
+            # is already on screen; it gates the mouse, not the pixels.
             self._update_geometry()
+            self._last_interact = time.time()
             self._draw()
+            self._finish_startup()
             frame_dt = 1.0 / self.target_fps
             while self._running:
                 data = self._read(frame_dt)

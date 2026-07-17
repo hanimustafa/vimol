@@ -71,6 +71,12 @@ NGL) use — just done on the CPU.
   drag and supersamples once you stop, so motion stays responsive on the CPU and
   the resting frame is crisp. An optional OpenGL backend (`vimol[gl]`) renders on
   the GPU where one is available.
+- **Fast startup, SSH-aware:** the first image appears in tens of milliseconds —
+  capability probing (graphics, pixel mouse, cell size) happens in a single
+  round trip *after* the first paint, and detection asks the terminal itself, so
+  it works over SSH where environment variables lie. The link's measured latency
+  and throughput set the resting-frame resolution automatically: full quality on
+  a local terminal, adaptively reduced on slow connections.
 - **Output:** live terminal, one-shot Kitty frame to stdout (pipeable), or PNG
   (via a built-in stdlib PNG encoder — no Pillow needed).
 

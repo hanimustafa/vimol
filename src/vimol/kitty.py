@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import sys
 import zlib
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
@@ -134,7 +136,15 @@ def unique_id_base(stride: int = 4) -> int:
 
 
 def supports_kitty() -> bool:
-    """Best-effort detection of Kitty graphics support via environment."""
+    """Best-effort detection of Kitty graphics support via environment.
+
+    Environment variables lie in exactly the situations where support matters
+    most: SSH strips ``KITTY_WINDOW_ID``/``TERM_PROGRAM``, and remote hosts
+    often force ``TERM=xterm-256color`` for a terminal that renders graphics
+    perfectly. Treat a True here as trustworthy and a False as merely
+    "unknown" -- callers should fall back to :func:`probe_terminal`, which
+    asks the terminal itself and is authoritative either way.
+    """
     if os.environ.get("VIMOL_FORCE_KITTY"):
         return True
     if os.environ.get("KITTY_WINDOW_ID"):
@@ -148,6 +158,157 @@ def supports_kitty() -> bool:
     if os.environ.get("WEZTERM_PANE"):
         return True
     return False
+
+
+# --------------------------------------------------------------------------
+# Startup probe: one round trip that answers everything
+# --------------------------------------------------------------------------
+@dataclass
+class TerminalProbe:
+    """What one :func:`probe_terminal` round trip learned about the terminal.
+
+    ``graphics`` is True/False when the terminal answered the DA1 fence (so
+    its silence on the graphics query is a real "no"), and None when nothing
+    came back at all (not a terminal / reply lost) -- unknown, not refusal.
+    ``rtt`` is the query->fence round-trip time: ~1 ms on a local terminal,
+    tens to hundreds of ms over SSH, so it doubles as a free link-latency
+    estimate (see Viewer's idle-resolution seeding). ``leftover`` preserves
+    any non-reply bytes that arrived interleaved (keys typed during startup)
+    so the caller can feed them to its input decoder instead of losing them.
+    """
+    graphics: Optional[bool]
+    pixel_mouse: bool
+    cell_px: Optional[Tuple[float, float]]
+    rtt: Optional[float] = None
+    leftover: bytes = b""
+
+
+# The probe's graphics query id. With a=q the terminal only *answers* -- no
+# image is stored -- so unlike display ids this can't collide across panes.
+_PROBE_GFX_ID = 31
+
+# Replies the probe can receive, in the order the queries are sent. The DA1
+# reply (CSI ? ... c) is the fence: every xterm-descendant answers it, and
+# in-order reply processing guarantees it arrives *after* whichever of the
+# earlier replies the terminal supports. Note the DECRQM reply also starts
+# with CSI ? but ends in $y, so the DA1 pattern (digits/; then a final 'c')
+# cannot match it.
+_RE_GFX_REPLY = re.compile(rb"\x1b_Gi=%d;([^\x1b]*)\x1b\\" % _PROBE_GFX_ID)
+_RE_DECRQM_1016 = re.compile(rb"\x1b\[\?1016;(\d+)\$y")
+_RE_CELL_SIZE = re.compile(rb"\x1b\[6;(\d+);(\d+)t")
+_RE_DA1 = re.compile(rb"\x1b\[\?[0-9;]*c")
+
+
+def probe_query_bytes() -> bytes:
+    """The combined capability query, sent as ONE write (one SSH round trip).
+
+    Four questions back to back: (1) a Kitty graphics *query* (``a=q`` with a
+    1x1 dummy pixel -- validated and answered, never displayed or stored);
+    (2) DECRQM for SGR-Pixels mouse (1016); (3) ``CSI 16 t`` for the exact
+    cell size; (4) DA1 (``CSI c``) as a universally-answered fence. Terminals
+    ignore the queries they don't recognize (the graphics APC included), so
+    this is safe to fire at anything that calls itself a terminal. Requires
+    the tty to be in raw mode to read the replies.
+    """
+    gfx = (b"\x1b_Gi=%d,s=1,v=1,a=q,t=d,f=24;" % _PROBE_GFX_ID
+           + base64.standard_b64encode(b"\x00\x00\x00") + b"\x1b\\")
+    return gfx + b"\x1b[?1016$p" + b"\x1b[16t" + b"\x1b[c"
+
+
+def _parse_probe_pieces(buf: bytes):
+    """Extract (graphics, pixel_mouse, cell_px, spans) from reply bytes.
+
+    graphics is None when no graphics reply is present at all -- only the
+    caller knows whether that silence is meaningful (it is once the DA1
+    fence has arrived).
+    """
+    spans = []
+    graphics = None
+    m = _RE_GFX_REPLY.search(buf)
+    if m:
+        graphics = m.group(1).startswith(b"OK")
+        spans.append(m.span())
+    pixel = False
+    m = _RE_DECRQM_1016.search(buf)
+    if m:
+        # 1=set 2=reset 3=perm-set 4=perm-reset: any of these means the mode
+        # is *recognized*; 0 means unknown.
+        pixel = int(m.group(1)) in (1, 2, 3, 4)
+        spans.append(m.span())
+    cell = None
+    m = _RE_CELL_SIZE.search(buf)
+    if m:
+        ch, cw = int(m.group(1)), int(m.group(2))   # reply is height;width
+        if cw > 0 and ch > 0:
+            cell = (float(cw), float(ch))
+        spans.append(m.span())
+    return graphics, pixel, cell, spans
+
+
+def _probe_leftover(buf: bytes, spans) -> bytes:
+    """*buf* minus the recognized reply spans: bytes the user typed."""
+    out = bytearray()
+    prev = 0
+    for s, e in sorted(spans):
+        out += buf[prev:s]
+        prev = e
+    out += buf[prev:]
+    return bytes(out)
+
+
+def parse_probe_reply(buf: bytes) -> Optional[TerminalProbe]:
+    """Parse an accumulating reply buffer; None until the DA1 fence arrives.
+
+    Once the fence is in, a missing graphics reply is a definitive "no
+    graphics support" (the terminal processed our queries in order and
+    answered the later one), so ``graphics`` is always True/False here.
+    """
+    m_da1 = _RE_DA1.search(buf)
+    if m_da1 is None:
+        return None
+    graphics, pixel, cell, spans = _parse_probe_pieces(buf)
+    spans.append(m_da1.span())
+    return TerminalProbe(graphics=bool(graphics), pixel_mouse=pixel, cell_px=cell,
+                         leftover=_probe_leftover(buf, spans))
+
+
+def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0) -> TerminalProbe:
+    """Ask the terminal what it can do: graphics, pixel mouse, cell size, RTT.
+
+    One write, then reads until the DA1 fence answers (or *timeout*, which
+    only real non-terminals hit -- every xterm descendant answers DA1, so
+    capable terminals cost exactly one round trip, not a fixed timeout).
+    Requires the tty to be in raw mode. On timeout, whatever partial replies
+    did arrive are still used, with ``graphics=None`` (unknown, not "no").
+    """
+    import select
+    import time as _time
+
+    try:
+        os.write(fd_out, probe_query_bytes())
+    except OSError:
+        return TerminalProbe(graphics=None, pixel_mouse=False, cell_px=None)
+    t0 = _time.monotonic()
+    deadline = t0 + timeout
+    buf = b""
+    while _time.monotonic() < deadline:
+        r, _, _ = select.select([fd_in], [], [], max(0.0, deadline - _time.monotonic()))
+        if not r:
+            break
+        try:
+            chunk = os.read(fd_in, 512)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+        probe = parse_probe_reply(buf)
+        if probe is not None:
+            probe.rtt = _time.monotonic() - t0
+            return probe
+    graphics, pixel, cell, spans = _parse_probe_pieces(buf)
+    return TerminalProbe(graphics=graphics, pixel_mouse=pixel, cell_px=cell,
+                         leftover=_probe_leftover(buf, spans))
 
 
 # --------------------------------------------------------------------------
