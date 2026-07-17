@@ -118,9 +118,17 @@ def query_decset(mode: int, fd_in: int = 0, fd_out: int = 1, timeout: float = 0.
     return val
 
 
-def supports_pixel_mouse(fd_in: int = 0, fd_out: int = 1) -> bool:
-    """True if the terminal reports SGR-Pixels (1016) as a recognized mode."""
-    val = query_decset(1016, fd_in, fd_out)
+def supports_pixel_mouse(fd_in: int = 0, fd_out: int = 1, timeout: float = 0.5) -> bool:
+    """True if the terminal reports SGR-Pixels (1016) as a recognized mode.
+
+    The default timeout is generous (0.5s) on purpose: the DECRQM round-trip
+    is one-time startup cost, but over SSH a tight timeout loses the race and
+    reports "no pixel mouse" for a terminal that in fact supports it. A wrong
+    answer here no longer breaks the mouse -- the viewer keeps the wire format
+    and the decoder consistent either way (see Viewer._setup_mouse) -- but a
+    right answer preserves pixel-precise dragging and picking over SSH.
+    """
+    val = query_decset(1016, fd_in, fd_out, timeout=timeout)
     return val in (1, 2, 3, 4)
 
 

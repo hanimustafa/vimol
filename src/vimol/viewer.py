@@ -203,13 +203,35 @@ class Viewer:
         if self._old_termios is not None:
             tty.setraw(self.fd_in)
         kitty.write_bytes(_ALT_SCREEN_ON + _HIDE_CURSOR + _CLEAR, self.fd_out)
-        kitty.write_bytes(_input.enable_mouse(pixel=True, hover=self.widget.picking), self.fd_out)
-        # probe whether the terminal actually reports pixel coordinates, and
-        # (once, in raw mode) ask for its exact cell size so pixel->cell
-        # hit-testing lines up with where glyphs are really drawn.
-        if self._old_termios is not None:
-            self.decoder.pixel = _input.supports_pixel_mouse(self.fd_in, self.fd_out)
+        self._setup_mouse(probe=self._old_termios is not None)
+
+    def _setup_mouse(self, probe: bool) -> None:
+        """Enable mouse reporting in a coordinate mode the decoder agrees with.
+
+        The terminal reports mouse coordinates in *pixels* (SGR-Pixels, DECSET
+        1016) or *cells*, and the decoder must be told which. Historically we
+        always requested pixel mode and then set ``decoder.pixel`` from a
+        DECRQM probe -- but that probe races a fixed timeout, and over SSH the
+        reply routinely arrives late, so the probe said "no pixels" while the
+        terminal was already reporting pixels. The decoder then scaled every
+        event by the cell size and threw all clicks off-screen: a dead mouse
+        that worked fine locally.
+
+        The fix is to decide ONCE and keep both sides consistent: probe first,
+        then enable mouse reporting in exactly the mode the probe confirmed. A
+        timed-out probe now falls back to *cell* coordinates on both the wire
+        and the decoder -- coarser (vim-level) but fully working -- instead of
+        the split that broke it.
+        """
+        pixel = False
+        if probe:
+            # ask (in raw mode) for pixel-mouse support and the exact cell size
+            # so pixel->cell hit-testing lines up with where glyphs are drawn.
+            pixel = _input.supports_pixel_mouse(self.fd_in, self.fd_out)
             self._cell_px = kitty.query_cell_size_px(self.fd_in, self.fd_out)
+        self.decoder.pixel = pixel
+        kitty.write_bytes(_input.enable_mouse(pixel=pixel, hover=self.widget.picking),
+                          self.fd_out)
 
     def _exit(self):
         import termios

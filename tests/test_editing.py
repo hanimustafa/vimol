@@ -1365,6 +1365,42 @@ def test_delete_mode_writes_pointer_shape_escapes(monkeypatch):
     assert kitty.reset_pointer_shape() in bytes(captured)
 
 
+def test_mouse_setup_keeps_wire_format_and_decoder_consistent(monkeypatch):
+    # Regression for the SSH dead-mouse bug: the terminal was put in pixel
+    # (SGR-Pixels, 1016) reporting mode while a raced DECRQM probe told the
+    # decoder to expect cells -- so pixel coords got scaled by the cell size
+    # and every click landed off-screen. _setup_mouse must enable exactly the
+    # mode the probe reports, so the wire format and decoder can never split.
+    import vimol.kitty as kitty
+    from vimol import input as vinput
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    monkeypatch.setattr(kitty, "query_cell_size_px", lambda *a, **k: None)
+    writes = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: writes.extend(data))
+
+    # probe fails (the SSH-timeout case): NO pixel mode on the wire, decoder cells
+    monkeypatch.setattr(vinput, "supports_pixel_mouse", lambda *a, **k: False)
+    writes.clear()
+    v._setup_mouse(probe=True)
+    assert v.decoder.pixel is False
+    assert b"1016h" not in bytes(writes)         # pixel reporting NOT enabled
+
+    # probe succeeds: pixel mode on the wire AND in the decoder
+    monkeypatch.setattr(vinput, "supports_pixel_mouse", lambda *a, **k: True)
+    writes.clear()
+    v._setup_mouse(probe=True)
+    assert v.decoder.pixel is True
+    assert b"1016h" in bytes(writes)             # pixel reporting enabled
+
+    # no probe at all (stdin not a tty): default to cells, still consistent
+    writes.clear()
+    v._setup_mouse(probe=False)
+    assert v.decoder.pixel is False
+    assert b"1016h" not in bytes(writes)
+
+
 def test_switching_to_append_via_a_resets_pointer(monkeypatch):
     import vimol.kitty as kitty
     from vimol.viewer import Viewer
