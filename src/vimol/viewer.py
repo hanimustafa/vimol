@@ -266,14 +266,15 @@ class Viewer:
         resolution for speed while the camera is moving (pixels scale with
         the square of the factor, so the correction is a square root). Slow
         frames step the scale down immediately; comfortably fast frames ease
-        it back up. Clamped to [0.25, 1]; the floor is a last resort the
-        controller only reaches when the budget demands it, and it only
-        ever applies during motion (idle frames are always drawn at full
-        resolution + supersampling).
+        it back up. Clamped to [0.15, 1]; the floor is low enough that even a
+        full-screen Retina terminal can reach the budget, is a last resort the
+        controller only reaches when the budget demands it, and only ever
+        applies during motion (idle frames are always drawn at full resolution
+        + supersampling).
         """
         if elapsed > _INTERACT_BUDGET:
             factor = (_INTERACT_BUDGET / elapsed) ** 0.5
-            return max(0.25, current * max(factor, 0.5))
+            return max(0.15, current * max(factor, 0.5))
         if elapsed < _INTERACT_BUDGET * 0.5:
             return min(1.0, current * 1.15)
         return current
@@ -290,19 +291,26 @@ class Viewer:
             scene.set_render_scale(self._interact_scale if interacting else 1.0)
         self._drawn_ss = want_ss
 
-        t0 = time.perf_counter()
+        # Time the WHOLE frame -- render *and* the encode/transmit that follow.
+        # Compressing and base64-ing the image costs about as much as the
+        # raycast itself, so a controller that watched render() alone would
+        # keep resolution high while encode+write silently blew the budget.
+        frame_start = time.perf_counter()
         img = self.widget.render()
-        if interacting and scene.backend == "cpu":
-            self._interact_scale = self._next_render_scale(
-                self._interact_scale, time.perf_counter() - t0)
         data = kitty.encode_image(img, image_id=self._img_id, placement_id=self._img_id,
                                   cols=self._img_cols, rows=self._img_rows, move_cursor=False,
-                                  z_index=_IMAGE_Z_INDEX)
+                                  z_index=_IMAGE_Z_INDEX,
+                                  # fast, slightly-larger compression while moving;
+                                  # the resting still gets the smaller default.
+                                  compress_level=1 if interacting else 6)
         out = bytearray()
         out += _HOME + data
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
+        if interacting and scene.backend == "cpu":
+            self._interact_scale = self._next_render_scale(
+                self._interact_scale, time.perf_counter() - frame_start)
         if self._show_help:
             self._draw_help()
         elif self._mode == "periodic_table":

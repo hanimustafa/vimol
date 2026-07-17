@@ -149,7 +149,7 @@ class Scene:
         self.camera.pan = self.camera.pan * scale
 
     def set_render_scale(self, factor: float) -> None:
-        """Render internally at *factor* x the logical resolution (0.2..1).
+        """Render internally at *factor* x the logical resolution (0.1..1).
 
         Below 1.0 the scene draws fewer pixels and the terminal (or host)
         stretches the image back up -- slightly soft/grainy, but the frame
@@ -157,9 +157,10 @@ class Scene:
         as dynamic resolution while the camera is moving, snapping back to
         1.0 (and full supersampling) once idle. Zoom/pan rescale by the exact
         buffer-size ratio, like :meth:`set_supersample`, so the apparent
-        framing never changes.
+        framing never changes. The 0.1 hard floor sits below the viewer's own
+        operating floor, so it only guards against absurd inputs.
         """
-        f = min(1.0, max(0.2, float(factor)))
+        f = min(1.0, max(0.1, float(factor)))
         if f == self.render_scale:
             return
         old_min = max(min(self._renderer.width, self._renderer.height), 1)

@@ -166,6 +166,7 @@ def encode_image(
     rows: Optional[int] = None,
     move_cursor: bool = False,
     compress: bool = True,
+    compress_level: int = 6,
     z_index: int = 0,
     quiet: int = 2,
 ) -> bytes:
@@ -176,6 +177,12 @@ def encode_image(
     left in place, which is what you want when compositing a UI around the
     image. placement_id defaults to image_id (placements are scoped to their
     image, so this is always collision-safe).
+
+    *compress_level* is the zlib level (0-9). The compress step costs about as
+    much per frame as the whole raycast, so interactive callers pass level 1
+    (roughly half the CPU of the default 6 for ~25% more bytes -- a fine
+    trade for a local terminal); a resting still can afford the default for a
+    smaller payload.
     """
     if placement_id is None:
         placement_id = image_id
@@ -184,7 +191,7 @@ def encode_image(
     fmt = 32 if arr.ndim == 3 and arr.shape[2] == 4 else 24
     raw = arr.tobytes()
     if compress:
-        raw = zlib.compress(raw)
+        raw = zlib.compress(raw, compress_level)
     payload = base64.standard_b64encode(raw)
 
     ctrl = {
