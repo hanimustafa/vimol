@@ -77,13 +77,17 @@ NGL) use — just done on the CPU.
 ## Install
 
 ```bash
-pip install vimol            # core viewer + CLI
-pip install "vimol[gl]"      # + optional OpenGL backend (needs a GL driver)
+pip install vimol            # core viewer + CLI (numpy only)
+pip install "vimol[gl]"      # + optional OpenGL backend (adds moderngl)
 ```
 
-Requires Python ≥ 3.8; the only runtime dependency is numpy. A terminal that
-speaks the Kitty graphics protocol (kitty, Ghostty, WezTerm) is needed for
-*interactive* use; `--render` to PNG works anywhere, including headless.
+Requires Python ≥ 3.8; the only runtime dependency is **numpy**. The base
+install does **not** pull in `moderngl` — the GPU backend is opt-in via the
+`[gl]` extra, because it needs a working OpenGL driver that headless servers
+and many clusters lack, and vimol renders fully on the CPU without it. A
+terminal that speaks the Kitty graphics protocol (kitty, Ghostty, WezTerm) is
+needed for *interactive* use; `--render` to PNG works anywhere, including
+headless.
 
 From a checkout, for development:
 
