@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Publish vimol to PyPI: the full, guarded release routine.
+#
+# Usage:
+#   scripts/publish-pypi-artifacts                 # publish current version to PyPI
+#   scripts/publish-pypi-artifacts --test          # publish to TestPyPI instead
+#   scripts/publish-pypi-artifacts --bump patch    # bump+commit, then publish
+#   scripts/publish-pypi-artifacts --set 0.2.0     # set+commit an explicit version, then publish
+#   scripts/publish-pypi-artifacts --yes           # skip the confirmation prompt
+#
+# What it does, in order:
+#   1. Optional version bump/set -> commits it as "Release vX.Y.Z".
+#   2. Refuses to continue with a dirty tree (never ships uncommitted code).
+#   3. Refuses if that version is already published on the target index.
+#   4. Refuses if the git tag vX.Y.Z already exists.
+#   5. Rebuilds + validates the artifacts (via build-pypi-artifacts).
+#   6. Asks you to confirm (PyPI uploads are permanent -- a version can never
+#      be re-uploaded).
+#   7. Uploads with twine. The token is twine's business: set it via a ~/.pypirc
+#      entry, the TWINE_USERNAME/TWINE_PASSWORD env vars, or twine's prompt --
+#      this script never sees or stores it.
+#   8. On success, tags the released commit vX.Y.Z and pushes HEAD + the tag.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
+target=pypi
+bump="" setver="" assume_yes=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --test) target=testpypi; shift ;;
+        --bump) bump="${2:?--bump needs a level}"; shift 2 ;;
+        --set)  setver="${2:?--set needs a version}"; shift 2 ;;
+        -y|--yes) assume_yes=1; shift ;;
+        -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+cd "$ROOT"
+ensure_release_venv
+tw="$RELEASE_VENV/bin/twine"
+
+# 1. optional version bump -> commit
+cur="$(read_version)"
+if [ -n "$setver" ]; then
+    new="$setver"
+elif [ -n "$bump" ]; then
+    new="$(bump_version "$cur" "$bump")"
+else
+    new="$cur"
+fi
+if [ "$new" != "$cur" ]; then
+    echo "==> bumping version $cur -> $new and committing"
+    set_version "$new"
+    git add -- "$VERSION_FILE"
+    git commit -m "Release v$new"
+fi
+ver="$(read_version)"
+tag="v$ver"
+host_url="https://pypi.org"; [ "$target" = testpypi ] && host_url="https://test.pypi.org"
+
+# 2. only publish committed code
+if [ -n "$(git status --porcelain)" ]; then
+    echo "!!  working tree is dirty -- commit or stash before publishing." >&2
+    echo "    (a release must correspond to a committed, taggable state.)" >&2
+    exit 1
+fi
+
+# 3. refuse to republish an existing version
+if published_on_index "$ver" "$target"; then
+    echo "!!  vimol $ver is already published on $target." >&2
+    echo "    Bump the version first, e.g.: scripts/publish-pypi-artifacts --bump patch" >&2
+    exit 1
+fi
+
+# 4. refuse if the tag already exists (would desync tag <-> release)
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    echo "!!  git tag $tag already exists -- bump the version or delete the tag first." >&2
+    exit 1
+fi
+
+# 5. build fresh from the committed tree and validate
+"$here/build-pypi-artifacts"
+
+# 6. confirm (PyPI is irreversible)
+echo
+echo "About to PUBLISH  vimol $ver  ->  $target  ($host_url)"
+if [ "$target" = pypi ]; then
+    echo "This is PERMANENT: version $ver can never be re-uploaded or replaced."
+fi
+if [ "$assume_yes" -ne 1 ]; then
+    printf 'Type the version (%s) to confirm: ' "$ver"
+    read -r ans
+    if [ "$ans" != "$ver" ]; then
+        echo "aborted (no upload, no tag)."
+        exit 1
+    fi
+fi
+
+# 7. upload (twine sources the credentials itself)
+if [ "$target" = testpypi ]; then
+    "$tw" upload --repository testpypi dist/*
+else
+    "$tw" upload dist/*
+fi
+
+# 8. tag the released commit and push it
+git tag -a "$tag" -m "vimol $ver"
+git push origin HEAD
+git push origin "$tag"
+
+echo
+echo "==> published vimol $ver to $target, tagged $tag, pushed."
+echo "    $host_url/project/vimol/$ver/"

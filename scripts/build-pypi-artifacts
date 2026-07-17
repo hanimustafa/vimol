@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Build and validate the PyPI artifacts (sdist + wheel) for the current version.
+#
+# Usage:
+#   scripts/build-pypi-artifacts                 # build the current version
+#   scripts/build-pypi-artifacts --bump patch    # bump X.Y.Z -> X.Y.(Z+1), then build
+#   scripts/build-pypi-artifacts --bump minor
+#   scripts/build-pypi-artifacts --bump major
+#   scripts/build-pypi-artifacts --set 0.2.0     # set an explicit version, then build
+#
+# This is the safe, local half of releasing: it never commits, tags, or uploads.
+# A --bump/--set edits src/vimol/__init__.py and leaves the change UNCOMMITTED
+# for you to review (publish-pypi-artifacts is what commits/tags/uploads).
+#
+# It cleans dist/, builds in an isolated PEP 517 environment, runs `twine check`,
+# and smoke-tests the wheel by installing it into a throwaway venv and asserting
+# `vimol --version` matches. It also warns if the version is already on PyPI.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
+bump="" setver=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bump) bump="${2:?--bump needs a level}"; shift 2 ;;
+        --set)  setver="${2:?--set needs a version}"; shift 2 ;;
+        -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+cd "$ROOT"
+ensure_release_venv
+py="$RELEASE_VENV/bin/python"
+tw="$RELEASE_VENV/bin/twine"
+
+cur="$(read_version)"
+if [ -n "$setver" ]; then
+    new="$setver"
+elif [ -n "$bump" ]; then
+    new="$(bump_version "$cur" "$bump")"
+else
+    new="$cur"
+fi
+if [ "$new" != "$cur" ]; then
+    echo "==> version $cur -> $new  (edited $VERSION_FILE; NOT committed)"
+    set_version "$new"
+fi
+ver="$(read_version)"
+echo "==> building vimol $ver"
+
+if [ -n "$(git status --porcelain)" ]; then
+    echo "!!  working tree is dirty -- the build reflects your uncommitted changes"
+fi
+
+rm -rf dist build src/vimol.egg-info
+"$py" -m build
+"$tw" check dist/*
+
+echo "==> smoke test: install the wheel in a throwaway venv, check --version"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+python3 -m venv "$tmp/v"
+"$tmp/v/bin/pip" install --quiet "dist/vimol-$ver-py3-none-any.whl"
+got="$("$tmp/v/bin/vimol" --version)"
+if [ "$got" != "vimol $ver" ]; then
+    echo "!!  smoke test FAILED: got '$got', expected 'vimol $ver'" >&2
+    exit 1
+fi
+echo "    ok: $got"
+
+if published_on_index "$ver" pypi; then
+    echo "!!  NOTE: vimol $ver is ALREADY on PyPI -- publishing this version will be rejected."
+fi
+
+echo "==> built artifacts:"
+ls -1 dist/

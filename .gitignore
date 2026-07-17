@@ -6,3 +6,4 @@ dist/
 .pytest_cache/
 *.png
 .DS_Store
+.venv-release/
