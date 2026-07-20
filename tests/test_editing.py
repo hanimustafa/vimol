@@ -932,6 +932,83 @@ def test_viewer_dynamic_resolution_applies_to_gl_backend_too(monkeypatch):
     assert v.widget.scene.render_scale == 0.5      # idle scale applied too
 
 
+# -- settle-frame delivery fence -------------------------------------------
+def _fence_viewer(monkeypatch, writes=None):
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._old_termios = "raw"                          # pretend a real tty
+    sink = writes if writes is not None else bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: sink.extend(data))
+    return v
+
+
+def test_settle_frame_sends_delivery_fence_but_interactive_does_not(monkeypatch):
+    # write() returning only proves the frame entered kernel/SSH buffers, so
+    # the settle frame is followed by a DA1 fence whose reply marks true
+    # delivery; interactive frames (which saturate the buffers under
+    # sustained motion) don't pay the per-frame round trip.
+    import time as _time
+    writes = bytearray()
+    v = _fence_viewer(monkeypatch, writes)
+    v._last_interact = _time.time()                 # interacting
+    v._draw()
+    assert v._fence_t0 is None
+    assert not bytes(writes).endswith(b"\x1b[c")
+    v._last_interact = 0.0                          # settle
+    v._draw()
+    assert v._fence_t0 is not None                  # fence armed...
+    assert bytes(writes).endswith(b"\x1b[c")        # ...written after the frame
+
+
+def test_fence_reply_feeds_idle_controller_with_true_delivery(monkeypatch):
+    import time as _time
+    from vimol.viewer import _IDLE_BUDGET
+    v = _fence_viewer(monkeypatch)
+    # a slow settle: fence went out 1s ago (delivery still in flight until now)
+    v._idle_scale = 1.0
+    v._fence_t0 = _time.perf_counter() - 1.0
+    v._fence_base = 0.05
+    v._settle_fence_tick(b"\x1b[?62;4c")            # reply finally arrives
+    assert v._fence_t0 is None
+    assert v._idle_scale < 1.0                      # ~1.05s >> budget: step down
+    # a fast settle: reply near-instant -> scale allowed back up
+    v._idle_scale = 0.5
+    v._fence_t0 = _time.perf_counter() - _IDLE_BUDGET * 0.01
+    v._fence_base = 0.01
+    v._settle_fence_tick(b"\x1b[?62;4c")
+    assert v._idle_scale > 0.5
+
+
+def test_fence_reply_split_across_reads(monkeypatch):
+    import time as _time
+    v = _fence_viewer(monkeypatch)
+    v._idle_scale = 1.0
+    v._fence_t0 = _time.perf_counter() - 1.0
+    v._fence_base = 0.0
+    v._settle_fence_tick(b"\x1b[?6")                # first half of the reply
+    assert v._fence_t0 is not None                  # not matched yet
+    v._settle_fence_tick(b"2c")                     # second half
+    assert v._fence_t0 is None
+    assert v._idle_scale < 1.0
+
+
+def test_unanswered_fence_times_out_without_ramping_up(monkeypatch):
+    # Silence must never be mistaken for speed: a lost/unanswered fence
+    # leaves the idle scale exactly where it was.
+    import time as _time
+    from vimol.viewer import _FENCE_TIMEOUT
+    v = _fence_viewer(monkeypatch)
+    v._idle_scale = 0.5
+    v._fence_t0 = _time.perf_counter() - (_FENCE_TIMEOUT + 1.0)
+    v._settle_fence_tick(b"")                       # idle loop tick, no data
+    assert v._fence_t0 is None                      # gave up
+    assert v._idle_scale == 0.5                     # controller untouched
+
+
 # -- viewer save prompt ----------------------------------------------------
 def _new_viewer(tmp_path, source=None):
     from vimol.viewer import Viewer

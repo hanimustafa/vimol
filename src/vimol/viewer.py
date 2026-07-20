@@ -10,6 +10,7 @@ capture the mouse in their own region should use the widget + decoder directly
 from __future__ import annotations
 
 import os
+import re
 import select
 import time
 from typing import List, Optional, Tuple
@@ -106,6 +107,12 @@ _IDLE_BUDGET = 0.30
 # answer -- starts at half resolution and earns its way up via the idle
 # controller as fast settles are actually measured.
 _LOCAL_RTT = 0.02
+# The terminal's DA1 reply (CSI ? ... c), used as a delivery fence after each
+# settle frame -- see _arm_settle_fence for why write() timing can't be
+# trusted for a one-shot frame. Give up on an unanswered fence after this
+# long (only non-answering terminals ever hit it; DA1 is universal).
+_DA1_REPLY = re.compile(rb"\x1b\[\?[0-9;]*c")
+_FENCE_TIMEOUT = 5.0
 # Starting interactive render scale. Deliberately conservative: the FIRST
 # frame is drawn with it before any timing data exists, and it must clear
 # the 50 ms time-to-first-image target even cold (first-call numpy warmup,
@@ -198,6 +205,12 @@ class Viewer:
         # capability probe handed in by the CLI (it may have probed already
         # to decide whether to launch at all); None -> probe in _finish_startup.
         self._probe = probe
+        # settle-frame delivery fence (see _arm_settle_fence): when the fence
+        # went out, the frame's local (render+encode+write) cost, and a tail
+        # of raw input scanned for the terminal's reply.
+        self._fence_t0 = None
+        self._fence_base = 0.0
+        self._fence_buf = b""
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
@@ -356,19 +369,67 @@ class Viewer:
         """Settle-frame resolution controller: the next idle render scale.
 
         Same square-root correction as :meth:`_next_render_scale`, but aimed
-        at the much larger settle budget (see _IDLE_BUDGET) and measured on
-        the crisp still drawn after motion stops -- whose cost is dominated
-        by *transmitting* megabytes over the terminal link, not rendering.
-        Locally the write returns in milliseconds and the scale rides at 1.0;
-        over SSH the blocking write exposes the real link speed and the scale
-        settles wherever a still arrives within budget. The 0.35 floor keeps
-        even a very slow link legible (~1/8 of the pixels).
+        at the much larger settle budget (see _IDLE_BUDGET) and fed the crisp
+        still's TRUE end-to-end time: render + encode + *delivery to the
+        terminal*, where delivery is measured by the DA1 fence (see
+        _arm_settle_fence) rather than by timing write() -- which over SSH
+        returns as soon as the bytes enter kernel/SSH buffers and says
+        nothing about when they reach the screen. Locally the fence answers
+        in about a millisecond and the scale rides at 1.0; over a slow link
+        it answers only once the megabytes have actually arrived, and the
+        scale settles wherever a still lands within budget. The 0.35 floor
+        keeps even a very slow link legible (~1/8 of the pixels).
         """
         if elapsed > _IDLE_BUDGET:
             return max(0.35, current * max((_IDLE_BUDGET / elapsed) ** 0.5, 0.5))
         if elapsed < _IDLE_BUDGET * 0.5:
             return min(1.0, current * 1.15)
         return current
+
+    # -- settle-frame delivery fence --------------------------------------
+    def _arm_settle_fence(self, base_elapsed: float) -> None:
+        """Follow a settle frame with a DA1 fence to time its real delivery.
+
+        A returned write() only proves the frame entered the kernel pty and
+        SSH/TCP buffers -- those absorb megabytes, so over a slow link the
+        call returns in milliseconds while the user still watches the still
+        crawl in for seconds. Timing writes therefore measures buffer
+        capacity, not the link, and would let the idle scale ramp back up
+        on exactly the connections that need it lowest. The terminal answers
+        a DA1 only after consuming everything written before it, so the
+        reply's arrival marks true delivery; *base_elapsed* (the local
+        render+encode+write cost, which the fence wait doesn't cover) is
+        added back when the controller is fed in _settle_fence_tick. One
+        fence at a time; ~10 bytes of overhead per settle.
+        """
+        if self._fence_t0 is None and self._old_termios is not None:
+            kitty.write_bytes(b"\x1b[c", self.fd_out)
+            self._fence_t0 = time.perf_counter()
+            self._fence_base = base_elapsed
+            self._fence_buf = b""
+
+    def _settle_fence_tick(self, data: bytes) -> None:
+        """Watch raw input for the fence reply; update the idle controller.
+
+        Runs on every read while a fence is outstanding. The reply may split
+        across reads, so a short tail is buffered; the decoder downstream
+        silently ignores the DA1 reply (an unknown CSI final), so consuming
+        it here needs no coordination. An unanswered fence times out without
+        feeding the controller -- never mistake silence for speed.
+        """
+        if self._fence_t0 is None:
+            return
+        if data:
+            self._fence_buf = (self._fence_buf + data)[-256:]
+            if _DA1_REPLY.search(self._fence_buf):
+                total = self._fence_base + (time.perf_counter() - self._fence_t0)
+                self._fence_t0 = None
+                self._fence_buf = b""
+                self._idle_scale = self._next_idle_scale(self._idle_scale, total)
+                return
+        if time.perf_counter() - self._fence_t0 > _FENCE_TIMEOUT:
+            self._fence_t0 = None
+            self._fence_buf = b""
 
     def _draw(self):
         want_ss = self._target_ss()
@@ -378,11 +439,9 @@ class Viewer:
             scene.set_supersample(want_ss)
         # dynamic resolution, BOTH backends: interactive frames at the ~120fps
         # adaptive scale, settle frames at the link-speed-adaptive idle scale.
-        # No CPU-only gate: the controllers measure the whole frame -- render,
-        # encode, and the (blocking) write -- so a GPU on a fast link measures
-        # fast and simply rides at 1.0, while a slow link costs the same
-        # megabytes per frame no matter which backend rendered them and pulls
-        # the scale down either way.
+        # No CPU-only gate: a slow link costs the same megabytes per frame no
+        # matter which backend rendered them, so a GPU on a fast link simply
+        # measures fast and rides at 1.0.
         scene.set_render_scale(self._interact_scale if interacting
                                else self._idle_scale)
         self._drawn_ss = want_ss
@@ -406,10 +465,16 @@ class Viewer:
         kitty.write_bytes(bytes(out), self.fd_out)
         elapsed = time.perf_counter() - frame_start
         if interacting:
+            # Interactive frames adapt on write() timing: sustained dragging
+            # saturates the pty/SSH buffers, at which point writes genuinely
+            # block at link speed (and locally they expose render+encode).
             self._interact_scale = self._next_render_scale(
                 self._interact_scale, elapsed)
         else:
-            self._idle_scale = self._next_idle_scale(self._idle_scale, elapsed)
+            # A one-shot settle frame never saturates the buffers, so its
+            # write() time is meaningless for the link -- measure delivery
+            # with a fence instead (reply handled in _settle_fence_tick).
+            self._arm_settle_fence(elapsed)
         if self._show_help:
             self._draw_help()
         elif self._mode == "periodic_table":
@@ -1217,6 +1282,7 @@ class Viewer:
             frame_dt = 1.0 / self.target_fps
             while self._running:
                 data = self._read(frame_dt)
+                self._settle_fence_tick(data)   # no-op unless a fence is out
                 changed = self._dispatch(self.decoder.feed(data) if data
                                          else self.decoder.flush())
                 if self._update_geometry():
