@@ -903,6 +903,35 @@ def test_viewer_draw_scales_down_while_interacting_and_restores_idle(monkeypatch
     assert v.widget.scene.supersample == v._max_ss
 
 
+def test_viewer_dynamic_resolution_applies_to_gl_backend_too(monkeypatch):
+    # The link doesn't care which backend rendered the megabytes: dynamic
+    # resolution (interactive AND the idle/settle scale) must be applied for
+    # a GL scene as well, not gated to the CPU raycaster. Regression for the
+    # slow-SSH + GPU case where every frame shipped at full resolution.
+    import time as _time
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    from vimol.scene import Scene
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu", editable=True)
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+    # report "gl" to the viewer's _draw; rendering still runs the real CPU
+    # renderer underneath (Scene.render checks _backend_name, not this).
+    monkeypatch.setattr(Scene, "backend", property(lambda self: "gl"))
+
+    v._interact_scale = 0.5
+    v._last_interact = _time.time()                # interacting right now
+    v._draw()
+    assert v.widget.scene.render_scale == 0.5      # scaled while moving
+
+    v._idle_scale = 0.5                            # slow link: settle at half res
+    v._last_interact = 0.0                          # long idle
+    v._draw()
+    assert v.widget.scene.render_scale == 0.5      # idle scale applied too
+
+
 # -- viewer save prompt ----------------------------------------------------
 def _new_viewer(tmp_path, source=None):
     from vimol.viewer import Viewer

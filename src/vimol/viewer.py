@@ -333,15 +333,16 @@ class Viewer:
     def _next_render_scale(current: float, elapsed: float) -> float:
         """Dynamic-resolution controller: the next interactive render scale.
 
-        Aims the CPU raycaster at the ~120 fps frame budget by trading
+        Aims the whole frame pipeline -- render (either backend), encode, and
+        the write to the terminal link -- at the ~120 fps budget by trading
         resolution for speed while the camera is moving (pixels scale with
         the square of the factor, so the correction is a square root). Slow
         frames step the scale down immediately; comfortably fast frames ease
         it back up. Clamped to [0.15, 1]; the floor is low enough that even a
         full-screen Retina terminal can reach the budget, is a last resort the
         controller only reaches when the budget demands it, and only ever
-        applies during motion (idle frames are always drawn at full resolution
-        + supersampling).
+        applies during motion (idle frames use the separate, more generous
+        _next_idle_scale controller and supersampling).
         """
         if elapsed > _INTERACT_BUDGET:
             factor = (_INTERACT_BUDGET / elapsed) ** 0.5
@@ -375,13 +376,15 @@ class Viewer:
         scene = self.widget.scene
         if scene.supersample != want_ss:
             scene.set_supersample(want_ss)
-        # dynamic resolution (CPU backend only -- GL is fast at full size):
-        # interactive frames at the ~120fps adaptive scale, settle frames at
-        # the link-speed-adaptive idle scale (1.0 locally; lower over SSH,
-        # where a full-resolution still is megabytes on the wire).
-        if scene.backend == "cpu":
-            scene.set_render_scale(self._interact_scale if interacting
-                                   else self._idle_scale)
+        # dynamic resolution, BOTH backends: interactive frames at the ~120fps
+        # adaptive scale, settle frames at the link-speed-adaptive idle scale.
+        # No CPU-only gate: the controllers measure the whole frame -- render,
+        # encode, and the (blocking) write -- so a GPU on a fast link measures
+        # fast and simply rides at 1.0, while a slow link costs the same
+        # megabytes per frame no matter which backend rendered them and pulls
+        # the scale down either way.
+        scene.set_render_scale(self._interact_scale if interacting
+                               else self._idle_scale)
         self._drawn_ss = want_ss
 
         # Time the WHOLE frame -- render *and* the encode/transmit that follow.
@@ -401,13 +404,12 @@ class Viewer:
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
-        if scene.backend == "cpu":
-            elapsed = time.perf_counter() - frame_start
-            if interacting:
-                self._interact_scale = self._next_render_scale(
-                    self._interact_scale, elapsed)
-            else:
-                self._idle_scale = self._next_idle_scale(self._idle_scale, elapsed)
+        elapsed = time.perf_counter() - frame_start
+        if interacting:
+            self._interact_scale = self._next_render_scale(
+                self._interact_scale, elapsed)
+        else:
+            self._idle_scale = self._next_idle_scale(self._idle_scale, elapsed)
         if self._show_help:
             self._draw_help()
         elif self._mode == "periodic_table":
