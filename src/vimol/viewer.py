@@ -205,12 +205,23 @@ class Viewer:
         # capability probe handed in by the CLI (it may have probed already
         # to decide whether to launch at all); None -> probe in _finish_startup.
         self._probe = probe
-        # settle-frame delivery fence (see _arm_settle_fence): when the fence
-        # went out, the frame's local (render+encode+write) cost, and a tail
-        # of raw input scanned for the terminal's reply.
+        # frame delivery fence (see _arm_fence): when it went out, which kind
+        # of frame it trails ("interact" | "settle"), that frame's local
+        # (render+encode+write) cost, and a tail of raw input scanned for the
+        # terminal's reply.
         self._fence_t0 = None
+        self._fence_kind = ""
         self._fence_base = 0.0
         self._fence_buf = b""
+        # Self-clocked frame pacing: when True (the startup probe confirmed
+        # the terminal answers DA1), every frame is fenced and the next one
+        # is not rendered until the previous is acknowledged -- at most ONE
+        # frame in flight. Without this, a slow link's kernel/SSH buffers
+        # queue dozens of stale frames (they absorb megabytes before write()
+        # ever blocks) and the terminal plays back a seconds-old backlog
+        # while you drag: the classic bufferbloat jitter.
+        self._paced = False
+        self._link_rtt = 0.0
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
@@ -286,6 +297,11 @@ class Viewer:
             # raises it as fast settles are actually observed.
             self._idle_scale = 1.0 if (probe.rtt is not None
                                        and probe.rtt <= _LOCAL_RTT) else 0.5
+            if probe.rtt is not None:
+                # the terminal answers DA1: fence every frame and self-clock
+                # to the link (one frame in flight, no bufferbloat backlog).
+                self._paced = True
+                self._link_rtt = probe.rtt
             if probe.leftover:
                 # mouse reporting was off during the probe, so leftover bytes
                 # can only be keystrokes -- deliver them.
@@ -343,24 +359,28 @@ class Viewer:
         return self._max_ss if idle else 1
 
     @staticmethod
-    def _next_render_scale(current: float, elapsed: float) -> float:
+    def _next_render_scale(current: float, elapsed: float,
+                           budget: float = _INTERACT_BUDGET) -> float:
         """Dynamic-resolution controller: the next interactive render scale.
 
         Aims the whole frame pipeline -- render (either backend), encode, and
-        the write to the terminal link -- at the ~120 fps budget by trading
-        resolution for speed while the camera is moving (pixels scale with
-        the square of the factor, so the correction is a square root). Slow
-        frames step the scale down immediately; comfortably fast frames ease
-        it back up. Clamped to [0.15, 1]; the floor is low enough that even a
-        full-screen Retina terminal can reach the budget, is a last resort the
-        controller only reaches when the budget demands it, and only ever
+        delivery over the terminal link -- at *budget* by trading resolution
+        for speed while the camera is moving (pixels scale with the square of
+        the factor, so the correction is a square root). Slow frames step the
+        scale down immediately; comfortably fast frames ease it back up.
+        *budget* is ~120 fps locally, but a paced remote session passes
+        max(that, link RTT): on a high-latency link 120 fps is physically
+        impossible no matter how few pixels are sent, and chasing it would
+        floor the resolution for nothing -- the right target there is
+        "transfer costs no more than the RTT that's already unavoidable".
+        Clamped to [0.15, 1]; the floor is a last resort, and only ever
         applies during motion (idle frames use the separate, more generous
         _next_idle_scale controller and supersampling).
         """
-        if elapsed > _INTERACT_BUDGET:
-            factor = (_INTERACT_BUDGET / elapsed) ** 0.5
+        if elapsed > budget:
+            factor = (budget / elapsed) ** 0.5
             return max(0.15, current * max(factor, 0.5))
-        if elapsed < _INTERACT_BUDGET * 0.5:
+        if elapsed < budget * 0.5:
             return min(1.0, current * 1.15)
         return current
 
@@ -386,36 +406,42 @@ class Viewer:
             return min(1.0, current * 1.15)
         return current
 
-    # -- settle-frame delivery fence --------------------------------------
-    def _arm_settle_fence(self, base_elapsed: float) -> None:
-        """Follow a settle frame with a DA1 fence to time its real delivery.
+    # -- frame delivery fence ----------------------------------------------
+    def _arm_fence(self, kind: str, base_elapsed: float) -> None:
+        """Follow a frame with a DA1 fence to time its real delivery.
 
         A returned write() only proves the frame entered the kernel pty and
         SSH/TCP buffers -- those absorb megabytes, so over a slow link the
-        call returns in milliseconds while the user still watches the still
+        call returns in milliseconds while the user still watches the frame
         crawl in for seconds. Timing writes therefore measures buffer
-        capacity, not the link, and would let the idle scale ramp back up
-        on exactly the connections that need it lowest. The terminal answers
-        a DA1 only after consuming everything written before it, so the
-        reply's arrival marks true delivery; *base_elapsed* (the local
-        render+encode+write cost, which the fence wait doesn't cover) is
-        added back when the controller is fed in _settle_fence_tick. One
-        fence at a time; ~10 bytes of overhead per settle.
+        capacity, not the link. The terminal answers a DA1 only after
+        consuming everything written before it, so the reply's arrival marks
+        true delivery -- and while it's outstanding the run loop renders NO
+        new frame (one frame in flight, input keeps coalescing), which is
+        what keeps a slow link showing the freshest camera state instead of
+        a buffered backlog of stale ones. *base_elapsed* (the local
+        render+encode+write cost the fence wait doesn't cover) is added back
+        when a controller is fed in _fence_tick. ~10 bytes per frame.
         """
-        if self._fence_t0 is None and self._old_termios is not None:
+        if self._fence_t0 is None:
             kitty.write_bytes(b"\x1b[c", self.fd_out)
             self._fence_t0 = time.perf_counter()
+            self._fence_kind = kind
             self._fence_base = base_elapsed
             self._fence_buf = b""
 
-    def _settle_fence_tick(self, data: bytes) -> None:
-        """Watch raw input for the fence reply; update the idle controller.
+    def _fence_tick(self, data: bytes) -> None:
+        """Watch raw input for the fence reply; feed the matching controller.
 
         Runs on every read while a fence is outstanding. The reply may split
         across reads, so a short tail is buffered; the decoder downstream
         silently ignores the DA1 reply (an unknown CSI final), so consuming
-        it here needs no coordination. An unanswered fence times out without
-        feeding the controller -- never mistake silence for speed.
+        it here needs no coordination. A settle fence feeds the idle-scale
+        controller with the still's true end-to-end time. An interactive
+        fence feeds the render-scale controller with the *controllable* part
+        (total minus the link RTT, which no resolution can remove) against
+        an RTT-aware budget. An unanswered fence times out without feeding
+        anything -- never mistake silence for speed.
         """
         if self._fence_t0 is None:
             return
@@ -423,9 +449,16 @@ class Viewer:
             self._fence_buf = (self._fence_buf + data)[-256:]
             if _DA1_REPLY.search(self._fence_buf):
                 total = self._fence_base + (time.perf_counter() - self._fence_t0)
+                kind = self._fence_kind
                 self._fence_t0 = None
                 self._fence_buf = b""
-                self._idle_scale = self._next_idle_scale(self._idle_scale, total)
+                if kind == "settle":
+                    self._idle_scale = self._next_idle_scale(self._idle_scale, total)
+                else:
+                    self._interact_scale = self._next_render_scale(
+                        self._interact_scale,
+                        max(total - self._link_rtt, 0.0),
+                        max(_INTERACT_BUDGET, self._link_rtt))
                 return
         if time.perf_counter() - self._fence_t0 > _FENCE_TIMEOUT:
             self._fence_t0 = None
@@ -464,17 +497,17 @@ class Viewer:
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
         elapsed = time.perf_counter() - frame_start
-        if interacting:
-            # Interactive frames adapt on write() timing: sustained dragging
-            # saturates the pty/SSH buffers, at which point writes genuinely
-            # block at link speed (and locally they expose render+encode).
+        if self._paced:
+            # Every frame gets a fence: its ack both feeds the matching
+            # resolution controller with the TRUE delivery time and gates
+            # the next frame (one in flight -- see _arm_fence).
+            self._arm_fence("interact" if interacting else "settle", elapsed)
+        elif interacting:
+            # No fence support confirmed: fall back to write() timing, which
+            # is at least honest under sustained motion (the buffers fill and
+            # writes block at real link speed).
             self._interact_scale = self._next_render_scale(
                 self._interact_scale, elapsed)
-        else:
-            # A one-shot settle frame never saturates the buffers, so its
-            # write() time is meaningless for the link -- measure delivery
-            # with a fence instead (reply handled in _settle_fence_tick).
-            self._arm_settle_fence(elapsed)
         if self._show_help:
             self._draw_help()
         elif self._mode == "periodic_table":
@@ -1280,26 +1313,38 @@ class Viewer:
             self._draw()
             self._finish_startup()
             frame_dt = 1.0 / self.target_fps
+            dirty = False
             while self._running:
                 data = self._read(frame_dt)
-                self._settle_fence_tick(data)   # no-op unless a fence is out
-                changed = self._dispatch(self.decoder.feed(data) if data
-                                         else self.decoder.flush())
+                self._fence_tick(data)          # no-op unless a fence is out
+                if self._dispatch(self.decoder.feed(data) if data
+                                  else self.decoder.flush()):
+                    dirty = True
                 if self._update_geometry():
                     kitty.write_bytes(_CLEAR, self.fd_out)
-                    changed = True
+                    dirty = True
                 if self.autospin:
                     self.widget.scene.camera.orbit(1.4, 0)  # ~0.014 rad/frame
                     self._last_interact = time.time()
-                    changed = True
+                    dirty = True
                 if self.widget.cleanup_active:
                     # animate the 'c' relaxation: one tick per frame, kept in
                     # fast (non-supersampled) mode while the atoms settle.
                     self.widget.cleanup_tick()
                     self._last_interact = time.time()
-                    changed = True
-                if changed:
+                    dirty = True
+                if self._fence_t0 is not None:
+                    # The previous frame hasn't reached the terminal yet.
+                    # Keep reading input and folding it into the model
+                    # (`dirty` remembers there's something to show) but send
+                    # nothing: rendering now would only lengthen the buffer
+                    # queue and show the user an ever-staler backlog. When
+                    # the ack lands, the next frame carries the LATEST state
+                    # -- motion on a slow link skips, but never lags.
+                    continue
+                if dirty:
                     self._draw()
+                    dirty = False
                 elif self._target_ss() != self._drawn_ss and not self._input_pending():
                     # Settle to a crisp, supersampled frame once the view stops
                     # moving -- but ONLY in a genuine lull with nothing queued.

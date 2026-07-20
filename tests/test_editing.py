@@ -932,7 +932,7 @@ def test_viewer_dynamic_resolution_applies_to_gl_backend_too(monkeypatch):
     assert v.widget.scene.render_scale == 0.5      # idle scale applied too
 
 
-# -- settle-frame delivery fence -------------------------------------------
+# -- frame delivery fence / self-clocked pacing ------------------------------
 def _fence_viewer(monkeypatch, writes=None):
     import vimol.kitty as kitty
     from vimol.viewer import Viewer
@@ -940,47 +940,92 @@ def _fence_viewer(monkeypatch, writes=None):
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(200, 200)
     v._cols, v._rows = 100, 30
-    v._old_termios = "raw"                          # pretend a real tty
+    v._paced = True                                 # startup probe answered DA1
+    v._link_rtt = 0.001
     sink = writes if writes is not None else bytearray()
     monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: sink.extend(data))
     return v
 
 
-def test_settle_frame_sends_delivery_fence_but_interactive_does_not(monkeypatch):
+def test_paced_draw_fences_every_frame(monkeypatch):
     # write() returning only proves the frame entered kernel/SSH buffers, so
-    # the settle frame is followed by a DA1 fence whose reply marks true
-    # delivery; interactive frames (which saturate the buffers under
-    # sustained motion) don't pay the per-frame round trip.
+    # a paced session trails EVERY frame with a DA1 fence: its reply both
+    # measures true delivery and releases the next frame (one in flight).
     import time as _time
     writes = bytearray()
     v = _fence_viewer(monkeypatch, writes)
     v._last_interact = _time.time()                 # interacting
     v._draw()
-    assert v._fence_t0 is None
-    assert not bytes(writes).endswith(b"\x1b[c")
+    assert v._fence_t0 is not None
+    assert v._fence_kind == "interact"
+    assert bytes(writes).endswith(b"\x1b[c")        # fence written after frame
+    v._fence_t0 = None                              # ack the frame
     v._last_interact = 0.0                          # settle
     v._draw()
-    assert v._fence_t0 is not None                  # fence armed...
-    assert bytes(writes).endswith(b"\x1b[c")        # ...written after the frame
+    assert v._fence_kind == "settle"
+    assert bytes(writes).endswith(b"\x1b[c")
 
 
-def test_fence_reply_feeds_idle_controller_with_true_delivery(monkeypatch):
+def test_unpaced_draw_never_fences(monkeypatch):
+    # No DA1 support confirmed -> no fences (and write-timing fallback for
+    # the interactive controller); a fence that would never be answered
+    # must not gate the loop.
+    import time as _time
+    writes = bytearray()
+    v = _fence_viewer(monkeypatch, writes)
+    v._paced = False
+    v._last_interact = _time.time()
+    v._draw()
+    v._last_interact = 0.0
+    v._draw()
+    assert v._fence_t0 is None
+    assert b"\x1b[c" not in bytes(writes)
+
+
+def test_settle_fence_reply_feeds_idle_controller(monkeypatch):
     import time as _time
     from vimol.viewer import _IDLE_BUDGET
     v = _fence_viewer(monkeypatch)
-    # a slow settle: fence went out 1s ago (delivery still in flight until now)
+    # a slow settle: fence went out 1s ago (delivery in flight until now)
     v._idle_scale = 1.0
     v._fence_t0 = _time.perf_counter() - 1.0
+    v._fence_kind = "settle"
     v._fence_base = 0.05
-    v._settle_fence_tick(b"\x1b[?62;4c")            # reply finally arrives
+    v._fence_tick(b"\x1b[?62;4c")                   # reply finally arrives
     assert v._fence_t0 is None
     assert v._idle_scale < 1.0                      # ~1.05s >> budget: step down
     # a fast settle: reply near-instant -> scale allowed back up
     v._idle_scale = 0.5
     v._fence_t0 = _time.perf_counter() - _IDLE_BUDGET * 0.01
+    v._fence_kind = "settle"
     v._fence_base = 0.01
-    v._settle_fence_tick(b"\x1b[?62;4c")
+    v._fence_tick(b"\x1b[?62;4c")
     assert v._idle_scale > 0.5
+
+
+def test_interact_fence_uses_rtt_aware_budget(monkeypatch):
+    # On a 100ms-RTT link, 120fps is physically impossible -- the controller
+    # must not floor the resolution chasing it. The budget becomes the RTT,
+    # and the RTT itself is subtracted from the measurement: a frame whose
+    # *controllable* cost (render+encode+transfer) fits inside the RTT is a
+    # GOOD frame there, and the scale may even ramp up.
+    import time as _time
+    v = _fence_viewer(monkeypatch)
+    v._link_rtt = 0.1
+    # ack after ~0.12s total: only 0.02s controllable vs 0.1s budget -> up
+    v._interact_scale = 0.5
+    v._fence_t0 = _time.perf_counter() - 0.12
+    v._fence_kind = "interact"
+    v._fence_base = 0.0
+    v._fence_tick(b"\x1b[?62;4c")
+    assert v._interact_scale > 0.5
+    # ack after ~0.6s total: 0.5s controllable vs 0.1s budget -> step down
+    v._interact_scale = 0.5
+    v._fence_t0 = _time.perf_counter() - 0.6
+    v._fence_kind = "interact"
+    v._fence_base = 0.0
+    v._fence_tick(b"\x1b[?62;4c")
+    assert v._interact_scale < 0.5
 
 
 def test_fence_reply_split_across_reads(monkeypatch):
@@ -988,25 +1033,28 @@ def test_fence_reply_split_across_reads(monkeypatch):
     v = _fence_viewer(monkeypatch)
     v._idle_scale = 1.0
     v._fence_t0 = _time.perf_counter() - 1.0
+    v._fence_kind = "settle"
     v._fence_base = 0.0
-    v._settle_fence_tick(b"\x1b[?6")                # first half of the reply
+    v._fence_tick(b"\x1b[?6")                       # first half of the reply
     assert v._fence_t0 is not None                  # not matched yet
-    v._settle_fence_tick(b"2c")                     # second half
+    v._fence_tick(b"2c")                            # second half
     assert v._fence_t0 is None
     assert v._idle_scale < 1.0
 
 
 def test_unanswered_fence_times_out_without_ramping_up(monkeypatch):
     # Silence must never be mistaken for speed: a lost/unanswered fence
-    # leaves the idle scale exactly where it was.
+    # leaves both scales exactly where they were.
     import time as _time
     from vimol.viewer import _FENCE_TIMEOUT
     v = _fence_viewer(monkeypatch)
     v._idle_scale = 0.5
+    v._interact_scale = 0.4
     v._fence_t0 = _time.perf_counter() - (_FENCE_TIMEOUT + 1.0)
-    v._settle_fence_tick(b"")                       # idle loop tick, no data
+    v._fence_kind = "settle"
+    v._fence_tick(b"")                              # idle loop tick, no data
     assert v._fence_t0 is None                      # gave up
-    assert v._idle_scale == 0.5                     # controller untouched
+    assert v._idle_scale == 0.5 and v._interact_scale == 0.4
 
 
 # -- viewer save prompt ----------------------------------------------------
