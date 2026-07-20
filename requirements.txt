@@ -1,14 +1,14 @@
 # vimol runtime dependencies.
 #
-# vimol is pure Python; numpy is its only required third-party package.
-# Everything else it uses (argparse, base64, dataclasses, os, select, sys,
-# time, typing, zlib) is in the standard library.
-#
 # Install the package itself with `pip install vimol` (or `pip install -e .`
-# from a checkout); this file pins the same requirement for reproducible
-# environments and CI.
+# from a checkout); this file pins the same requirements for reproducible
+# environments and CI. Everything else vimol uses is standard library.
+#
+# moderngl is the OpenGL backend (~120 KB of wheels). It is installed
+# unconditionally; at runtime vimol falls back to its pure-numpy CPU
+# raycaster wherever no OpenGL context can be created.
 numpy>=1.20
+moderngl>=5.6
 
 # Optional extras (not installed by this file):
-#   OpenGL backend      pip install "vimol[gl]"    ->  moderngl>=5.6
 #   test suite          pip install "vimol[test]"  ->  pytest>=7

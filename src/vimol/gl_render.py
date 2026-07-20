@@ -11,7 +11,8 @@ parameters; nothing here is vimol-specific, so it's reusable outside this
 project. See ``gl_adapter.py`` for the vimol-specific glue that turns a
 ``Molecule`` + ``Camera`` + ``Style`` into the inputs this module expects.
 
-Requires the optional ``moderngl`` dependency (``pip install vimol[gl]``).
+Requires ``moderngl`` (installed with vimol; a GL context must be
+creatable at runtime, else Scene's auto backend falls back to the CPU).
 """
 from __future__ import annotations
 

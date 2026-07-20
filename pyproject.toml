@@ -34,10 +34,12 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Viewers",
     "Typing :: Typed",
 ]
-dependencies = ["numpy>=1.20"]
+# moderngl is a hard dependency (~120 KB of wheels): the GL backend is always
+# available, and `backend="auto"` still falls back to the CPU raycaster at
+# runtime wherever no OpenGL context can be created (headless boxes, clusters).
+dependencies = ["numpy>=1.20", "moderngl>=5.6"]
 
 [project.optional-dependencies]
-gl = ["moderngl>=5.6"]
 test = ["pytest>=7"]
 
 [project.scripts]

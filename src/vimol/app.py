@@ -69,8 +69,8 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--style", default="ball_and_stick",
                    choices=["ball_and_stick", "spacefill", "licorice", "wireframe"])
     p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
-                   help="rendering backend: numpy CPU raycaster, GPU (OpenGL, needs "
-                        "vimol[gl]), or auto (GPU if available, else CPU)")
+                   help="rendering backend: numpy CPU raycaster, GPU (OpenGL), "
+                        "or auto (GPU if a context can be created, else CPU)")
     p.add_argument("--size", default="0x0", help="pixel size WxH for --render/--kitty (0=auto)")
     p.add_argument("--supersample", type=int, default=2, help="anti-aliasing factor for stills")
     p.add_argument("--rotate", nargs=2, type=float, metavar=("YAW", "PITCH"),
