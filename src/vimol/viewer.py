@@ -113,6 +113,26 @@ _LOCAL_RTT = 0.02
 # long (only non-answering terminals ever hit it; DA1 is universal).
 _DA1_REPLY = re.compile(rb"\x1b\[\?[0-9;]*c")
 _FENCE_TIMEOUT = 5.0
+
+# Opt-in per-frame timing log, for diagnosing latency/jitter over slow links
+# (SSH). Off unless VIMOL_TIMING is set; then every frame appends one line to
+# $VIMOL_TIMING (or ~/.vimol-timing.log), and quitting prints the session's
+# worst per-stage latencies. `tail -f` the log in a second pane while
+# interacting. The whole facility is a no-op -- one boolean check per frame --
+# when the env var is unset, so it is safe to ship enabled-by-flag.
+_TIMING_DEFAULT_LOG = os.path.expanduser("~/.vimol-timing.log")
+
+
+def _timing_log_path() -> Optional[str]:
+    """The timing-log path if VIMOL_TIMING is set, else None (feature off).
+
+    ``VIMOL_TIMING=1`` (or any non-path truthy value) logs to the default
+    path; ``VIMOL_TIMING=/some/file`` logs there instead.
+    """
+    val = os.environ.get("VIMOL_TIMING")
+    if not val:
+        return None
+    return val if os.sep in val else _TIMING_DEFAULT_LOG
 # Starting interactive render scale. Deliberately conservative: the FIRST
 # frame is drawn with it before any timing data exists, and it must clear
 # the 50 ms time-to-first-image target even cold (first-call numpy warmup,
@@ -222,6 +242,29 @@ class Viewer:
         # while you drag: the classic bufferbloat jitter.
         self._paced = False
         self._link_rtt = 0.0
+        # Late-probe mode: the startup probe's quick window missed the reply
+        # (a congested link can stall seconds); keep watching the input
+        # stream for it instead of concluding "no fence support". While
+        # active, raw input is held in _late_buf -- the graphics-query reply
+        # (an APC string) would otherwise decode as garbage KeyEvents -- and
+        # released to the decoder when the reply lands or the watch times out.
+        self._late_t0 = None
+        self._late_buf = b""
+        # True while a mouse button is held anywhere: a drag IS interaction
+        # even when a congested link delivers its motion events in bursts
+        # with long silent gaps -- without this, those gaps faked "idle" and
+        # injected the heavy supersampled settle still mid-drag.
+        self._button_held = False
+        # How long after the last interaction the settle still may fire.
+        # Stretched with the link RTT once known: on a bursty link, event
+        # gaps shorter than a couple of round trips prove nothing.
+        self._idle_after = 0.25
+        # Opt-in timing instrumentation (VIMOL_TIMING); see _timing_log_path.
+        self._timing_path = _timing_log_path()
+        self._tlog = None
+        self._tmax = {}          # stage name -> worst ms seen
+        self._t_last_draw_end = None
+        self._t_last_read = None
         self._cols = self._rows = 0
         self._img_cols = self._img_rows = 1
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
@@ -284,7 +327,11 @@ class Viewer:
         """
         probe = self._probe
         if probe is None and self._old_termios is not None:
-            probe = kitty.probe_terminal(self.fd_in, self.fd_out)
+            # Quick window only: a local terminal answers in ~1ms, and a
+            # link too congested to answer in this window is handled by the
+            # LATE watch below -- a longer blocking wait here would just
+            # freeze startup on bad links and still sometimes miss.
+            probe = kitty.probe_terminal(self.fd_in, self.fd_out, timeout=0.35)
             self._probe = probe
         if probe is not None:
             if probe.cell_px is not None:
@@ -302,6 +349,15 @@ class Viewer:
                 # to the link (one frame in flight, no bufferbloat backlog).
                 self._paced = True
                 self._link_rtt = probe.rtt
+                self._idle_after = min(1.0, 0.25 + 2.0 * probe.rtt)
+            elif self._old_termios is not None:
+                # The reply is late, not absent (this happens on exactly the
+                # congested links that need pacing most -- concluding "no
+                # support" here re-enables the bufferbloat firehose). The
+                # queries are already on the wire; keep watching for the
+                # DA1 in the run loop and switch pacing on when it lands.
+                self._late_t0 = time.monotonic()
+                self._late_buf = b""
             if probe.leftover:
                 # mouse reporting was off during the probe, so leftover bytes
                 # can only be keystrokes -- deliver them.
@@ -310,6 +366,48 @@ class Viewer:
             # no way to probe (stdin not a tty): cells on both sides, and
             # keep full-resolution settles (the status quo for local use).
             self._enable_mouse(False)
+
+    def _late_probe_tick(self, data: bytes) -> None:
+        """Watch for the startup probe's late reply; upgrade when it lands.
+
+        While active, raw input is buffered rather than decoded: the
+        graphics-query reply is an APC string the decoder would shred into
+        garbage KeyEvents ('3' and '1' in ``Gi=31;OK`` would switch the
+        representation!). Everything the user typed is released to the
+        decoder the moment the reply arrives; Ctrl-C still quits instantly.
+        On the reply: pacing on, RTT recorded, pixel mouse upgraded if
+        supported. After 15s of silence, give up and release the (stripped)
+        buffer -- an unpaced session on a mute terminal beats a frozen one.
+        """
+        if b"\x03" in data:                      # emergency quit, never held
+            self._running = False
+            return
+        self._late_buf += data
+        p = kitty.parse_probe_reply(self._late_buf) if data else None
+        if p is not None:
+            self._late_t0 = None
+            self._late_buf = b""
+            if p.cell_px is not None:
+                self._cell_px = p.cell_px
+            if p.pixel_mouse and not self.decoder.pixel:
+                self._enable_mouse(True)         # upgrade wire+decoder together
+            self._paced = True
+            self._idle_scale = 0.5               # reply was slow: assume remote
+            self._idle_after = 1.0               # and assume bursty input gaps
+            # A late reply's age includes user think-time, so it is useless
+            # as an RTT sample; leave _link_rtt 0 and let the per-frame acks
+            # min-track the real baseline (every ack wait >= true RTT).
+            if p.leftover:
+                self._dispatch(self.decoder.feed(p.leftover))
+            return
+        if time.monotonic() - self._late_t0 > 15.0:
+            # never answered: release what the user typed, minus anything
+            # that looks like a stray probe reply, and stay unpaced.
+            buf = kitty._RE_GFX_REPLY.sub(b"", self._late_buf)
+            self._late_t0 = None
+            self._late_buf = b""
+            if buf:
+                self._dispatch(self.decoder.feed(buf))
 
     def _exit(self):
         import termios
@@ -324,6 +422,15 @@ class Viewer:
                           + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
         if self._old_termios is not None:
             termios.tcsetattr(self.fd_in, termios.TCSADRAIN, self._old_termios)
+        # With VIMOL_TIMING on, print the session's worst per-stage latencies
+        # to the shell after quitting, and record them in the log too.
+        summary = self._tsummary()
+        if summary:
+            self._tline("worst", **{k: v for k, v in self._tmax.items()})
+            try:
+                os.write(self.fd_out, (summary + f"\n(log: {self._timing_path})\n").encode())
+            except OSError:
+                pass
 
     # -- geometry ---------------------------------------------------------
     def _update_geometry(self) -> bool:
@@ -353,9 +460,17 @@ class Viewer:
     def _target_ss(self) -> int:
         """Supersample factor we *want* right now: 1 while interacting (fast),
         higher once settled (crisp). The loop redraws when this changes so the
-        crisp frame lands ~0.25s after you stop, without re-drawing meanwhile.
+        crisp frame lands shortly after you stop, without re-drawing meanwhile.
+
+        A held mouse button is interaction, full stop -- on a congested link
+        the drag's motion events arrive in bursts separated by long silent
+        gaps, and treating those gaps as idle injected the heavy supersampled
+        still mid-drag, stalling the link for seconds. The time threshold
+        itself is also stretched by the link RTT (see _idle_after).
         """
-        idle = (time.time() - self._last_interact) > 0.25 and not self.autospin
+        idle = (not self._button_held
+                and (time.time() - self._last_interact) > self._idle_after
+                and not self.autospin)
         return self._max_ss if idle else 1
 
     @staticmethod
@@ -406,6 +521,38 @@ class Viewer:
             return min(1.0, current * 1.15)
         return current
 
+    # -- opt-in timing instrumentation (VIMOL_TIMING) ----------------------
+    def _tline(self, tag: str, **fields) -> None:
+        """Append one timing line; remember each *_ms field's worst value.
+
+        A no-op unless VIMOL_TIMING is set (and only in a live run, never in
+        tests/embeds); the early return is the whole per-frame cost when off.
+        """
+        if self._timing_path is None or not self._running:
+            return
+        if self._tlog is None:
+            try:
+                self._tlog = open(self._timing_path, "a", buffering=1)
+                self._tlog.write(f"\n=== vimol session {time.strftime('%H:%M:%S')} ===\n")
+            except OSError:
+                self._tlog = False
+        if self._tlog is False:
+            return
+        parts = [f"{time.monotonic():10.3f}", tag]
+        for k, v in fields.items():
+            if k.endswith("_ms"):
+                if v > self._tmax.get(k, 0.0):
+                    self._tmax[k] = v
+                parts.append(f"{k[:-3]}={v:7.1f}ms")
+            else:
+                parts.append(f"{k}={v}")
+        self._tlog.write("  ".join(str(p) for p in parts) + "\n")
+
+    def _tsummary(self) -> str:
+        worst = "  ".join(f"{k[:-3]}={v:.1f}ms"
+                          for k, v in sorted(self._tmax.items(), key=lambda kv: -kv[1]))
+        return f"vimol worst latencies: {worst}" if worst else ""
+
     # -- frame delivery fence ----------------------------------------------
     def _arm_fence(self, kind: str, base_elapsed: float) -> None:
         """Follow a frame with a DA1 fence to time its real delivery.
@@ -448,10 +595,20 @@ class Viewer:
         if data:
             self._fence_buf = (self._fence_buf + data)[-256:]
             if _DA1_REPLY.search(self._fence_buf):
-                total = self._fence_base + (time.perf_counter() - self._fence_t0)
+                wait = time.perf_counter() - self._fence_t0
+                total = self._fence_base + wait
                 kind = self._fence_kind
+                self._tline("ack", kind=kind, wait_ms=wait * 1000,
+                            total_ms=total * 1000)
                 self._fence_t0 = None
                 self._fence_buf = b""
+                # Every ack wait bounds the true RTT from above, so the
+                # minimum converges on the link's baseline even when the
+                # startup measurement happened during a congestion spike
+                # (or, after a late probe, never happened at all).
+                if self._link_rtt <= 0.0 or wait < self._link_rtt:
+                    self._link_rtt = wait
+                    self._idle_after = min(1.0, 0.25 + 2.0 * self._link_rtt)
                 if kind == "settle":
                     self._idle_scale = self._next_idle_scale(self._idle_scale, total)
                 else:
@@ -485,18 +642,33 @@ class Viewer:
         # keep resolution high while encode+write silently blew the budget.
         frame_start = time.perf_counter()
         img = self.widget.render()
+        t_render = time.perf_counter()
         data = kitty.encode_image(img, image_id=self._img_id, placement_id=self._img_id,
                                   cols=self._img_cols, rows=self._img_rows, move_cursor=False,
                                   z_index=_IMAGE_Z_INDEX,
                                   # fast, slightly-larger compression while moving;
                                   # the resting still gets the smaller default.
                                   compress_level=1 if interacting else 6)
+        t_encode = time.perf_counter()
         out = bytearray()
         out += _HOME + data
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
         elapsed = time.perf_counter() - frame_start
+        if self._timing_path is not None:      # VIMOL_TIMING: per-frame stages
+            t_now = time.perf_counter()
+            gap_ms = ((frame_start - self._t_last_draw_end) * 1000
+                      if self._t_last_draw_end is not None else 0.0)
+            self._t_last_draw_end = t_now
+            self._tline("frame",
+                        kind=("interact" if interacting else "SETTLE"),
+                        ss=want_ss, scale=round(scene.render_scale, 3),
+                        kb=len(data) // 1024,
+                        render_ms=(t_render - frame_start) * 1000,
+                        encode_ms=(t_encode - t_render) * 1000,
+                        write_ms=(t_now - t_encode) * 1000,
+                        gap_ms=gap_ms)
         if self._paced:
             # Every frame gets a fence: its ack both feeds the matching
             # resolution controller with the TRUE delivery time and gates
@@ -1079,6 +1251,13 @@ class Viewer:
         frame should be redrawn."""
         changed = False
         for ev in events:
+            # Track physical button state across ALL modes: _target_ss uses
+            # it to keep a drag "interacting" through bursty input gaps.
+            if isinstance(ev, _input.MouseEvent):
+                if ev.action == "down":
+                    self._button_held = True
+                elif ev.action == "up":
+                    self._button_held = False
             if self._mode in ("periodic_table", "geometry_picker"):
                 # Clicking the pill that opened the current picker closes it
                 # again -- a normal toggle button, not a one-way switch.
@@ -1316,9 +1495,27 @@ class Viewer:
             dirty = False
             while self._running:
                 data = self._read(frame_dt)
-                self._fence_tick(data)          # no-op unless a fence is out
-                if self._dispatch(self.decoder.feed(data) if data
-                                  else self.decoder.flush()):
+                # VIMOL_TIMING: input burstiness -- the gap between reads that
+                # carried bytes, and how many events each burst decodes to.
+                in_gap = 0.0
+                if data and self._timing_path is not None:
+                    now = time.monotonic()
+                    in_gap = ((now - self._t_last_read) * 1000
+                              if self._t_last_read is not None else 0.0)
+                    self._t_last_read = now
+                if self._late_t0 is not None:
+                    # startup probe reply still outstanding: hold raw input
+                    # back from the decoder until it lands (see the method).
+                    self._late_probe_tick(data)
+                    events = []
+                else:
+                    self._fence_tick(data)      # no-op unless a fence is out
+                    events = (self.decoder.feed(data) if data
+                              else self.decoder.flush())
+                if data and events:
+                    self._tline("input", n=len(events), bytes=len(data),
+                                ingap_ms=in_gap)
+                if self._dispatch(events):
                     dirty = True
                 if self._update_geometry():
                     kitty.write_bytes(_CLEAR, self.fd_out)

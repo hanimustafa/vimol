@@ -1042,6 +1042,101 @@ def test_fence_reply_split_across_reads(monkeypatch):
     assert v._idle_scale < 1.0
 
 
+def test_timing_instrumentation_off_by_default(monkeypatch, tmp_path):
+    # VIMOL_TIMING unset -> no log path, no file written, _tline a no-op.
+    monkeypatch.delenv("VIMOL_TIMING", raising=False)
+    v = _fence_viewer(monkeypatch)
+    assert v._timing_path is None
+    v._running = True
+    v._tline("frame", render_ms=1.0)
+    assert v._tlog is None                          # nothing opened
+    assert v._tsummary() == ""
+
+
+def test_timing_instrumentation_writes_when_flag_set(monkeypatch, tmp_path):
+    from vimol.viewer import _timing_log_path
+    log = tmp_path / "t.log"
+    monkeypatch.setenv("VIMOL_TIMING", str(log))
+    assert _timing_log_path() == str(log)
+    v = _fence_viewer(monkeypatch)
+    assert v._timing_path == str(log)
+    v._running = True
+    v._tline("frame", render_ms=12.5)
+    v._tline("frame", render_ms=3.0)
+    assert "render=12.5ms" in v._tsummary()         # worst tracked
+    assert log.exists() and "render=" in log.read_text()
+
+
+def test_timing_flag_value_1_uses_default_path(monkeypatch):
+    from vimol.viewer import _timing_log_path, _TIMING_DEFAULT_LOG
+    monkeypatch.setenv("VIMOL_TIMING", "1")
+    assert _timing_log_path() == _TIMING_DEFAULT_LOG
+
+
+def test_held_button_blocks_settle_even_through_input_gaps(monkeypatch):
+    # A congested link delivers drag events in bursts with >0.25s silent
+    # gaps; a held mouse button must keep the viewer in interactive mode
+    # regardless, or the heavy supersampled settle still fires mid-drag.
+    from vimol.input import MouseEvent
+    v = _fence_viewer(monkeypatch)
+    v._dispatch([MouseEvent("down", 50.0, 50.0, button=0)])
+    assert v._button_held is True
+    v._last_interact = 0.0                          # long "gap" in events
+    assert v._target_ss() == 1                      # still interacting
+    v._dispatch([MouseEvent("up", 50.0, 50.0, button=0)])
+    assert v._button_held is False
+    assert v._target_ss() == v._max_ss              # released + idle: settle
+
+
+def test_late_probe_reply_enables_pacing_and_releases_input(monkeypatch):
+    # A reply that misses the quick startup window must still enable pacing
+    # when it lands, upgrade the mouse to pixel mode consistently, and hand
+    # the user's buffered keystrokes to the decoder (not drop them).
+    import time as _time
+    writes = bytearray()
+    v = _fence_viewer(monkeypatch, writes)
+    v._paced = False
+    v._late_t0 = _time.monotonic()
+    v._late_probe_tick(b"?")                        # user typed during the wait
+    assert v._late_t0 is not None                   # still watching
+    v._late_probe_tick(b"\x1b_Gi=31;OK\x1b\\\x1b[?1016;2$y\x1b[6;20;10t\x1b[?62c")
+    assert v._late_t0 is None
+    assert v._paced is True
+    assert v.decoder.pixel is True and b"1016h" in bytes(writes)
+    assert v._cell_px == (10.0, 20.0)
+    assert v._show_help is True                     # the held '?' was delivered
+
+
+def test_late_probe_times_out_and_releases_stripped_input(monkeypatch):
+    import time as _time
+    v = _fence_viewer(monkeypatch)
+    v._paced = False
+    v._late_t0 = _time.monotonic() - 16.0           # past the give-up point
+    v._late_buf = b"?"
+    v._late_probe_tick(b"")
+    assert v._late_t0 is None
+    assert v._paced is False                        # no reply: stay unpaced
+    assert v._show_help is True                     # typed keys still delivered
+
+
+def test_ack_waits_min_track_the_link_rtt(monkeypatch):
+    # Every ack wait bounds the true RTT from above; the minimum must
+    # converge downward (a congested startup measurement heals itself).
+    import time as _time
+    v = _fence_viewer(monkeypatch)
+    v._link_rtt = 0.5                               # measured during a spike
+    v._fence_t0 = _time.perf_counter() - 0.05
+    v._fence_kind = "interact"
+    v._fence_base = 0.0
+    v._fence_tick(b"\x1b[?62c")
+    assert v._link_rtt < 0.5                        # min-tracked down
+    before = v._link_rtt
+    v._fence_t0 = _time.perf_counter() - 2.0        # a later congested ack
+    v._fence_kind = "interact"
+    v._fence_tick(b"\x1b[?62c")
+    assert v._link_rtt == before                    # never tracked up
+
+
 def test_unanswered_fence_times_out_without_ramping_up(monkeypatch):
     # Silence must never be mistaken for speed: a lost/unanswered fence
     # leaves both scales exactly where they were.
