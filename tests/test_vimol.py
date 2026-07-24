@@ -381,6 +381,17 @@ def test_input_decoder_keys_and_arrows():
     assert dec.flush() == [KeyEvent("escape")]
 
 
+def test_input_decoder_alt_arrows():
+    """Alt/Option+Up/Down carry a modifier param; plain arrows must not."""
+    from vimol.input import InputDecoder, KeyEvent
+
+    dec = InputDecoder(pixel=False)
+    assert dec.feed(b"\x1b[A") == [KeyEvent("up")]          # unmodified: unaffected
+    assert dec.feed(b"\x1b[1;3A") == [KeyEvent("alt+up")]   # xterm "Alt" modifier (3)
+    assert dec.feed(b"\x1b[1;9B") == [KeyEvent("alt+down")]  # "Meta" modifier (9), treated as alt
+    assert dec.feed(b"\x1b[1;2A") == [KeyEvent("up")]        # Shift alone: not alt
+
+
 def test_input_decoder_split_sequence():
     """An escape sequence split across two feeds must still decode once."""
     from vimol.input import InputDecoder, MouseEvent
@@ -546,6 +557,58 @@ def test_viewer_draw_writes_bytes(tmp_path):
         os.close(fd)
     data = out.read_bytes()
     assert b"\x1b_G" in data  # a graphics command was written
+
+
+def test_viewer_multi_frame_pill_and_cycling(tmp_path):
+    """Multi-frame files get a clickable "struc N/total" pill; clicking it,
+    pressing n/p, and pressing opt+up/down must all step the active frame."""
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent, MouseEvent
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v._update_geometry()
+
+        bar = v._status_bar()
+        assert "struc 1/3" in bar
+        assert v._frame_button_span is not None
+        row, col_start, col_end = v._frame_button_span
+        assert row == v._rows - 1
+
+        assert v._dispatch([KeyEvent("alt+down")]) is True
+        assert v.frame_index == 1
+        assert v._dispatch([KeyEvent("alt+up")]) is True
+        assert v.frame_index == 0
+        assert v._dispatch([KeyEvent("n")]) is True
+        assert v.frame_index == 1
+
+        v._status_bar()  # refresh the span for the current terminal size
+        row, col_start, col_end = v._frame_button_span
+        click = MouseEvent("down", float(col_start), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert v.frame_index == 2
+    finally:
+        os.close(fd)
+
+
+def test_viewer_single_frame_has_no_pill(tmp_path):
+    """A single-structure file shows no "struc" pill at all."""
+    from vimol.viewer import Viewer
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        v._update_geometry()
+        bar = v._status_bar()
+        assert "struc" not in bar
+        assert v._frame_button_span is None
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":
