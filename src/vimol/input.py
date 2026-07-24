@@ -220,7 +220,24 @@ class InputDecoder:
             return None, 0
         final = chr(b[k])
         name = _CSI_FINAL.get(final)
-        return (KeyEvent(name) if name else None), k + 1
+        if name is None:
+            return None, k + 1
+        # Modified arrows/home/end arrive as "CSI 1 ; <modifier> <final>"
+        # (xterm's key-modifier encoding: modifier-1 is a shift/alt/ctrl/meta
+        # bitmask). Only Alt/Option is consumed today -- terminals disagree on
+        # whether Option reports as "Alt" (bit 2, modifier 3) or "Meta" (bit
+        # 8, modifier 9), so both are treated as alt, matching how the SGR
+        # mouse decoder above already conflates its own alt bit.
+        params = bytes(b[2:k]).decode("ascii", "ignore")
+        if ";" in params:
+            try:
+                mod = int(params.split(";")[1])
+            except (ValueError, IndexError):
+                mod = 1
+            bits = mod - 1
+            if bits & (2 | 8):
+                name = f"alt+{name}"
+        return KeyEvent(name), k + 1
 
     def _decode_sgr_mouse(self, body: str, final: str) -> Optional[MouseEvent]:
         try:

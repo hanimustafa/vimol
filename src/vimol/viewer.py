@@ -78,7 +78,7 @@ _HELP_EDIT = [
     "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
 ]
 _HELP_TAIL = [
-    "  n / p .............. next/prev frame   d .................. depth cue",
+    "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
     "  f / r / z .......... re-fit / reset    ? .................. toggle help",
     "  q / Esc ............ quit",
@@ -90,7 +90,8 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03"}
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03",
+                      "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
 
@@ -145,6 +146,10 @@ _STARTUP_SCALE = 0.3
 
 # Warm warning color for the status bar's "press c to cleanup" hint.
 _CLEANUP_HINT_FG = (255, 170, 60)
+
+# Background of the clickable "struc N/total" pill (multi-frame files) --
+# an indigo accent distinct from the element/geometry pill colors.
+_FRAME_PILL_BG = (110, 120, 235)
 
 # Periodic-table picker panel colors.
 _PT_BG = (18, 20, 26)
@@ -207,6 +212,9 @@ class Viewer:
         # the last drawn status bar, 0-based cell coords; None when not shown.
         self._elem_button_span = None
         self._geom_button_span = None
+        # (row, col_start, col_end) of the clickable "struc N" pill (only
+        # present with multiple frames); None when not shown.
+        self._frame_button_span = None
         # geometry/hybridization picker: the options list and cursor index
         self._geom_opts: List = []
         self._geom_idx = 0
@@ -1122,6 +1130,7 @@ class Viewer:
     def _status_bar(self) -> str:
         self._elem_button_span = None
         self._geom_button_span = None
+        self._frame_button_span = None
         if self._mode == "save_input":
             body = f" Save to: {self._input_buf}█   Enter save · Esc cancel "
             return f"\x1b[48;2;44;40;30m\x1b[38;2;240;236;220m{body}\x1b[0m"
@@ -1159,11 +1168,22 @@ class Viewer:
         # the same line scrolling up and leaving its old position visible.
         left = (raw_left[:_LEFT_WIDTH - 1] + ">") if len(raw_left) > _LEFT_WIDTH else raw_left.ljust(_LEFT_WIDTH)
         rep = self.style.representation
-        frame = f"  {self.frame_index+1}/{len(self.frames)}" if len(self.frames) > 1 else ""
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
         backend = "gpu" if self.widget.scene.backend == "gl" else "cpu"
         base = "\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m"
+        # Multi-frame files (e.g. an xyz with several conformers) get a
+        # clickable "struc N/total" pill at the far left of the status bar --
+        # click to advance, opt+up/down or n/p to step from the keyboard.
+        # The pill's own \x1b[0m reset ends the base styling, so `base` is
+        # reapplied right after it for `left` to inherit (same pattern the
+        # edit-mode element/geometry pills use in `pieces` below).
+        frame_pill = ""
+        frame_pill_len = 0
+        if len(self.frames) > 1:
+            frame_label = f"struc {self.frame_index + 1}/{len(self.frames)}"
+            frame_pill = self._pill(frame_label, _FRAME_PILL_BG) + base
+            frame_pill_len = len(frame_label) + 2
         mod = " [MODIFIED]" if (self.editable and self.widget.dirty) else ""
         hint = "  s save  q quit" if self.editable else "  q quit"
         show_buttons = self.editable and self.widget.append_mode
@@ -1177,7 +1197,7 @@ class Viewer:
         # merely followed it in one concatenated string, moving the mouse
         # (with no click at all) would shift the button out from under the
         # cursor before the next click landed.
-        pieces = [(f"[{rep}]", len(rep) + 2), (frame, len(frame)), (spin, len(spin))]
+        pieces = [(f"[{rep}]", len(rep) + 2), (spin, len(spin))]
         if show_buttons:
             pieces.append((f"  {base}\x1b[1m✎APPEND\x1b[22m", 9))          # "  ✎APPEND"
         elif show_delete:
@@ -1210,14 +1230,18 @@ class Viewer:
         pieces.append((" ", 1))
 
         trailer, trailer_len, offsets = self._build_segment(pieces)
-        left_len = 1 + _LEFT_WIDTH   # leading space; `base` itself is 0-width
+        # leading space, then the frame pill (if any), then `left`; `base`
+        # itself is 0-width.
+        left_len = 1 + frame_pill_len + _LEFT_WIDTH
         pad = max(self._cols - left_len - trailer_len, 0)
+        if frame_pill_len:
+            self._frame_button_span = (self._rows - 1, 1, 1 + frame_pill_len)
         if show_buttons:
             base_col = left_len + pad + offsets[elem_piece_idx] + 2
             self._elem_button_span = (self._rows - 1, base_col + elem_rel[0], base_col + elem_rel[1])
             self._geom_button_span = (self._rows - 1, base_col + geom_rel[0], base_col + geom_rel[1])
 
-        seg = f"{base} {left}{' ' * pad}{trailer}"
+        seg = f"{base} {frame_pill}{left}{' ' * pad}{trailer}"
         return seg + "\x1b[0m"
 
     # -- input ------------------------------------------------------------
@@ -1310,6 +1334,9 @@ class Viewer:
                         elif self._span_hit(self._geom_button_span, col, row):
                             self._open_geometry_picker()
                             changed = True
+                        elif self._span_hit(self._frame_button_span, col, row):
+                            self._cycle_frame(1)
+                            changed = True
                         continue
                 elif ev.action in ("drag", "up"):
                     if self._status_zone_press:
@@ -1388,13 +1415,17 @@ class Viewer:
             self.style.transparent = not self.style.transparent
             kitty.write_bytes(_CLEAR, self.fd_out)
             self._last_interact = time.time()
-        elif key in ("n", "p") and len(self.frames) > 1:
-            self.frame_index = (self.frame_index + (1 if key == "n" else -1)) % len(self.frames)
-            self.widget.set_molecule(self.frames[self.frame_index])
-            self._last_interact = time.time()
+        elif key in ("n", "p", "alt+down", "alt+up") and len(self.frames) > 1:
+            self._cycle_frame(1 if key in ("n", "alt+down") else -1)
         else:
             return False
         return True
+
+    def _cycle_frame(self, step: int) -> None:
+        """Advance the active structure by *step* (wrapping); redraw it."""
+        self.frame_index = (self.frame_index + step) % len(self.frames)
+        self.widget.set_molecule(self.frames[self.frame_index])
+        self._last_interact = time.time()
 
     # -- save prompt ------------------------------------------------------
     def _default_save_path(self) -> str:
