@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import tempfile
 
@@ -782,7 +783,8 @@ def test_viewer_list_row_body_carries_no_atom_count(tmp_path):
         # the label itself would otherwise contribute the digits we look for
         v.structures[1].label = "buckyball"
         v._list_w = 40
-        text = v._draw_list().decode("utf-8", "replace")
+        # printable text only: RGB colour parameters are full of digits
+        text = _visible(v._draw_list().decode("utf-8", "replace"))
         assert "buckyball" in text
         assert str(frames[1].n_atoms) == "60"
         assert "60" not in text
@@ -885,15 +887,19 @@ def test_viewer_list_truncates_long_labels_keeping_extension(tmp_path):
 
 
 def test_viewer_list_active_and_marked_row_markers(tmp_path):
+    """The active and marked rows are still told apart at a glance -- by
+    colour, not by the old ▸/✓ leaders (design §4.1): the active row is a
+    full-width background, a marked row wears its own tint."""
     v, fd = _multi_viewer(tmp_path)
     try:
         v.structures.toggle_mark(2)
-        text = v._draw_list()
-        lines = text.decode("utf-8", "replace").split("\x1b[H")
-        # crude check: the active row (index 0) leads with the pointer glyph,
-        # somewhere in the byte stream near its row
-        assert "▸" in text.decode("utf-8", "replace")   # ▸ active marker
-        assert "✓" in text.decode("utf-8", "replace")   # ✓ marked row
+        rows = _strip_rows(v)
+        active = rows[v._list_row_spans[0][0]]
+        marked = rows[v._list_row_spans[2][0]]
+        assert _sgr_bg((37, 45, 64)) in active
+        assert _sgr_bg((37, 45, 64)) not in marked
+        tint = tuple(int(c * 255) for c in v.structures[2].tint)
+        assert marked.count(_sgr_fg(tint)) == 2      # swatch and label
     finally:
         os.close(fd)
 
@@ -916,6 +922,172 @@ def test_viewer_list_footer_blank_when_overlay_off(tmp_path):
         text = v._draw_list().decode("utf-8", "replace")
         assert "overlay" not in text
         assert "camera shared" in text
+    finally:
+        os.close(fd)
+
+
+# -- strip appearance (design §4.1) ----------------------------------------
+
+def _strip_rows(v):
+    """{0-based screen row: the SGR text drawn there} for one _draw_list()."""
+    parts = re.split(r"\x1b\[(\d+);1H", v._draw_list().decode("utf-8", "replace"))
+    return {int(parts[i]) - 1: parts[i + 1] for i in range(1, len(parts), 2)}
+
+
+def _visible(s):
+    """The printable text of an SGR-decorated string (escapes are 0-width)."""
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)
+
+
+def _sgr_bg(rgb):
+    return "\x1b[48;2;%d;%d;%dm" % rgb
+
+
+def _sgr_fg(rgb):
+    return "\x1b[38;2;%d;%d;%dm" % rgb
+
+
+def test_viewer_list_every_row_is_exactly_list_w_visible_columns(tmp_path):
+    """SGR escapes are zero-width: every drawn row must measure list_w
+    PRINTABLE columns, or the panel corrupts the image beside it."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.structures.overlay = True
+        v.structures.toggle_mark(2)
+        v.structures[1].visible = False
+        v._list_cursor = 1
+        for width in (18, 24, 28, 40):
+            v._list_w = width
+            for row, text in _strip_rows(v).items():
+                assert len(_visible(text)) == width, (width, row, repr(text))
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_header_is_muted_not_bold_with_a_blank_row_under_it(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        rows = _strip_rows(v)
+        assert "STRUCTURES 3" in _visible(rows[0])
+        assert _sgr_fg((139, 146, 165)) in rows[0]
+        assert "\x1b[1m" not in rows[0]              # muted, not bold-white
+        assert _visible(rows[1]).strip() == ""       # breathing room
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_rows_have_no_leader_glyphs_and_a_block_swatch(tmp_path):
+    """The active row is its background, not a '▸'; marks are not a '✓'."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.structures.toggle_mark(2)
+        v.structures[1].visible = False
+        rows = _strip_rows(v)
+        whole = "".join(rows.values())
+        assert "▸" not in whole and "✓" not in whole
+        first = v._list_row_spans[0][0]
+        assert _visible(rows[first]).startswith(" █")   # pad, then a block swatch
+        hidden = _visible(rows[first + 1])
+        assert not hidden.startswith(" █")              # hollow while hidden
+        assert "\x1b[2m" in rows[first + 1]             # ... and dimmed
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_active_row_background_spans_the_whole_strip(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_w = 24
+        v.structures.set_active(1)
+        v._list_cursor = 1
+        rows = _strip_rows(v)
+        active = rows[v._list_row_spans[1][0]]
+        assert _sgr_bg((37, 45, 64)) in active
+        # the highlight covers the padding too: the row opens with the
+        # background and closes only at its very end
+        assert active.index(_sgr_bg((37, 45, 64))) == 0
+        assert len(_visible(active)) == 24
+        # the near-white active label, dimmer on the others
+        assert _sgr_fg((232, 236, 244)) in active
+        assert _sgr_fg((200, 206, 216)) in rows[v._list_row_spans[0][0]]
+        assert _sgr_fg((110, 118, 135)) in active       # muted index
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_cursor_row_stays_distinguishable_from_the_active_row(tmp_path):
+    """They differ whenever the cursor has moved without activating."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.structures.set_active(0)
+        v._list_cursor = 2
+        rows = _strip_rows(v)
+        active = rows[v._list_row_spans[0][0]]
+        cursor = rows[v._list_row_spans[2][0]]
+        assert _sgr_bg((37, 45, 64)) in active
+        assert _sgr_bg((37, 45, 64)) not in cursor
+        assert _sgr_bg((28, 33, 46)) in cursor
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_marked_row_is_shown_in_its_tint(tmp_path):
+    """▸/✓ leaders are gone, but a mark still has to be visible: the marked
+    row's label takes the structure's own tint (design §4.4 -- colour
+    identifies a structure everywhere it appears)."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        rows = _strip_rows(v)
+        row_i = v._list_row_spans[2][0]
+        tint = tuple(int(c * 255) for c in v.structures[2].tint)
+        assert rows[row_i].count(_sgr_fg(tint)) == 1        # the swatch only
+        v.structures.toggle_mark(2)
+        rows = _strip_rows(v)
+        assert rows[row_i].count(_sgr_fg(tint)) == 2        # swatch AND label
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_separator_is_inset_by_one_column_each_side(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_w = 24
+        rows = _strip_rows(v)
+        sep = next(t for t in rows.values() if "─" in _visible(t))
+        assert _visible(sep) == " " + "─" * 22 + " "
+        assert _sgr_fg((60, 66, 84)) in sep
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_legend_renders_key_caps(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        rows = _strip_rows(v)
+        below = "".join(t for r, t in sorted(rows.items())
+                        if r > v._list_row_spans[-1][0])
+        for word in ("jump to", "next/prev", "mark", "solo", "hide"):
+            assert word in _visible(below)
+        # key caps: padded key text on a lighter background
+        assert _sgr_bg((42, 49, 66)) in below
+        for cap in (" 1 ", " 9 ", " ] ", " [ ", " space ", " z ", " h "):
+            assert cap in _visible(below)
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_panel_degrades_on_a_short_terminal(tmp_path):
+    """A short terminal must never draw over the status bar, whatever falls
+    off the bottom."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        for rows_h in (4, 6, 8, 12, 24):
+            v._rows = rows_h
+            drawn = _strip_rows(v)
+            assert drawn, rows_h
+            assert max(drawn) < rows_h - 1, rows_h    # status bar untouched
+            for i in v._list_row_struct:
+                assert 0 <= i < len(v.structures)
     finally:
         os.close(fd)
 

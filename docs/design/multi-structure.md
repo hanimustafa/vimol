@@ -432,10 +432,15 @@ image — so it costs nothing to render and never touches the renderer.
 
 ```
  STRUCTURES 3
-▸1 ● apo.pdb
- 2 ● holo.pdb
- 3 ○ mutant.pdb
- ────────────────────
+
+ █ 1 apo.pdb          <- active: full-width background, near-white label
+ █ 2 holo.pdb
+ ░ 3 mutant.pdb       <- hidden: hollow swatch, whole row dimmed
+ ──────────────────
+  1 - 9  jump to
+  ]  [  next/prev
+  space  mark
+  z  solo  h  hide
  overlay 1+2 · aligned
  camera shared
 ```
@@ -478,10 +483,35 @@ computed on **display** rows (`_list_ensure_visible`) — scrolling up to a
 file's first frame brings its header along. A dim `↑`/`↓` in the header row
 says there is more above/below.
 
-- `▸` marks the active row (also reverse-video); `●` is the tint swatch in the
-  structure's own truecolor RGB, `○` when hidden; the whole row dims when
-  `visible` is False. A `✓` prefix replaces the space for marked rows.
-- Header `STRUCTURES N`. Footer indicator: overlay membership as **1-based row
+**The panel's look.** Dark, calm and spacious; a row is
+`<space><swatch> <index> <label>` and carries **no leader glyph at all**:
+
+- **active row** — a full-panel-width background (`_LIST_ACTIVE_BG`, spanning
+  the leading and trailing padding, not just the text) plus a near-white
+  label. **cursor row** — the same idea in a subtler background, so the two
+  stay tellable apart on the rows where they differ.
+- **marked row** — the label in the structure's own tint. Marks still have to
+  be visible once `✓` is gone, and colour already identifies a structure
+  everywhere else (§4.4).
+- **swatch** — `█` in the structure's truecolor tint, `░` and dimmed when
+  hidden (the whole row dims). **index** — 1-based, in a grey dimmer than the
+  label.
+- **header** — muted blue-grey, not bold-white, with a blank row beneath it.
+  Plain `STRUCTURES N`: letter-spacing it would need ~24 of the 18 columns a
+  default terminal gives the strip.
+- **separator** — a dim rule inset one column each side, then a **legend** of
+  key caps (padded key text on a lighter background) for `1`-`9`, `]`/`[`,
+  `space`, `z`, `h`.
+- Every row is emitted by `_list_line`, which lays out `(text, sgr)` segments
+  to an exact *visible* width. SGR sequences are zero-width, so measuring a
+  pre-decorated string with `len()` is precisely what corrupts the layout;
+  segment text is escape-free by construction and each styled segment is
+  closed with a reset plus a re-applied row background (a key cap carries its
+  own background and must not leak into the rest of the row).
+- The legend is sized to fit `_LIST_W_MIN` and is the last thing to go: on a
+  short panel the status lines below it fall off first (`put()` simply
+  refuses any row that would land on the status bar).
+- Footer indicator: overlay membership as **1-based row
   numbers matching the rows above** (`overlay 1+2`) — never labels, which are
   too long and already shown on the rows; `aligned` when any drawn entry has a
   non-identity transform (`aligned*` when any is stale); and `camera shared`.

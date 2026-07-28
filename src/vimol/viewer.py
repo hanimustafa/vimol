@@ -60,12 +60,22 @@ _LIST_W_MIN = 18
 _LIST_W_MAX = 28
 
 # Structure-list strip colors (design §4.1).
-_LIST_CURSOR_BG = (55, 62, 82)      # cursor-row highlight background
+# Structure-strip palette (design §4.1). A dark, calm panel: the active row
+# is a full-width background rather than a leader glyph, and the cursor row a
+# subtler one so the two stay distinguishable when they differ.
+_LIST_HEADER_FG = (139, 146, 165)   # panel header and group (file) names
+_LIST_MUTED_FG = (110, 118, 135)    # row index, legend descriptions
+_LIST_LABEL_FG = (232, 236, 244)    # the active row's label; key-cap text
+_LIST_DIM_FG = (200, 206, 216)      # every other row's label
+_LIST_ACTIVE_BG = (37, 45, 64)      # active-row highlight, full panel width
+_LIST_CURSOR_BG = (28, 33, 46)      # cursor-row highlight (subtler)
+_LIST_RULE_FG = (60, 66, 84)        # the separator rule
+_LIST_CAP_BG = (42, 49, 66)         # legend "key cap" background
 # Strip rows spent on chrome rather than entries: the header above, and the
 # separator plus footer lines below. _list_capacity() derives what fits from
 # these, and _draw_list lays the panel out to match.
-_LIST_ROWS_ABOVE = 1
-_LIST_ROWS_BELOW = 3
+_LIST_ROWS_ABOVE = 2                # header + a blank row
+_LIST_ROWS_BELOW = 5                # separator + the four legend lines
 _LIST_WHEEL_STEP = 3                # display rows per mouse-wheel notch
 
 _HELP_HEAD = [
@@ -630,11 +640,67 @@ class Viewer:
         right = width - 1 - left
         return s[:left] + "…" + (s[-right:] if right else "")
 
+    @staticmethod
+    def _sgr_fg(rgb) -> str:
+        return "\x1b[38;2;%d;%d;%dm" % tuple(rgb)
+
+    @staticmethod
+    def _sgr_bg(rgb) -> str:
+        return "\x1b[48;2;%d;%d;%dm" % tuple(rgb)
+
+    @classmethod
+    def _list_line(cls, segments, width: int, bg=None) -> str:
+        """Lay out one strip row as exactly *width* VISIBLE columns.
+
+        *segments* are ``(text, sgr)`` pairs whose text must be escape-free:
+        SGR sequences are zero-width, so measuring a pre-decorated string
+        with len() is what corrupts the layout. Each styled segment is
+        closed with a full reset and the row background re-applied, so a
+        segment carrying its own background (a legend key cap) cannot leak
+        into the rest of the row."""
+        base = cls._sgr_bg(bg) if bg else ""
+        parts = [base]
+        used = 0
+        for text, sgr in segments:
+            if used >= width:
+                break
+            piece = text[:width - used]
+            used += len(piece)
+            parts.append(f"{sgr}{piece}\x1b[0m{base}" if sgr else piece)
+        parts.append(" " * (width - used))
+        parts.append("\x1b[0m")
+        return "".join(parts)
+
+    @classmethod
+    def _list_cap(cls, key: str):
+        """A legend "key cap": the key text padded one space either side on a
+        lighter background."""
+        return (f" {key} ", cls._sgr_bg(_LIST_CAP_BG) + cls._sgr_fg(_LIST_LABEL_FG))
+
+    def _list_legend(self):
+        """The legend's rows, as segment lists (design §4.1). Sized to fit the
+        narrowest strip (_LIST_W_MIN); wider strips just leave more air."""
+        muted = self._sgr_fg(_LIST_MUTED_FG)
+        cap = self._list_cap
+        return [
+            [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
+            [(" ", ""), cap("]"), cap("["), (" next/prev", muted)],
+            [(" ", ""), cap("space"), (" mark", muted)],
+            [(" ", ""), cap("z"), (" solo ", muted), cap("h"), (" hide", muted)],
+        ]
+
     def _draw_list(self) -> bytes:
         """Render the structure-list strip (design §4.1): ANSI text written
         straight into terminal cells, the same technique as the periodic-
         table/geometry pickers -- costs nothing to render and never touches
-        the Kitty image."""
+        the Kitty image.
+
+        Layout, top to bottom: a muted header (with the scroll affordance),
+        a blank row, the scrolled window of display rows, an inset rule, the
+        key legend, and the overlay/camera status lines if they still fit.
+        Every row goes through _list_line, so all of them measure exactly
+        list_w visible columns however narrow the strip gets.
+        """
         out = bytearray()
         list_w = self._list_w
         sset = self.structures
@@ -663,55 +729,68 @@ class Viewer:
         first = self._list_scroll
         visible = rows[first:first + cap]
 
-        more_up, more_down = first > 0, first + cap < len(rows)
-        marker = ("↑" if more_up else "") + ("↓" if more_down else "")
-        header = f" STRUCTURES {len(sset)}"
-        head = header[:max(0, list_w - len(marker))].ljust(list_w - len(marker))
-        put(0, f"\x1b[1m{head}\x1b[22m\x1b[2m{marker}\x1b[22m")
+        muted = self._sgr_fg(_LIST_MUTED_FG)
+        head_fg = self._sgr_fg(_LIST_HEADER_FG)
+        marker = ("\u2191" if first > 0 else "") + ("\u2193" if first + cap < len(rows) else "")
+        title = f" STRUCTURES {len(sset)}"
+        gap = max(0, list_w - len(title) - len(marker))
+        put(0, self._list_line([(title, head_fg), (" " * gap, ""),
+                                (marker, "\x1b[2m" + head_fg)], list_w))
+        put(1, self._list_line([], list_w))          # air under the header
 
-        fixed = 1 + 2 + 1 + 1 + 1           # leader+idx+sp+swatch+sp
-        label_w = max(1, list_w - fixed)
+        idx_w = max(2, len(str(len(sset))))
+        label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
         drawn_rows = 0
         for n_row, (kind, i, text) in enumerate(visible):
             row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
                 name = self._truncate_middle(text, max(1, list_w - 1))
-                if not put(row0, f"\x1b[2m {name}\x1b[22m"):
+                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], list_w)):
                     break
                 drawn_rows += 1
                 continue
             entry = sset[i]
-            leader = "▸" if i == sset.active_index else ("✓" if entry.marked else " ")
-            idx_s = f"{i + 1:>2}"
-            r, g, b = (int(max(0.0, min(1.0, c)) * 255) for c in entry.tint)
-            swatch_char = "●" if entry.visible else "○"
-            swatch = f"\x1b[38;2;{r};{g};{b}m{swatch_char}\x1b[0m"
-            label = self._truncate_middle(text, label_w).ljust(label_w)
-            body = f"{leader}{idx_s} {swatch} {label}"
-            # active row: tint-coloured text; cursor row: reverse-style
-            # background -- distinct so the two can be told apart when they
-            # differ (design §4.3).
-            text_fg = f"\x1b[38;2;{r};{g};{b}m" if i == sset.active_index else ""
+            tint = tuple(int(max(0.0, min(1.0, c)) * 255) for c in entry.tint)
+            active = i == sset.active_index
+            # The active row IS its background (no leader glyph); the cursor
+            # row gets a subtler one, so the two stay tellable apart when
+            # they differ (design §4.3). A marked row wears its own tint on
+            # the label -- the mark has to stay visible without a leader.
+            bg = (_LIST_ACTIVE_BG if active
+                  else _LIST_CURSOR_BG if i == self._list_cursor else None)
             dim = "\x1b[2m" if not entry.visible else ""
-            cursor_bg = (f"\x1b[48;2;{_LIST_CURSOR_BG[0]};{_LIST_CURSOR_BG[1]};{_LIST_CURSOR_BG[2]}m"
-                        if i == self._list_cursor else "")
-            if not put(row0, f"{cursor_bg}{dim}{text_fg}{body}"):
+            label_fg = (self._sgr_fg(tint) if entry.marked
+                        else self._sgr_fg(_LIST_LABEL_FG if active else _LIST_DIM_FG))
+            segs = [
+                (" ", ""),
+                ("\u2588" if entry.visible else "\u2591", dim + self._sgr_fg(tint)),
+                (" ", ""),
+                (f"{i + 1:>{idx_w}}", dim + muted),
+                (" ", ""),
+                (self._truncate_middle(text, label_w), dim + label_fg),
+            ]
+            if not put(row0, self._list_line(segs, list_w, bg=bg)):
                 break
             drawn_rows += 1
             self._list_row_spans.append((row0, 0, list_w))
             self._list_row_struct.append(i)
 
-        sep_row = _LIST_ROWS_ABOVE + drawn_rows
-        put(sep_row, "─" * list_w)
+        row0 = _LIST_ROWS_ABOVE + drawn_rows
+        rule = "\u2500" * max(0, list_w - 2)
+        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(_LIST_RULE_FG))], list_w))
+        for k, segs in enumerate(self._list_legend(), start=1):
+            put(row0 + k, self._list_line(segs, list_w))
+        # Status lines last: on a short panel they are the first thing to
+        # fall off the bottom (put() simply refuses), the legend the last.
+        row0 += 1 + len(self._list_legend())
         if sset.overlay:
             drawn = sset.drawn_indices()
             membership = "+".join(str(i + 1) for i in drawn)
             aligned = any(not sset[i].transform.is_identity for i in drawn)
-            footer1 = f" overlay {membership}" + (" · aligned" if aligned else "")
-        else:
-            footer1 = ""
-        put(sep_row + 1, footer1.ljust(list_w)[:list_w])
-        put(sep_row + 2, " camera shared".ljust(list_w)[:list_w])
+            status = f" overlay {membership}" + (" \u00b7 aligned" if aligned else "")
+            put(row0, self._list_line([(status, muted)], list_w))
+            row0 += 1
+        put(row0, self._list_line([(" camera shared", muted)], list_w))
         return bytes(out)
 
     def _update_geometry(self) -> bool:
