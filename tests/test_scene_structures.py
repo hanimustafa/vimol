@@ -207,3 +207,113 @@ def test_flat_bond_between_two_flat_atoms_renders_uniform_too():
     assert len(green_cols) > 5
     pixels = row[green_cols]
     assert (pixels == pixels[0]).all()
+
+
+# -- editing while overlaid: pick() is composite, edits stay active-only ---
+# (design §3 "Highlighting", §12.3)
+
+def _overlay_two_atom_widget():
+    """Two 1-atom structures, both visible, overlaid, active = index 0.
+    Placed far apart on screen (each centered under the camera at its own
+    world position) with a wide-open ortho view so both are individually
+    clickable."""
+    from vimol.scene import Scene
+
+    sset = StructureSet()
+    a = Molecule(symbols=["C"], positions=np.array([[-5.0, 0.0, 0.0]]))
+    b = Molecule(symbols=["O"], positions=np.array([[5.0, 0.0, 0.0]]))
+    sset.append(a, label="a.xyz")
+    sset.append(b, label="b.xyz")
+    sset.overlay = True
+    w = MoleculeWidget(sset, 200, 200, backend="cpu", editable=True)
+    w.scene.camera.center = np.zeros(3)
+    w.scene.camera.rotation = np.eye(3)
+    w.scene.camera.fit(200, 200, 8.0)
+    return w, sset
+
+
+def _px_for_world_x(w, x):
+    """Widget-local pixel coords for a point at world (x, 0, 0), given the
+    camera set up by _overlay_two_atom_widget (identity rotation, centered
+    on the origin)."""
+    cam = w.scene.camera
+    Wr, Hr = w.scene.render_size
+    sx = Wr * 0.5 + cam.pan[0] + x * cam.zoom
+    sy = Hr * 0.5 - cam.pan[1]
+    return sx / (Wr / w.scene.width), sy / (Hr / w.scene.height)
+
+
+def test_pick_returns_a_composite_index_spanning_all_drawn_structures():
+    w, sset = _overlay_two_atom_widget()
+    px, py = _px_for_world_x(w, 5.0)   # atom 'b', entry index 1
+    comp = sset.composite()
+    idx = w.pick(px, py)
+    assert idx is not None
+    entry_idx, local = comp.locate(idx)
+    assert entry_idx == 1
+    assert local == 0
+
+
+def test_delete_click_on_non_active_structure_is_refused_no_mutation():
+    w, sset = _overlay_two_atom_widget()
+    w.set_delete_mode(True)
+    px, py = _px_for_world_x(w, 5.0)   # belongs to entry 1 ("b.xyz"), not active
+    before = sset[1].molecule.n_atoms
+    _click(w, px, py)
+    assert sset[1].molecule.n_atoms == before   # nothing deleted
+    assert w.pick_refusal is not None
+    assert "b.xyz" in w.pick_refusal
+
+
+def test_delete_click_on_active_structure_still_works_when_overlaid():
+    w, sset = _overlay_two_atom_widget()
+    w.set_delete_mode(True)
+    px, py = _px_for_world_x(w, -5.0)   # belongs to entry 0 (active, "a.xyz")
+    _click(w, px, py)
+    assert sset[0].molecule.n_atoms == 0
+    assert w.pick_refusal is None
+
+
+def test_append_click_on_non_active_structure_is_refused():
+    w, sset = _overlay_two_atom_widget()
+    w.set_append_mode(True)
+    px, py = _px_for_world_x(w, 5.0)
+    before = sset[1].molecule.n_atoms
+    _click(w, px, py)
+    assert sset[1].molecule.n_atoms == before
+    assert w.pick_refusal is not None
+
+
+def test_measure_click_on_non_active_structure_is_refused_and_holds_no_index():
+    w, sset = _overlay_two_atom_widget()
+    w.set_measure_mode(True)
+    px, py = _px_for_world_x(w, 5.0)
+    _click(w, px, py)
+    assert w.measure_sel == []
+    assert w.pick_refusal is not None
+
+
+def test_hover_over_non_active_structure_highlights_nothing():
+    w, sset = _overlay_two_atom_widget()
+    px, py = _px_for_world_x(w, 5.0)
+    w.handle_mouse(MouseEvent("move", px, py, pixel=True))
+    assert w.hovered is None
+
+
+def test_hover_over_active_structure_still_works_when_overlaid():
+    w, sset = _overlay_two_atom_widget()
+    px, py = _px_for_world_x(w, -5.0)
+    w.handle_mouse(MouseEvent("move", px, py, pixel=True))
+    assert w.hovered == 0
+
+
+def _mouse_click(px, py):
+    return MouseEvent("down", px, py, button=0, pixel=True)
+
+
+def _click(w, px, py):
+    w.handle_mouse(MouseEvent("down", px, py, button=0, pixel=True))
+    w.handle_mouse(MouseEvent("up", px, py, button=0, pixel=True))
+
+
+from vimol.input import MouseEvent

@@ -1023,3 +1023,20 @@ def test_viewer_viewport_click_still_reaches_widget_past_the_strip(tmp_path):
         assert not np.array_equal(v.widget.scene.camera.rotation, rot0)
     finally:
         os.close(fd)
+
+
+def test_viewer_status_bar_shows_pick_refusal_message(tmp_path):
+    """A refused cross-structure edit click's message surfaces in the
+    left-hand status-bar field (design §3, §12.3)."""
+    from vimol.viewer import Viewer
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd, editable=True)
+        v._update_geometry()
+        v.widget.pick_refusal = "atom belongs to b — Tab to activate"
+        bar = v._status_bar()
+        assert "atom belongs to b" in bar
+    finally:
+        os.close(fd)

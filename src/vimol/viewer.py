@@ -1289,7 +1289,7 @@ class Viewer:
         # left-segment behavior applies.
         measure = (editor.measurement(mol, self.widget.measure_sel)
                    if self.widget.measure_mode else "")
-        raw_left = measure or hov or (self._msg or
+        raw_left = measure or self.widget.pick_refusal or hov or (self._msg or
             f"{(mol.name or 'molecule')[:22]}  {mol.formula()}  {mol.n_atoms} atoms")
         # Fixed-width, not just truncated: hover text changes on every mouse
         # move and can be shorter *or* longer than the previous frame's, so

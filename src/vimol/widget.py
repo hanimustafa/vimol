@@ -63,6 +63,10 @@ class MoleculeWidget:
         self.delete_mode = False                # 'x': click to remove atoms
         self.measure_mode = False               # 'm': click to build a measurement pick list
         self.measure_sel: list = []             # ordered atom indices picked in measure mode
+        # set by _guarded_pick when an append/delete/measure click resolves to
+        # a non-active structure (design §3, §12.3); a host status bar can
+        # show it. None whenever the last guarded pick was not refused.
+        self.pick_refusal: Optional[str] = None
         self.build_element = "C"                # element placed while appending
         self.build_template = None              # chosen geometry/valence; None -> element default
         self.dirty = False                      # True once the model is edited
@@ -122,6 +126,7 @@ class MoleculeWidget:
         self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self.measure_sel = []                   # stale indices into the old molecule
+        self.pick_refusal = None
         self._undo_stack.clear()
         self._saved_sig = self._signature()
         self.dirty = False
@@ -209,7 +214,7 @@ class MoleculeWidget:
             if self._bond_anchor is not None:
                 self._cancel_bond_gesture()
             if ev.button == 0 and ev.alt and self.editable:
-                idx = self.pick(x, y) if self.molecule.n_atoms else None
+                idx = self._active_local_pick(x, y)
                 if idx is not None:
                     # Start a bond gesture -- and deliberately do NOT set
                     # _drag_button, so the drag branch below won't rotate the
@@ -223,7 +228,7 @@ class MoleculeWidget:
             self._last = (x, y)
             self._press = (x, y)
             if self.picking:
-                self.selected = self.pick(x, y)
+                self.selected = self._active_local_pick(x, y)
             return False
         if ev.action == "up":
             if self._bond_anchor is not None:
@@ -269,7 +274,7 @@ class MoleculeWidget:
                 return True
             if self.picking:
                 prev = self.hovered
-                self.hovered = self.pick(x, y)
+                self.hovered = self._active_local_pick(x, y)
                 return self.hovered != prev
         return False
 
@@ -406,10 +411,18 @@ class MoleculeWidget:
         return view @ cam.rotation + cam.center
 
     def _edit_at(self, px: float, py: float) -> bool:
-        """Perform an append edit at a widget-local pixel. Returns True (redraw)."""
+        """Perform an append edit at a widget-local pixel. Returns True (redraw).
+
+        A pick that resolves to a non-active structure is refused (design
+        §3, §12.3): no undo snapshot, no mutation -- just pick_refusal set
+        for the status bar. Distinct from "empty space", which still births
+        a new fragment as always.
+        """
         mol = self.scene.molecule
+        idx = self._guarded_pick(px, py)
+        if self.pick_refusal is not None:
+            return True
         self._push_undo()                       # snapshot for 'u' before mutating
-        idx = self.pick(px, py) if mol.n_atoms else None
         tmpl = self.build_template          # None -> editor uses the element default
         if idx is not None:
             editor.grow_at_atom(mol, idx, element=self.build_element, template=tmpl)
@@ -424,16 +437,20 @@ class MoleculeWidget:
         return True
 
     def _delete_at(self, px: float, py: float) -> bool:
-        """Delete the atom under a widget-local pixel. Returns True if one went.
+        """Delete the atom under a widget-local pixel. Returns True if one went
+        (or a refusal message needs to be shown).
 
         Unlike :meth:`_edit_at` -- which always mutates -- a delete click can
         land on empty space, so we pick *first* and bail (no undo snapshot, no
-        mutation) when nothing is under the cursor.
+        mutation) when nothing is under the cursor. A pick on a non-active
+        structure is refused the same way (design §3, §12.3).
         """
-        mol = self.scene.molecule
-        idx = self.pick(px, py) if mol.n_atoms else None
+        idx = self._guarded_pick(px, py)
+        if self.pick_refusal is not None:
+            return True
         if idx is None:
             return False
+        mol = self.scene.molecule
         self._push_undo()                       # snapshot for 'u' before mutating
         editor.delete_atom(mol, idx)
         # atom count changed: refresh color cache and drop stale hover/selection
@@ -453,9 +470,14 @@ class MoleculeWidget:
         * a fresh atom, selection already has 4 -> RESET first: the clicked
           atom becomes the sole, first pick of a new selection, not an empty
           one -- see the measure-mode spec's "5th click" rule.
+        * a pick on a non-active structure is refused (design §3, §12.3):
+          measure_sel holds ACTIVE-LOCAL indices only, so an unguarded
+          cross-structure click would silently store an index that means a
+          different atom in the active structure.
         """
-        mol = self.scene.molecule
-        idx = self.pick(px, py) if mol.n_atoms else None
+        idx = self._guarded_pick(px, py)
+        if self.pick_refusal is not None:
+            return True
         if idx is None:
             if self.measure_sel:
                 self.measure_sel = []
@@ -511,7 +533,7 @@ class MoleculeWidget:
         anchor = self._bond_anchor
         self._remove_bond_preview()
         self._bond_anchor = None
-        target = self.pick(px, py) if mol.n_atoms else None
+        target = self._active_local_pick(px, py)
         if target is not None and target != anchor:
             snapshot = self._snapshot()          # taken before mutating
             if editor.add_manual_bond(mol, anchor, target):
@@ -583,10 +605,18 @@ class MoleculeWidget:
 
     # -- picking ----------------------------------------------------------
     def pick(self, px: float, py: float) -> Optional[int]:
-        """Return the index of the front-most atom under widget-local pixel
-        (px, py), or None. Uses the same orthographic projection as the renderer.
+        """Return the COMPOSITE index of the front-most atom under widget-local
+        pixel (px, py), or None. Uses the same orthographic projection as the
+        renderer.
+
+        This is a composite index, not active-local (design §3,
+        "Highlighting") -- so a click over an overlaid, non-active structure
+        can be recognized (and refused) instead of silently missing. Convert
+        with ``composite.locate()`` at the call site; :meth:`_active_local_pick`
+        does exactly that for the common "act only on the active structure"
+        case.
         """
-        mol = self.scene.molecule
+        mol = self.scene.structures.composite().molecule
         if mol.n_atoms == 0:
             return None
         cam = self.scene.camera
@@ -610,6 +640,40 @@ class MoleculeWidget:
             return None
         idx = np.where(inside)[0]
         return int(idx[np.argmax(sz[idx])])
+
+    def _active_local_pick(self, px: float, py: float) -> Optional[int]:
+        """pick(), converted to an active-local index -- None both when
+        nothing is under the cursor AND when the pick resolves to a
+        non-active structure (used by hover and the manual-bond gesture,
+        where silently doing nothing is the right refusal: design §12.3
+        restricts editing to the active structure without making the
+        composite's other atoms a dead zone to look at)."""
+        idx = self.pick(px, py)
+        if idx is None:
+            return None
+        entry_idx, local = self.scene.structures.composite().locate(idx)
+        return local if entry_idx == self.scene.structures.active_index else None
+
+    def _guarded_pick(self, px: float, py: float) -> Optional[int]:
+        """pick(), converted to an active-local index for an EDIT ACTION
+        (append/delete/measure click). Unlike :meth:`_active_local_pick`,
+        a foreign-structure hit is not silent: it sets :attr:`pick_refusal`
+        (design §3, §12.3) so the caller can redraw without mutating
+        anything, and the status bar can explain why the click did nothing.
+        Returns None both for "nothing under the cursor" (proceed as
+        empty-space) and "refused" (caller must check pick_refusal to tell
+        the two apart).
+        """
+        self.pick_refusal = None
+        idx = self.pick(px, py)
+        if idx is None:
+            return None
+        entry_idx, local = self.scene.structures.composite().locate(idx)
+        if entry_idx != self.scene.structures.active_index:
+            label = self.scene.structures[entry_idx].label
+            self.pick_refusal = f"atom belongs to {label} — Tab to activate"
+            return None
+        return local
 
     def atom_info(self, idx: Optional[int]) -> str:
         if idx is None:
