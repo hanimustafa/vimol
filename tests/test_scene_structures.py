@@ -317,3 +317,40 @@ def _click(w, px, py):
 
 
 from vimol.input import MouseEvent
+
+
+# -- end-to-end: Scene.render() actually applies overlay colouring ---------
+
+def test_scene_render_overlay_first_entry_cpk_rest_flat_tinted_cpu():
+    """Exercises the full chain: Scene.render() -> _effective_style(composite)
+    -> Renderer -- not a hand-built Style/SphereBatch. The second (non-active)
+    entry must render flat and tinted; the first keeps CPK/shaded."""
+    sset = StructureSet()
+    a = Molecule(symbols=["C", "C"], positions=np.array([[-5.0, 0.0, 0.0], [-3.0, 0.0, 0.0]]))
+    b = Molecule(symbols=["C", "C"], positions=np.array([[3.0, 0.0, 0.0], [5.0, 0.0, 0.0]]))
+    sset.append(a, label="a")
+    entry_b = sset.append(b, label="b")
+    sset.overlay = True
+    style = Style(representation="spacefill", depth_cue=0.0)
+    scene = Scene(sset, 240, 240, style=style, backend="cpu")
+    scene.camera.center = np.zeros(3)
+    scene.camera.rotation = np.eye(3)
+    scene.camera.fit(240, 240, 10.0)
+    img = scene.render()
+
+    tint_rgb = tuple(int(c * 255) for c in entry_b.tint)
+    tint_mask = (np.abs(img[:, :, 0].astype(int) - tint_rgb[0]) < 12) & \
+                (np.abs(img[:, :, 1].astype(int) - tint_rgb[1]) < 12) & \
+                (np.abs(img[:, :, 2].astype(int) - tint_rgb[2]) < 12)
+    assert tint_mask.sum() > 50
+    tinted_pixels = img[tint_mask]
+    assert (tinted_pixels == tinted_pixels[0]).all()   # flat: perfectly uniform
+
+    # the active entry (CPK carbon-grey) is shaded, not flat/tinted
+    carbon_rgb = tuple(int(c * 255) for c in a.element_colors()[0])
+    active_mask = (np.abs(img[:, :, 0].astype(int) - carbon_rgb[0]) < 40) & \
+                  (np.abs(img[:, :, 1].astype(int) - carbon_rgb[1]) < 40) & \
+                  (np.abs(img[:, :, 2].astype(int) - carbon_rgb[2]) < 40)
+    assert active_mask.sum() > 50
+    active_pixels = img[active_mask]
+    assert not (active_pixels == active_pixels[0]).all()   # shaded: not uniform

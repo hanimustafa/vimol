@@ -1452,7 +1452,10 @@ class Viewer:
             if self._list_focused and isinstance(ev, _input.KeyEvent):
                 if self._handle_list_key(ev.key):
                     changed = True
-                continue
+                    continue
+                # unclaimed by the list keymap -- fall through to the driver
+                # keys / widget below, so n/p, q, Ctrl-C, ? etc. all keep
+                # working while the strip has focus (design §4.3).
             if isinstance(ev, _input.MouseEvent):
                 if ev.action == "down":
                     col, row = self._event_cell(ev)

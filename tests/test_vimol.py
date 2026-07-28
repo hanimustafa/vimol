@@ -559,6 +559,28 @@ def test_viewer_draw_writes_bytes(tmp_path):
     assert b"\x1b_G" in data  # a graphics command was written
 
 
+def test_viewer_draw_multi_structure_writes_image_and_list_strip(tmp_path):
+    """_draw() on a multi-structure viewer -- the real per-frame path, not
+    just _draw_list()/_status_bar() called directly -- must emit both the
+    Kitty image and the structure-list strip in one frame."""
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    out = tmp_path / "out.bin"
+    fd = os.open(str(out), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v._update_geometry()
+        v._draw()
+    finally:
+        os.close(fd)
+    data = out.read_bytes()
+    assert b"\x1b_G" in data                 # a graphics command was written
+    assert b"STRUCTURES 3" in data           # the list strip's header
+
+
 def test_viewer_multi_frame_cycling_via_keys(tmp_path):
     """Multi-frame files no longer show the old "struc N/total" status-bar
     pill (design §2/§4.1: it becomes the structure-list strip's header);
@@ -1038,5 +1060,23 @@ def test_viewer_status_bar_shows_pick_refusal_message(tmp_path):
         v.widget.pick_refusal = "atom belongs to b — Tab to activate"
         bar = v._status_bar()
         assert "atom belongs to b" in bar
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_unclaimed_keys_fall_through_to_global_bindings(tmp_path):
+    """n/p (design: 'keep doing plain next/prev regardless of list focus')
+    and quit keys must still work while the strip has focus -- only keys the
+    list keymap actually claims (§4.3) may be swallowed."""
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        assert v._dispatch([KeyEvent("n")]) is True
+        assert v.frame_index == 1
+        assert v._dispatch([KeyEvent("q")]) is False
+        assert v._running is False
     finally:
         os.close(fd)
