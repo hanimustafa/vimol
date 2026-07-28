@@ -1631,10 +1631,14 @@ class Viewer:
         if key == "escape":
             self._list_focused = False
             return True
-        if key in ("j", "down"):
+        # j/k only -- NOT the plain arrows. up/down must always reach
+        # widget.handle_key and orbit the camera, focused or not; opt+up /
+        # opt+down are the arrow-flavoured way to walk the structures and
+        # fall through to the global driver keys below.
+        if key == "j":
             self._list_cursor = min(n - 1, self._list_cursor + 1)
             return True
-        if key in ("k", "up"):
+        if key == "k":
             self._list_cursor = max(0, self._list_cursor - 1)
             return True
         if key in "123456789":

@@ -502,7 +502,8 @@ namespace.
 | `n` / `p` | global | next / prev structure (unchanged, already shipped) |
 | `opt+↑` / `opt+↓` | global | next / prev structure (from the worktree branch) |
 | `]` / `[` | strip | next / prev structure |
-| `j` / `k` / `↑` / `↓` | strip | move the row cursor without activating |
+| `j` / `k` | strip | move the row cursor without activating |
+| `↑` / `↓` | global | orbit the camera — the strip never claims the plain arrows |
 | `1`–`9` | strip | jump to structure N |
 | `Enter` | strip | activate the row cursor, clear marks, return focus |
 | `space` | strip | toggle **mark** on the cursor row |

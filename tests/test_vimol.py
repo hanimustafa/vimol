@@ -1098,3 +1098,37 @@ def test_viewer_hiding_active_structure_while_hovered_does_not_crash(tmp_path):
         v._draw()   # must not raise
     finally:
         os.close(fd)
+
+
+def test_viewer_plain_arrows_always_orbit_even_while_list_focused(tmp_path):
+    """Plain up/down orbit the camera whether or not the strip has focus; the
+    structure-list cursor is driven by j/k, and opt+up/down keep cycling the
+    active structure globally."""
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        v._list_cursor = 0
+        rot0 = v.widget.scene.camera.rotation.copy()
+        assert v._dispatch([KeyEvent("down")]) is True
+        assert not np.array_equal(v.widget.scene.camera.rotation, rot0)
+        assert v._list_cursor == 0          # the arrow did NOT move the cursor
+        rot1 = v.widget.scene.camera.rotation.copy()
+        assert v._dispatch([KeyEvent("up")]) is True
+        assert not np.array_equal(v.widget.scene.camera.rotation, rot1)
+        assert v._list_cursor == 0
+
+        # opt+arrows still reach the driver keys while the strip has focus
+        assert v._dispatch([KeyEvent("alt+down")]) is True
+        assert v.frame_index == 1
+        assert v._dispatch([KeyEvent("alt+up")]) is True
+        assert v.frame_index == 0
+
+        # j/k remain the focused cursor keys
+        assert v._dispatch([KeyEvent("j")]) is True
+        assert v._list_cursor == 1
+        assert v._dispatch([KeyEvent("k")]) is True
+        assert v._list_cursor == 0
+    finally:
+        os.close(fd)
