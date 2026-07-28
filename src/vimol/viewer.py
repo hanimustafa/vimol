@@ -156,10 +156,6 @@ _STARTUP_SCALE = 0.3
 # Warm warning color for the status bar's "press c to cleanup" hint.
 _CLEANUP_HINT_FG = (255, 170, 60)
 
-# Background of the clickable "struc N/total" pill (multi-frame files) --
-# an indigo accent distinct from the element/geometry pill colors.
-_FRAME_PILL_BG = (110, 120, 235)
-
 # Periodic-table picker panel colors.
 _PT_BG = (18, 20, 26)
 _PT_BORDER_FG = (60, 200, 180)      # teal accent, matches the geometry pill
@@ -231,9 +227,6 @@ class Viewer:
         # the last drawn status bar, 0-based cell coords; None when not shown.
         self._elem_button_span = None
         self._geom_button_span = None
-        # (row, col_start, col_end) of the clickable "struc N" pill (only
-        # present with multiple frames); None when not shown.
-        self._frame_button_span = None
         # geometry/hybridization picker: the options list and cursor index
         self._geom_opts: List = []
         self._geom_idx = 0
@@ -330,8 +323,7 @@ class Viewer:
 
     @frame_index.setter
     def frame_index(self, i: int) -> None:
-        self.structures.set_active(i)
-        self.widget.refresh_active()
+        self._activate_structure(i)
 
     # -- pointer shape (OSC 22 push/pop stack) -----------------------------
     def _push_pointer(self, shape: str) -> None:
@@ -1280,7 +1272,6 @@ class Viewer:
     def _status_bar(self) -> str:
         self._elem_button_span = None
         self._geom_button_span = None
-        self._frame_button_span = None
         if self._mode == "save_input":
             body = f" Save to: {self._input_buf}█   Enter save · Esc cancel "
             return f"\x1b[48;2;44;40;30m\x1b[38;2;240;236;220m{body}\x1b[0m"
@@ -1322,18 +1313,6 @@ class Viewer:
         px = " px" if self.decoder.pixel else ""
         backend = "gpu" if self.widget.scene.backend == "gl" else "cpu"
         base = "\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m"
-        # Multi-frame files (e.g. an xyz with several conformers) get a
-        # clickable "struc N/total" pill at the far left of the status bar --
-        # click to advance, opt+up/down or n/p to step from the keyboard.
-        # The pill's own \x1b[0m reset ends the base styling, so `base` is
-        # reapplied right after it for `left` to inherit (same pattern the
-        # edit-mode element/geometry pills use in `pieces` below).
-        frame_pill = ""
-        frame_pill_len = 0
-        if len(self.frames) > 1:
-            frame_label = f"struc {self.frame_index + 1}/{len(self.frames)}"
-            frame_pill = self._pill(frame_label, _FRAME_PILL_BG) + base
-            frame_pill_len = len(frame_label) + 2
         mod = " [MODIFIED]" if (self.editable and self.widget.dirty) else ""
         hint = "  s save  q quit" if self.editable else "  q quit"
         show_buttons = self.editable and self.widget.append_mode
@@ -1380,18 +1359,14 @@ class Viewer:
         pieces.append((" ", 1))
 
         trailer, trailer_len, offsets = self._build_segment(pieces)
-        # leading space, then the frame pill (if any), then `left`; `base`
-        # itself is 0-width.
-        left_len = 1 + frame_pill_len + _LEFT_WIDTH
+        left_len = 1 + _LEFT_WIDTH   # leading space; `base` itself is 0-width
         pad = max(self._cols - left_len - trailer_len, 0)
-        if frame_pill_len:
-            self._frame_button_span = (self._rows - 1, 1, 1 + frame_pill_len)
         if show_buttons:
             base_col = left_len + pad + offsets[elem_piece_idx] + 2
             self._elem_button_span = (self._rows - 1, base_col + elem_rel[0], base_col + elem_rel[1])
             self._geom_button_span = (self._rows - 1, base_col + geom_rel[0], base_col + geom_rel[1])
 
-        seg = f"{base} {frame_pill}{left}{' ' * pad}{trailer}"
+        seg = f"{base} {left}{' ' * pad}{trailer}"
         return seg + "\x1b[0m"
 
     # -- input ------------------------------------------------------------
@@ -1468,9 +1443,30 @@ class Viewer:
                 if isinstance(ev, _input.KeyEvent) and self._handle_prompt_key(ev.key):
                     changed = True
                 continue
+            if isinstance(ev, _input.KeyEvent) and ev.key == "tab" and len(self.structures) > 1:
+                self._list_focused = not self._list_focused
+                if self._list_focused:
+                    self._list_cursor = self.structures.active_index
+                changed = True
+                continue
+            if self._list_focused and isinstance(ev, _input.KeyEvent):
+                if self._handle_list_key(ev.key):
+                    changed = True
+                continue
             if isinstance(ev, _input.MouseEvent):
                 if ev.action == "down":
                     col, row = self._event_cell(ev)
+                    # The list zone is checked BEFORE the status zone: the
+                    # strip's footer rows can land inside the status zone's
+                    # bottom-of-screen margin on a short terminal, and a
+                    # strip click must never be swallowed by that guard.
+                    if self._in_list_zone(col):
+                        self._list_zone_press = True
+                        i = self._list_index_at_row(row)
+                        if i is not None:
+                            self._list_click(i, opt=ev.alt)
+                            changed = True
+                        continue
                     self._status_zone_press = self._in_status_zone(row)
                     if self._status_zone_press:
                         # A click on the element pill opens the periodic table,
@@ -1484,24 +1480,25 @@ class Viewer:
                         elif self._span_hit(self._geom_button_span, col, row):
                             self._open_geometry_picker()
                             changed = True
-                        elif self._span_hit(self._frame_button_span, col, row):
-                            self._cycle_frame(1)
-                            changed = True
                         continue
                 elif ev.action in ("drag", "up"):
+                    if self._list_zone_press:
+                        if ev.action == "up":
+                            self._list_zone_press = False
+                        continue
                     if self._status_zone_press:
                         if ev.action == "up":
                             self._status_zone_press = False
                         continue
                 elif ev.action in ("move", "scroll"):
-                    _col, row = self._event_cell(ev)
-                    if self._in_status_zone(row):
+                    col, row = self._event_cell(ev)
+                    if self._in_list_zone(col) or self._in_status_zone(row):
                         continue
             if isinstance(ev, _input.KeyEvent) and ev.key in self._driver_keys:
                 if self._driver_key(ev.key):
                     changed = True
             else:
-                if self.widget.handle_event(ev):
+                if self.widget.handle_event(ev, origin=self._img_origin_px):
                     self._last_interact = time.time()
                     self._msg = ""          # a fresh interaction clears "saved …"
                     changed = True
@@ -1580,8 +1577,93 @@ class Viewer:
         every other loaded structure on the first press of 'n'.
         """
         self.structures.cycle_active(step)
+        self._list_cursor = self.structures.active_index
         self.widget.refresh_active()
         self._last_interact = time.time()
+
+    def _activate_structure(self, i: int) -> None:
+        """Make structure *i* the active one: updates StructureSet,
+        resyncs the list cursor to it (design §4.3: 'reset to it by every
+        set_active'), and refreshes the widget (camera fit, hover/undo
+        reset) without discarding the rest of the StructureSet."""
+        self.structures.set_active(i)
+        self._list_cursor = i
+        self.widget.refresh_active()
+
+    def _hide_toggle(self, i: int) -> None:
+        """Toggle Structure.visible on row *i* (the 'h' list key, design
+        §4.3): refuses to hide the last visible structure, and does NOT
+        auto-advance the active index even when hiding the active row."""
+        entry = self.structures[i]
+        if entry.visible and sum(1 for e in self.structures if e.visible) <= 1:
+            self._msg = "at least one structure must stay visible"
+            return
+        self.structures.toggle_visible(i)
+
+    def _list_click(self, i: int, opt: bool) -> None:
+        """Mouse click on structure-list row *i* (design §4.3, focus-
+        independent): a plain click replaces the active structure and clears
+        the overlay; opt+click adds it to the overlay alongside the current
+        one. Clicking any row also gives the strip keyboard focus."""
+        self._list_focused = True
+        if opt:
+            self.structures[i].marked = True
+            self.structures.overlay = True
+            self._list_cursor = i
+        else:
+            self._activate_structure(i)
+            self.structures.clear_marks()
+            self.structures.overlay = False
+
+    def _handle_list_key(self, key: str) -> bool:
+        """Keys claimed while the structure-list strip has focus (design
+        §4.3); returns True if anything changed. None of these touch the
+        pre-existing global bindings for the same keys (representation
+        select, roll, orbit) -- those still fire when the list isn't
+        focused, since this is only ever called when it is."""
+        sset = self.structures
+        n = len(sset)
+        if n == 0:
+            return False
+        if key == "escape":
+            self._list_focused = False
+            return True
+        if key in ("j", "down"):
+            self._list_cursor = min(n - 1, self._list_cursor + 1)
+            return True
+        if key in ("k", "up"):
+            self._list_cursor = max(0, self._list_cursor - 1)
+            return True
+        if key in "123456789":
+            i = int(key) - 1
+            if i < n:
+                self._list_cursor = i
+                return True
+            return False
+        if key == "]":
+            self._activate_structure((sset.active_index + 1) % n)
+            return True
+        if key == "[":
+            self._activate_structure((sset.active_index - 1) % n)
+            return True
+        if key == "enter":
+            self._activate_structure(self._list_cursor)
+            sset.clear_marks()
+            self._list_focused = False
+            return True
+        if key == " ":
+            sset.toggle_mark(self._list_cursor)
+            return True
+        if key == "z":
+            sset.solo(self._list_cursor)
+            return True
+        if key == "h":
+            self._hide_toggle(self._list_cursor)
+            return True
+        if key == "o":
+            sset.overlay = not sset.overlay
+            return True
+        return False
 
     # -- save prompt ------------------------------------------------------
     def _default_save_path(self) -> str:

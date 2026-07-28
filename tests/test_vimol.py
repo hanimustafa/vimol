@@ -559,11 +559,12 @@ def test_viewer_draw_writes_bytes(tmp_path):
     assert b"\x1b_G" in data  # a graphics command was written
 
 
-def test_viewer_multi_frame_pill_and_cycling(tmp_path):
-    """Multi-frame files get a clickable "struc N/total" pill; clicking it,
-    pressing n/p, and pressing opt+up/down must all step the active frame."""
+def test_viewer_multi_frame_cycling_via_keys(tmp_path):
+    """Multi-frame files no longer show the old "struc N/total" status-bar
+    pill (design §2/§4.1: it becomes the structure-list strip's header);
+    n/p and opt+up/down still step the active structure by plain keys."""
     from vimol.viewer import Viewer
-    from vimol.input import KeyEvent, MouseEvent
+    from vimol.input import KeyEvent
 
     frames = [vimol.load(os.path.join(EX, "methane.xyz")),
               vimol.load(os.path.join(EX, "water.xyz")),
@@ -574,10 +575,7 @@ def test_viewer_multi_frame_pill_and_cycling(tmp_path):
         v._update_geometry()
 
         bar = v._status_bar()
-        assert "struc 1/3" in bar
-        assert v._frame_button_span is not None
-        row, col_start, col_end = v._frame_button_span
-        assert row == v._rows - 1
+        assert "struc" not in bar
 
         assert v._dispatch([KeyEvent("alt+down")]) is True
         assert v.frame_index == 1
@@ -585,18 +583,35 @@ def test_viewer_multi_frame_pill_and_cycling(tmp_path):
         assert v.frame_index == 0
         assert v._dispatch([KeyEvent("n")]) is True
         assert v.frame_index == 1
+    finally:
+        os.close(fd)
 
-        v._status_bar()  # refresh the span for the current terminal size
-        row, col_start, col_end = v._frame_button_span
-        click = MouseEvent("down", float(col_start), float(row), button=0)
+
+def test_viewer_multi_frame_click_row_switches_active(tmp_path):
+    """Clicking a structure-list row (design §4.2/§4.3) replaces the active
+    structure, mirroring what the retired status-bar pill used to do."""
+    from vimol.viewer import Viewer
+    from vimol.input import MouseEvent
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v._update_geometry()
+        v._draw_list()   # populate _list_row_spans for the current geometry
+        row0, col_start, _col_end = v._list_row_spans[2]   # third row -> benzene
+        click = MouseEvent("down", float(col_start), float(row0), button=0)
         assert v._dispatch([click]) is True
         assert v.frame_index == 2
     finally:
         os.close(fd)
 
 
-def test_viewer_single_frame_has_no_pill(tmp_path):
-    """A single-structure file shows no "struc" pill at all."""
+def test_viewer_single_frame_has_no_strip_or_list_zone(tmp_path):
+    """A single-structure file shows no list strip at all -- no columns
+    reserved, no "struc" pill, no list zone to swallow clicks."""
     from vimol.viewer import Viewer
 
     mol = vimol.load(os.path.join(EX, "methane.xyz"))
@@ -606,7 +621,8 @@ def test_viewer_single_frame_has_no_pill(tmp_path):
         v._update_geometry()
         bar = v._status_bar()
         assert "struc" not in bar
-        assert v._frame_button_span is None
+        assert v._list_w == 0
+        assert not v._in_list_zone(0)
     finally:
         os.close(fd)
 
@@ -774,5 +790,236 @@ def test_viewer_list_footer_blank_when_overlay_off(tmp_path):
         text = v._draw_list().decode("utf-8", "replace")
         assert "overlay" not in text
         assert "camera shared" in text
+    finally:
+        os.close(fd)
+
+
+# -- structure-list keymap: Tab focus, list-focused keys (design §4.3) -----
+
+def test_viewer_tab_toggles_list_focus(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        assert v._list_focused is False
+        assert v._dispatch([KeyEvent("tab")]) is True
+        assert v._list_focused is True
+        assert v._dispatch([KeyEvent("tab")]) is True
+        assert v._list_focused is False
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_digit_jumps_to_index_without_activating(tmp_path):
+    """1-9 while list-focused move the CURSOR, not the active structure
+    (design §4.3: 'j/k move a cursor without changing what is rendered')."""
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        assert v._dispatch([KeyEvent("3")]) is True
+        assert v._list_cursor == 2
+        assert v.frame_index == 0   # active structure unchanged
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_bracket_keys_cycle_active(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        assert v._dispatch([KeyEvent("]")]) is True
+        assert v.frame_index == 1
+        assert v._dispatch([KeyEvent("[")]) is True
+        assert v.frame_index == 0
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_space_marks_row(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        v._list_cursor = 1
+        assert v._dispatch([KeyEvent(" ")]) is True
+        assert v.structures[1].marked is True
+        assert v._dispatch([KeyEvent(" ")]) is True
+        assert v.structures[1].marked is False
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_z_solos_and_restores(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        v._list_cursor = 1
+        assert v._dispatch([KeyEvent("z")]) is True
+        assert [e.visible for e in v.structures] == [False, True, False]
+        assert v._dispatch([KeyEvent("z")]) is True
+        assert [e.visible for e in v.structures] == [True, True, True]
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_h_hides_but_refuses_to_hide_the_last_visible(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        v._list_cursor = 0
+        assert v._dispatch([KeyEvent("h")]) is True
+        assert v.structures[0].visible is False
+        assert v.frame_index == 0   # hiding the active structure does not advance it
+        v.structures.toggle_visible(1)
+        v.structures.toggle_visible(2)
+        # now [1, False, False] visible=[True? no]: bring 0 back so it's the
+        # ONLY visible one, then a second 'h' on it must be refused.
+        v.structures.toggle_visible(0)
+        assert [e.visible for e in v.structures] == [True, False, False]
+        v._list_cursor = 0
+        v._dispatch([KeyEvent("h")])
+        assert v.structures[0].visible is True
+        assert "at least one" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_o_toggles_overlay(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        assert v.structures.overlay is False
+        assert v._dispatch([KeyEvent("o")]) is True
+        assert v.structures.overlay is True
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_enter_activates_cursor_clears_marks_returns_focus(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        v.structures.toggle_mark(1)
+        v._list_cursor = 2
+        assert v._dispatch([KeyEvent("enter")]) is True
+        assert v.frame_index == 2
+        assert v.structures.marked == []
+        assert v._list_focused is False
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_escape_returns_focus_without_activating(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        v._list_cursor = 2
+        assert v._dispatch([KeyEvent("escape")]) is True
+        assert v._list_focused is False
+        assert v.frame_index == 0
+    finally:
+        os.close(fd)
+
+
+def test_viewer_opt_click_row_marks_and_enables_overlay(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import MouseEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._draw_list()
+        row0, col_start, _c1 = v._list_row_spans[1]
+        click = MouseEvent("down", float(col_start), float(row0), button=0, alt=True)
+        assert v._dispatch([click]) is True
+        assert v.structures[1].marked is True
+        assert v.structures.overlay is True
+        assert v.frame_index == 0   # active structure unchanged by opt+click
+    finally:
+        os.close(fd)
+
+
+def test_viewer_global_bindings_unaffected_when_list_not_focused(tmp_path):
+    """The pre-existing global 1-4 (representation), [/] (roll), h (orbit)
+    bindings must keep working exactly as before when the list isn't
+    focused (design §4.3: 'not one existing binding changes')."""
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        assert v._list_focused is False
+        assert v._dispatch([KeyEvent("2")]) is True
+        assert v.style.representation == "spacefill"
+        rot0 = v.widget.scene.camera.rotation.copy()
+        assert v._dispatch([KeyEvent("h")]) is True
+        assert not np.array_equal(v.widget.scene.camera.rotation, rot0)
+        # these must NOT have touched list state
+        assert v._list_cursor == 0
+        assert v.structures[0].visible is True
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_zone_drag_latch_never_reaches_viewport(tmp_path):
+    """A drag that starts on the strip must never reach the viewport, even
+    if it strays over the molecule mid-drag (design §4.2, mirrors
+    _status_zone_press)."""
+    from vimol.viewer import Viewer
+    from vimol.input import MouseEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._draw_list()
+        row0, col_start, _c1 = v._list_row_spans[0]
+        rot0 = v.widget.scene.camera.rotation.copy()
+        down = MouseEvent("down", float(col_start), float(row0), button=0)
+        v._dispatch([down])
+        # drag strays far to the right, well into the viewport's columns
+        drag = MouseEvent("drag", float(v._cols - 1), float(row0), button=0)
+        v._dispatch([drag])
+        assert np.array_equal(v.widget.scene.camera.rotation, rot0)
+    finally:
+        os.close(fd)
+
+
+def test_viewer_viewport_click_still_reaches_widget_past_the_strip(tmp_path):
+    """A click in the viewport's own columns (past the reserved strip) must
+    still reach the widget, offset by _img_origin_px (design §4.2)."""
+    from vimol.viewer import Viewer
+    from vimol.input import MouseEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        rot0 = v.widget.scene.camera.rotation.copy()
+        col = v._list_w + 5
+        down = MouseEvent("down", float(col), 5.0, button=0)
+        v._dispatch([down])
+        drag = MouseEvent("drag", float(col + 20), 5.0, button=0)
+        assert v._dispatch([drag]) is True
+        assert not np.array_equal(v.widget.scene.camera.rotation, rot0)
     finally:
         os.close(fd)
