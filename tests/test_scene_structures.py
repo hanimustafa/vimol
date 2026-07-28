@@ -139,3 +139,71 @@ def test_widget_highlight_maps_active_local_index_through_composite_offset():
     # which would be a bug if the mapping were skipped) was touched
     other = 1 if global_idx != 1 else 0
     assert np.allclose(cols[other], comp.base_colors[other])
+
+
+# -- flat shading (design §4.4/§4.5): CPU renderer -------------------------
+
+from vimol.render import Renderer, Style
+from vimol.camera import Camera
+
+
+def _flat_test_scene():
+    mol = Molecule(symbols=["C", "C"], positions=np.array([[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0]]))
+    style = Style(representation="spacefill", depth_cue=0.0,
+                  color_override=np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]),
+                  flat_mask=np.array([False, True]))
+    cam = Camera(center=np.zeros(3), extent=10.0)
+    cam.fit(240, 240, 10.0)
+    r = Renderer(240, 240)
+    return r.render(mol, cam, style)
+
+
+def test_flat_atom_renders_perfectly_uniform_color():
+    img = _flat_test_scene()
+    # atom1 (flat, blue) sits on the right half of the frame
+    blue_mask = (img[:, :, 2] > 150) & (img[:, :, 0] < 50)
+    assert blue_mask.sum() > 100
+    blue_pixels = img[blue_mask]
+    assert (blue_pixels == blue_pixels[0]).all()
+
+
+def test_shaded_atom_still_has_a_shading_gradient():
+    img = _flat_test_scene()
+    # atom0 (shaded, red) sits on the left half of the frame
+    red_mask = (img[:, :, 0] > 50) & (img[:, :, 2] < 50)
+    assert red_mask.sum() > 100
+    red_pixels = img[red_mask]
+    # NOT all identical -- diffuse/specular vary across the sphere's silhouette
+    assert not (red_pixels == red_pixels[0]).all()
+
+
+def test_flat_mask_none_is_byte_identical_to_no_flat_mask_field():
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    style_a = Style(representation="spacefill")
+    style_b = Style(representation="spacefill", flat_mask=None)
+    cam = Camera(center=np.zeros(3), extent=5.0)
+    cam.fit(80, 80, 5.0)
+    img_a = Renderer(80, 80).render(mol, cam, style_a)
+    img_b = Renderer(80, 80).render(mol, cam, style_b)
+    assert np.array_equal(img_a, img_b)
+
+
+def test_flat_bond_between_two_flat_atoms_renders_uniform_too():
+    """Bonds never span structures in the composite (design §4.5), so a
+    bond's flatness is unambiguous -- both endpoints flat -> the cylinder is
+    flat too, not partially shaded."""
+    mol = Molecule(symbols=["C", "C"], positions=np.array([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+    mol.add_bond(0, 1, 1)
+    style = Style(representation="ball_and_stick", depth_cue=0.0,
+                  color_override=np.array([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]),
+                  flat_mask=np.array([True, True]), bond_radius=0.3)
+    cam = Camera(center=np.zeros(3), extent=3.0)
+    cam.fit(120, 60, 3.0)
+    img = Renderer(120, 60).render(mol, cam, style)
+    # sample along the bond's midline (screen y == center row), away from
+    # the atom spheres themselves -- should be uniform green, no shading.
+    row = img[30, :, :]
+    green_cols = np.where((row[:, 1] > 100) & (row[:, 0] < 60))[0]
+    assert len(green_cols) > 5
+    pixels = row[green_cols]
+    assert (pixels == pixels[0]).all()

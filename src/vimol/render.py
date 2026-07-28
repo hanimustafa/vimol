@@ -191,7 +191,7 @@ class Renderer:
         shininess = style.shininess
         depth_cue = float(style.depth_cue)
 
-        def shade_write(sub_c, sub_z, win, depth, nx, ny, nz, albedo):
+        def shade_write(sub_c, sub_z, win, depth, nx, ny, nz, albedo, flat=False):
             """Shade a full bounding box and masked-write the winners.
 
             ``nx``/``ny``/``nz`` may be broadcastable pieces ((1,w), (h,1) or
@@ -203,7 +203,25 @@ class Renderer:
             far outweighing the extra arithmetic on masked-out pixels. Fog is
             folded into the diffuse/specular terms ((a*d+s)*m == a*(d*m)+s*m),
             saving a separate full-box multiply of the (h,w,3) color.
+
+            ``flat=True`` (design §4.4/§4.5 -- overlay colouring for
+            non-active structures) skips diffuse/fill/specular entirely and
+            writes ``albedo`` uniformly (still fogged): cheaper than the
+            shaded path, not more expensive, since it never touches nx/ny/nz.
             """
+            if flat:
+                if depth_cue > 0:
+                    fog = (depth - np.float32(zmin)) * np.float32(1.0 / zspan)
+                    np.maximum(fog, 0.0, out=fog)
+                    np.minimum(fog, 1.0, out=fog)
+                    fog *= depth_cue
+                    fog += 1.0 - depth_cue
+                    rgb = albedo * fog[..., None]
+                else:
+                    rgb = np.broadcast_to(albedo, depth.shape + (3,))
+                np.copyto(sub_c, rgb, where=win[..., None])
+                np.copyto(sub_z, depth, where=win)
+                return
             diff = nx * l0 + ny * l1 + nz * l2
             np.maximum(diff, 0.0, out=diff)
             dfill = nx * f0 + ny * f1 + nz * f2
@@ -233,6 +251,11 @@ class Renderer:
         inv_zoom = 1.0 / zoom
         order = np.argsort(sz)  # far to near so specular highlights aren't clobbered oddly
 
+        # Per-atom flat-shading flag (design §4.4/§4.5): overlay entries other
+        # than the active one render flat/tinted, no diffuse gradient. None
+        # (the default, and every single-structure render) costs nothing here.
+        atom_flat = np.asarray(style.flat_mask, dtype=bool) if style.flat_mask is not None else None
+
         # Per-primitive screen y-intervals, precomputed once so each band only
         # touches the primitives that actually reach its rows -- the python
         # per-primitive setup is GIL-serialized across bands, so handing every
@@ -249,6 +272,9 @@ class Renderer:
             srb = rb * zoom
             bond_ylo = np.minimum(sy[bi], sy[bj]) - srb
             bond_yhi = np.maximum(sy[bi], sy[bj]) + srb
+            # Bonds never span structures in the composite, so a bond's two
+            # endpoints always agree on flatness -- either endpoint's flag works.
+            bond_flat = atom_flat[bi] if atom_flat is not None else None
 
         def draw_band(y_lo: int, y_hi: int) -> None:
             """Raycast the band's primitives into rows [y_lo, y_hi).
@@ -267,7 +293,8 @@ class Renderer:
                     self._draw_cylinder_segment(
                         vpos[i], vpos[j], rb, base_colors[i], base_colors[j],
                         zoom, ox_s, oy_s, style, color, zbuf, shade_write,
-                        zmin, zspan, y_lo, y_hi)
+                        zmin, zspan, y_lo, y_hi,
+                        flat=bool(bond_flat[k]) if bond_flat is not None else False)
 
             # atoms drawn after bonds; z-buffer keeps whichever is nearer
             in_band = (atom_yhi[order] >= y_lo) & (atom_ylo[order] < y_hi)
@@ -315,7 +342,8 @@ class Renderer:
                 ny = (dyr * np.float32(-inv_zoom * inv_r))[:, None]
                 nz = hgt * np.float32(inv_r)
                 shade_write(color[y0:y1, x0:x1], sub_z, win, depth,
-                            nx, ny, nz, base_colors[a])
+                            nx, ny, nz, base_colors[a],
+                            flat=bool(atom_flat[a]) if atom_flat is not None else False)
 
             if has_arrows:
                 self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color,
@@ -386,11 +414,12 @@ class Renderer:
     # ------------------------------------------------------------------
     def _draw_cylinder_segment(self, a, b, radius, color_a, color_b, zoom, ox_s, oy_s,
                                style, color, zbuf, shade_write, zmin, zspan,
-                               y_lo=0, y_hi=None):
+                               y_lo=0, y_hi=None, flat=False):
         """Rasterize one capped-cylinder impostor from view-space *a* to *b*.
 
         Shared by real bonds (``_draw_bonds``, two atom colors split at the
-        midpoint) and arrow shafts (``_draw_arrow_shafts``, one uniform color).
+        midpoint) and arrow shafts (``_draw_arrow_shafts``, one uniform color,
+        always ``flat=False`` -- arrows are never flat, design §4.5).
         """
         W, H = self.width, self.height
         ax, ay, az = (float(v) for v in a)
@@ -458,7 +487,7 @@ class Renderer:
         # split color at midpoint
         albedo = np.where((t < np.float32(0.5 * L))[..., None], color_a, color_b)
         shade_write(color[y0:y1, x0:x1], sub_z, win, zview, nx, ny, nz,
-                    albedo.astype(np.float32, copy=False))
+                    albedo.astype(np.float32, copy=False), flat=flat)
 
     # ------------------------------------------------------------------
     def _draw_cone_segment(self, base, apex, radius, color_rgb, zoom, ox_s, oy_s,
