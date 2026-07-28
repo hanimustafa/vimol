@@ -790,6 +790,88 @@ def test_viewer_list_row_body_carries_no_atom_count(tmp_path):
         os.close(fd)
 
 
+def _traj_viewer(tmp_path, n=3, path="traj.xyz", fd_name="traj.bin"):
+    """A viewer whose structures all come from one multi-model file."""
+    from vimol.viewer import Viewer
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")) for _ in range(n)]
+    fd = os.open(str(tmp_path / fd_name), os.O_WRONLY | os.O_CREAT, 0o644)
+    v = Viewer(frames[0], frames=frames, source_path=path, fd_out=fd)
+    v._update_geometry()
+    return v, fd
+
+
+def test_viewer_list_groups_a_multi_model_file_under_one_header(tmp_path):
+    """A file contributing more than one structure shows its basename ONCE as
+    a group header, with its structures listed beneath as 'frame N' -- not the
+    filename repeated once per model (design §4.1)."""
+    v, fd = _traj_viewer(tmp_path, n=4)
+    try:
+        v._list_w = 40
+        text = v._draw_list().decode("utf-8", "replace")
+        assert text.count("traj.xyz") == 1        # the header, and only there
+        for k in range(1, 5):
+            assert f"frame {k}" in text
+        assert "traj.xyz#1" not in text
+        # only the structure rows are clickable; the header is not
+        assert len(v._list_row_spans) == 4
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_single_structure_files_get_no_group_header(tmp_path):
+    """A file contributing exactly one structure gets no header row -- just
+    its own row, labelled with the basename."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol_a = vimol.load(os.path.join(EX, "methane.xyz"))
+    mol_b = vimol.load(os.path.join(EX, "water.xyz"))
+    sset.append(mol_a, label="methane.xyz", path="/data/methane.xyz")
+    sset.append(mol_b, label="water.xyz", path="/data/water.xyz")
+    fd = os.open(str(tmp_path / "singles.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol_a, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 40
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "methane.xyz" in text and "water.xyz" in text
+        assert "frame " not in text
+        assert "/data/" not in text               # basenames only
+        assert len(v._list_row_spans) == 2
+        # two rows, two structures, and no group header anywhere
+        rows = v._list_display_rows()
+        assert [kind for kind, _i, _t in rows] == ["struct", "struct"]
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_group_header_row_is_not_selectable(tmp_path):
+    """Clicking a group header must not activate a structure or crash, and
+    the row->structure mapping must survive the extra display row."""
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=3)
+    try:
+        v._draw_list()
+        rows = v._list_display_rows()
+        assert rows[0][0] == "group"
+        header_row = v._list_row_spans[0][0] - 1   # sits above the first frame
+        assert v._list_index_at_row(header_row) is None
+        click = MouseEvent("down", 0.0, float(header_row), button=0)
+        v._dispatch([click])               # must not raise
+        assert v.frame_index == 0
+
+        # a click on the LAST structure row still lands on structure 2
+        row0, col_start, _c1 = v._list_row_spans[2]
+        assert v._list_index_at_row(row0) == 2
+        assert v._dispatch([MouseEvent("down", float(col_start), float(row0),
+                                       button=0)]) is True
+        assert v.frame_index == 2
+    finally:
+        os.close(fd)
+
+
 def test_viewer_list_truncates_long_labels_keeping_extension(tmp_path):
     v, fd = _multi_viewer(tmp_path)
     try:

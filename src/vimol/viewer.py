@@ -296,9 +296,12 @@ class Viewer:
         self._list_w = 0
         self._img_origin_px = (0, 0)
         self._list_focused = False
-        # (screen_row, col_start, col_end) per structure index, refreshed by
-        # every _draw_list() call; used for click hit-testing.
+        # (screen_row, col_start, col_end) per DRAWN structure row, refreshed
+        # by every _draw_list() call and used for click hit-testing, with
+        # _list_row_struct[k] the structure index row k belongs to (group
+        # headers and off-screen rows appear in neither).
         self._list_row_spans: List[Tuple[int, int, int]] = []
+        self._list_row_struct: List[int] = []
         # the row cursor: distinct from active_index (design §4.3) so
         # j/k/1-9/space/z/h have an unambiguous target while list-focused.
         self._list_cursor = self.structures.active_index
@@ -495,11 +498,69 @@ class Viewer:
         return self._list_w > 0 and col < self._list_w
 
     def _list_index_at_row(self, row: int) -> Optional[int]:
-        """The structure index whose row was drawn at screen *row*, else None."""
-        for i, (r0, _c0, _c1) in enumerate(self._list_row_spans):
+        """The structure index whose row was drawn at screen *row*, else None.
+
+        Group headers and the header/separator/legend rows own no structure,
+        so they answer None -- a click on them is inert. The mapping is the
+        one _draw_list actually emitted (_list_row_struct), never row
+        arithmetic redone here: with group headers and a scroll offset in
+        play, recomputing it is exactly how the two silently drift apart."""
+        for k, (r0, _c0, _c1) in enumerate(self._list_row_spans):
             if r0 == row:
-                return i
+                return self._list_row_struct[k]
         return None
+
+    def _list_group_key(self, i: int):
+        """What decides whether structure *i* shares a file with its
+        neighbours: the source path, or -- for in-memory structures with no
+        path -- the '<stem>#k' label prefix the multi-model loader assigns."""
+        entry = self.structures[i]
+        if entry.path is not None:
+            return ("path", entry.path)
+        if "#" in entry.label:
+            return ("label", entry.label.rsplit("#", 1)[0])
+        return ("index", i)          # nothing it could be grouped with
+
+    def _list_group_name(self, i: int, grouped: bool) -> str:
+        """The display name for structure *i*'s file: its basename, or the
+        '<stem>#k' label's stem when there is no path. A structure that is
+        alone in its group and has no path keeps its full label -- the label
+        is what identifies it, and nothing else on the strip repeats it."""
+        entry = self.structures[i]
+        if entry.path is not None:
+            return os.path.basename(entry.path) or entry.path
+        if grouped and "#" in entry.label:
+            return entry.label.rsplit("#", 1)[0]
+        return entry.label
+
+    def _list_display_rows(self) -> List[Tuple[str, Optional[int], str]]:
+        """The strip's rows, top to bottom, as ``(kind, structure_index,
+        text)`` -- the one place display rows and structure indices are
+        related (design §4.1).
+
+        A file contributing several structures becomes a non-selectable
+        ``("group", None, basename)`` header followed by one
+        ``("struct", i, "frame k")`` row per model, so a 100-frame trajectory
+        names its file once instead of a hundred times. A file contributing a
+        single structure is just its own ``("struct", i, basename)`` row, with
+        no header. Runs are consecutive: structures load in file order, and
+        grouping across a gap would reorder the strip behind the user's back.
+        """
+        rows: List[Tuple[str, Optional[int], str]] = []
+        n = len(self.structures)
+        i = 0
+        while i < n:
+            key = self._list_group_key(i)
+            j = i + 1
+            while j < n and self._list_group_key(j) == key:
+                j += 1
+            if j - i > 1:
+                rows.append(("group", None, self._list_group_name(i, True)))
+                rows.extend(("struct", m, f"frame {m - i + 1}") for m in range(i, j))
+            else:
+                rows.append(("struct", i, self._list_group_name(i, False)))
+            i = j
+        return rows
 
     @staticmethod
     def _truncate_middle(s: str, width: int) -> str:
@@ -524,30 +585,44 @@ class Viewer:
         list_w = self._list_w
         sset = self.structures
         self._list_row_spans = []
+        self._list_row_struct = []
         max_row = max(self._rows - 1, 0)   # never draw over the status bar
 
-        def put(row0: int, s: str) -> None:
+        def put(row0: int, s: str) -> bool:
+            """Emit one strip row; False when it fell off the bottom.
+
+            Callers register click spans only for rows this returned True
+            for, so what the hit test believes was drawn and what actually
+            reached the terminal can never disagree."""
             if row0 >= max_row:
-                return
+                return False
             out.extend(b"\x1b[%d;1H" % (row0 + 1))
             out.extend(s.encode("utf-8", "replace"))
             out.extend(b"\x1b[0m")
+            return True
 
         header = f" STRUCTURES {len(sset)}"
         put(0, f"\x1b[1m{header.ljust(list_w)[:list_w]}\x1b[22m")
 
+        rows = self._list_display_rows()
         fixed = 1 + 2 + 1 + 1 + 1           # leader+idx+sp+swatch+sp
         label_w = max(1, list_w - fixed)
-        for i, entry in enumerate(sset):
-            row0 = 1 + i
-            if row0 >= max_row:
-                break
+        drawn_rows = 0
+        for n_row, (kind, i, text) in enumerate(rows):
+            row0 = 1 + n_row
+            if kind == "group":
+                name = self._truncate_middle(text, max(1, list_w - 1))
+                if not put(row0, f"\x1b[2m {name}\x1b[22m"):
+                    break
+                drawn_rows += 1
+                continue
+            entry = sset[i]
             leader = "▸" if i == sset.active_index else ("✓" if entry.marked else " ")
             idx_s = f"{i + 1:>2}"
             r, g, b = (int(max(0.0, min(1.0, c)) * 255) for c in entry.tint)
             swatch_char = "●" if entry.visible else "○"
             swatch = f"\x1b[38;2;{r};{g};{b}m{swatch_char}\x1b[0m"
-            label = self._truncate_middle(entry.label, label_w).ljust(label_w)
+            label = self._truncate_middle(text, label_w).ljust(label_w)
             body = f"{leader}{idx_s} {swatch} {label}"
             # active row: tint-coloured text; cursor row: reverse-style
             # background -- distinct so the two can be told apart when they
@@ -556,10 +631,13 @@ class Viewer:
             dim = "\x1b[2m" if not entry.visible else ""
             cursor_bg = (f"\x1b[48;2;{_LIST_CURSOR_BG[0]};{_LIST_CURSOR_BG[1]};{_LIST_CURSOR_BG[2]}m"
                         if i == self._list_cursor else "")
-            put(row0, f"{cursor_bg}{dim}{text_fg}{body}")
+            if not put(row0, f"{cursor_bg}{dim}{text_fg}{body}"):
+                break
+            drawn_rows += 1
             self._list_row_spans.append((row0, 0, list_w))
+            self._list_row_struct.append(i)
 
-        sep_row = 1 + len(sset)
+        sep_row = 1 + drawn_rows
         put(sep_row, "─" * list_w)
         if sset.overlay:
             drawn = sset.drawn_indices()

@@ -443,6 +443,30 @@ image — so it costs nothing to render and never touches the renderer.
 *(Rows carry no atom count: the number is noise next to the label, and the
 strip is narrow enough that the label needs every column it can get.)*
 
+**Structures are grouped by source file.** A file contributing more than one
+structure gets a non-selectable header row naming it once, with its models
+listed beneath as `frame 1`, `frame 2`, …; a file contributing exactly one
+gets no header, just its own row labelled with the basename. Otherwise a
+100-frame trajectory repeats its filename a hundred times.
+
+```
+ STRUCTURES 4
+ traj.xyz
+ 1 █ frame 1
+ 2 █ frame 2
+ 3 █ frame 3
+ 4 █ apo.pdb        <- a second file, alone, so no header of its own
+```
+
+`Viewer._list_display_rows()` is the *only* place display rows and structure
+indices are related: it returns `(kind, structure_index, text)` per row, and
+`_draw_list` registers a click span (plus its structure index in
+`_list_row_struct`) only for the rows it actually emitted. Keys, marks and
+`1`–`9` address **structures**, never display rows; group headers own no
+structure, so clicking one is inert. Grouping runs over *consecutive*
+structures — they load in file order, and grouping across a gap would reorder
+the strip behind the user's back.
+
 - `▸` marks the active row (also reverse-video); `●` is the tint swatch in the
   structure's own truecolor RGB, `○` when hidden; the whole row dims when
   `visible` is False. A `✓` prefix replaces the space for marked rows.
