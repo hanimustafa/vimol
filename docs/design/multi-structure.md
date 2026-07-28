@@ -432,13 +432,16 @@ image — so it costs nothing to render and never touches the renderer.
 
 ```
  STRUCTURES 3
-▸1 ● apo.pdb      1462
- 2 ● holo.pdb     1519
- 3 ○ mutant.pdb   1460
+▸1 ● apo.pdb
+ 2 ● holo.pdb
+ 3 ○ mutant.pdb
  ────────────────────
  overlay 1+2 · aligned
  camera shared
 ```
+
+*(Rows carry no atom count: the number is noise next to the label, and the
+strip is narrow enough that the label needs every column it can get.)*
 
 - `▸` marks the active row (also reverse-video); `●` is the tint swatch in the
   structure's own truecolor RGB, `○` when hidden; the whole row dims when

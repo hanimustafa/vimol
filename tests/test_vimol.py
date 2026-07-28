@@ -754,7 +754,7 @@ def _multi_viewer(tmp_path, fd_name="out.bin", **kw):
     return v, fd
 
 
-def test_viewer_list_shows_header_rows_and_atom_counts(tmp_path):
+def test_viewer_list_shows_header_and_one_row_per_structure(tmp_path):
     v, fd = _multi_viewer(tmp_path)
     try:
         v._list_w = 40   # wide enough that labels aren't middle-truncated
@@ -762,8 +762,30 @@ def test_viewer_list_shows_header_rows_and_atom_counts(tmp_path):
         assert "STRUCTURES 3" in text
         for entry in v.structures:
             assert entry.label in text
-            assert str(entry.molecule.n_atoms) in text
         assert len(v._list_row_spans) == 3
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_row_body_carries_no_atom_count(tmp_path):
+    """The atom-count column is gone from the row body (its width goes to
+    the label instead) -- a 60-atom structure's row must not show '60'."""
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "c60.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz"))]
+    fd = os.open(str(tmp_path / "counts.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v._update_geometry()
+        # the label itself would otherwise contribute the digits we look for
+        v.structures[1].label = "buckyball"
+        v._list_w = 40
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "buckyball" in text
+        assert str(frames[1].n_atoms) == "60"
+        assert "60" not in text
     finally:
         os.close(fd)
 

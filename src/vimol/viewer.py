@@ -536,8 +536,7 @@ class Viewer:
         header = f" STRUCTURES {len(sset)}"
         put(0, f"\x1b[1m{header.ljust(list_w)[:list_w]}\x1b[22m")
 
-        count_w = 5
-        fixed = 1 + 2 + 1 + 1 + 1 + count_w   # leader+idx+sp+swatch+sp+sp+count
+        fixed = 1 + 2 + 1 + 1 + 1           # leader+idx+sp+swatch+sp
         label_w = max(1, list_w - fixed)
         for i, entry in enumerate(sset):
             row0 = 1 + i
@@ -549,8 +548,7 @@ class Viewer:
             swatch_char = "●" if entry.visible else "○"
             swatch = f"\x1b[38;2;{r};{g};{b}m{swatch_char}\x1b[0m"
             label = self._truncate_middle(entry.label, label_w).ljust(label_w)
-            count_s = str(entry.molecule.n_atoms).rjust(count_w)
-            body = f"{leader}{idx_s} {swatch} {label} {count_s}"
+            body = f"{leader}{idx_s} {swatch} {label}"
             # active row: tint-coloured text; cursor row: reverse-style
             # background -- distinct so the two can be told apart when they
             # differ (design §4.3).
