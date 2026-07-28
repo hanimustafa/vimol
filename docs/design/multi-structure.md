@@ -492,7 +492,9 @@ says there is more above/below.
   stay tellable apart on the rows where they differ.
 - **marked row** — the label in the structure's own tint. Marks still have to
   be visible once `✓` is gone, and colour already identifies a structure
-  everywhere else (§4.4).
+  everywhere else (§4.4). The tint outranks the active row's near-white
+  label: `space` on the active row must change something on screen, and the
+  background already says which row is active.
 - **swatch** — `█` in the structure's truecolor tint, `░` and dimmed when
   hidden (the whole row dims). **index** — 1-based, in a grey dimmer than the
   label.

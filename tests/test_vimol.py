@@ -848,6 +848,49 @@ def test_viewer_list_single_structure_files_get_no_group_header(tmp_path):
         os.close(fd)
 
 
+def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
+    """A grouped file followed by a lone one: the offset between display rows
+    and structure indices CHANGES partway down the list, which is exactly
+    where row arithmetic drifts. Clicks and 1-9 must still address
+    structures."""
+    from vimol.input import KeyEvent, MouseEvent
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    other = vimol.load(os.path.join(EX, "water.xyz"))
+    sset = StructureSet()
+    for k in range(3):
+        sset.append(mol, label=f"traj.xyz#{k + 1}", path="/d/traj.xyz")
+    sset.append(other, label="apo.pdb", path="/d/apo.pdb")
+    fd = os.open(str(tmp_path / "mixed.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        rows = v._list_display_rows()
+        assert [kind for kind, _i, _t in rows] == [
+            "group", "struct", "struct", "struct", "struct"]
+        assert rows[-1][1:] == (3, "apo.pdb")     # lone file: no 'frame 4'
+        assert rows[1][2] == "frame 1"
+
+        v._draw_list()
+        assert v._list_row_struct == [0, 1, 2, 3]
+        row0, col_start, _c1 = v._list_row_spans[3]
+        assert v._list_index_at_row(row0) == 3
+        assert v._dispatch([MouseEvent("down", float(col_start), float(row0),
+                                       button=0)]) is True
+        assert v.frame_index == 3
+
+        # 1-9 addresses structures, not display rows
+        v._list_focused = True
+        assert v._dispatch([KeyEvent("3")]) is True
+        assert v._list_cursor == 2
+        v._draw_list()
+        assert 2 in v._list_row_struct
+    finally:
+        os.close(fd)
+
+
 def test_viewer_list_group_header_row_is_not_selectable(tmp_path):
     """Clicking a group header must not activate a structure or crash, and
     the row->structure mapping must survive the extra display row."""
@@ -1044,6 +1087,16 @@ def test_viewer_list_marked_row_is_shown_in_its_tint(tmp_path):
         v.structures.toggle_mark(2)
         rows = _strip_rows(v)
         assert rows[row_i].count(_sgr_fg(tint)) == 2        # swatch AND label
+
+        # The tint beats the active row's near-white label: 'space' on the
+        # active row must produce a VISIBLE change, and the full-width
+        # background still says which row is active.
+        v.structures.set_active(2)
+        rows = _strip_rows(v)
+        active = rows[v._list_row_spans[2][0]]
+        assert _sgr_bg((37, 45, 64)) in active
+        assert active.count(_sgr_fg(tint)) == 2
+        assert _sgr_fg((232, 236, 244)) not in active
     finally:
         os.close(fd)
 

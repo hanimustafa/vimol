@@ -759,6 +759,9 @@ class Viewer:
             bg = (_LIST_ACTIVE_BG if active
                   else _LIST_CURSOR_BG if i == self._list_cursor else None)
             dim = "\x1b[2m" if not entry.visible else ""
+            # The tint outranks the active row's near-white label: pressing
+            # 'space' on the active row has to change something on screen,
+            # and the background is already saying which row is active.
             label_fg = (self._sgr_fg(tint) if entry.marked
                         else self._sgr_fg(_LIST_LABEL_FG if active else _LIST_DIM_FG))
             segs = [
