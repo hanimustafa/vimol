@@ -54,6 +54,14 @@ _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 # field -- see _status_bar for why this must be constant, not just capped.
 _LEFT_WIDTH = 24
 
+# Structure-list strip width, in columns (design §4.1): a fifth of the
+# terminal, clamped so it's never cramped nor a runaway hog on a wide one.
+_LIST_W_MIN = 18
+_LIST_W_MAX = 28
+
+# Structure-list strip colors (design §4.1).
+_LIST_CURSOR_BG = (55, 62, 82)      # cursor-row highlight background
+
 _HELP_HEAD = [
     "  vimol — terminal molecular viewer",
     "",
@@ -289,6 +297,22 @@ class Viewer:
         self._cell_px = None                 # exact (cw, ch) from the terminal, if it answered
         self._old_termios = None
         self._geometry_established = False   # True once the real (not placeholder) size is known
+        # structure-list strip (design §4): column width (0 -- no strip --
+        # unless len(structures) > 1), the image's placement origin once the
+        # strip reserves columns on its left, and the keyboard-focus state.
+        self._list_w = 0
+        self._img_origin_px = (0, 0)
+        self._list_focused = False
+        # (screen_row, col_start, col_end) per structure index, refreshed by
+        # every _draw_list() call; used for click hit-testing.
+        self._list_row_spans: List[Tuple[int, int, int]] = []
+        # the row cursor: distinct from active_index (design §4.3) so
+        # j/k/1-9/space/z/h have an unambiguous target while list-focused.
+        self._list_cursor = self.structures.active_index
+        # True from a mouse-down that landed on the strip until the matching
+        # up -- mirrors _status_zone_press so a drag started on the strip
+        # never reaches the viewport.
+        self._list_zone_press = False
         # True while WE own a pushed OSC-22 pointer shape (delete's crosshair,
         # measure's cell). Pushes and pops must pair exactly: an unbalanced pop
         # would clobber a shape pushed by something outside vimol (tmux, the
@@ -466,6 +490,98 @@ class Viewer:
                 pass
 
     # -- geometry ---------------------------------------------------------
+    def _list_width(self) -> int:
+        """Column width of the structure-list strip (design §4.1); 0 (no
+        strip) unless more than one structure is loaded."""
+        if len(self.structures) <= 1:
+            return 0
+        return min(_LIST_W_MAX, max(_LIST_W_MIN, self._cols // 5))
+
+    def _in_list_zone(self, col: int) -> bool:
+        """True for any column inside the structure-list strip -- the
+        horizontal twin of _in_status_zone (design §4.2)."""
+        return self._list_w > 0 and col < self._list_w
+
+    def _list_index_at_row(self, row: int) -> Optional[int]:
+        """The structure index whose row was drawn at screen *row*, else None."""
+        for i, (r0, _c0, _c1) in enumerate(self._list_row_spans):
+            if r0 == row:
+                return i
+        return None
+
+    @staticmethod
+    def _truncate_middle(s: str, width: int) -> str:
+        """Middle-truncate *s* to *width* visible columns, keeping the file
+        extension legible (design §4.1) -- 'traj_2024_long.xyz' -> 'tra….xyz'."""
+        if width <= 0:
+            return ""
+        if len(s) <= width:
+            return s
+        if width == 1:
+            return "…"
+        left = (width - 1 + 1) // 2
+        right = width - 1 - left
+        return s[:left] + "…" + (s[-right:] if right else "")
+
+    def _draw_list(self) -> bytes:
+        """Render the structure-list strip (design §4.1): ANSI text written
+        straight into terminal cells, the same technique as the periodic-
+        table/geometry pickers -- costs nothing to render and never touches
+        the Kitty image."""
+        out = bytearray()
+        list_w = self._list_w
+        sset = self.structures
+        self._list_row_spans = []
+        max_row = max(self._rows - 1, 0)   # never draw over the status bar
+
+        def put(row0: int, s: str) -> None:
+            if row0 >= max_row:
+                return
+            out.extend(b"\x1b[%d;1H" % (row0 + 1))
+            out.extend(s.encode("utf-8", "replace"))
+            out.extend(b"\x1b[0m")
+
+        header = f" STRUCTURES {len(sset)}"
+        put(0, f"\x1b[1m{header.ljust(list_w)[:list_w]}\x1b[22m")
+
+        count_w = 5
+        fixed = 1 + 2 + 1 + 1 + 1 + count_w   # leader+idx+sp+swatch+sp+sp+count
+        label_w = max(1, list_w - fixed)
+        for i, entry in enumerate(sset):
+            row0 = 1 + i
+            if row0 >= max_row:
+                break
+            leader = "▸" if i == sset.active_index else ("✓" if entry.marked else " ")
+            idx_s = f"{i + 1:>2}"
+            r, g, b = (int(max(0.0, min(1.0, c)) * 255) for c in entry.tint)
+            swatch_char = "●" if entry.visible else "○"
+            swatch = f"\x1b[38;2;{r};{g};{b}m{swatch_char}\x1b[0m"
+            label = self._truncate_middle(entry.label, label_w).ljust(label_w)
+            count_s = str(entry.molecule.n_atoms).rjust(count_w)
+            body = f"{leader}{idx_s} {swatch} {label} {count_s}"
+            # active row: tint-coloured text; cursor row: reverse-style
+            # background -- distinct so the two can be told apart when they
+            # differ (design §4.3).
+            text_fg = f"\x1b[38;2;{r};{g};{b}m" if i == sset.active_index else ""
+            dim = "\x1b[2m" if not entry.visible else ""
+            cursor_bg = (f"\x1b[48;2;{_LIST_CURSOR_BG[0]};{_LIST_CURSOR_BG[1]};{_LIST_CURSOR_BG[2]}m"
+                        if i == self._list_cursor else "")
+            put(row0, f"{cursor_bg}{dim}{text_fg}{body}")
+            self._list_row_spans.append((row0, 0, list_w))
+
+        sep_row = 1 + len(sset)
+        put(sep_row, "─" * list_w)
+        if sset.overlay:
+            drawn = sset.drawn_indices()
+            membership = "+".join(str(i + 1) for i in drawn)
+            aligned = any(not sset[i].transform.is_identity for i in drawn)
+            footer1 = f" overlay {membership}" + (" · aligned" if aligned else "")
+        else:
+            footer1 = ""
+        put(sep_row + 1, footer1.ljust(list_w)[:list_w])
+        put(sep_row + 2, " camera shared".ljust(list_w)[:list_w])
+        return bytes(out)
+
     def _update_geometry(self) -> bool:
         cols, rows, xpx, ypx = kitty.terminal_size_px(self.fd_out)
         # Prefer the terminal's authoritative cell size (queried once at enter);
@@ -475,8 +591,11 @@ class Viewer:
         self._cols, self._rows = cols, rows
         self.widget.set_cell_metrics(cw, ch)
         if changed:
+            list_w = self._list_width()
+            self._list_w = list_w
             self._img_rows = max(rows - 1, 1)   # reserve one row for status
-            self._img_cols = cols
+            self._img_cols = cols - list_w
+            self._img_origin_px = (list_w * cw, 0)
             w = int(self._img_cols * cw)
             h = int(self._img_rows * ch)
             # The widget was built at a 320x240 placeholder (the real terminal
@@ -684,7 +803,13 @@ class Viewer:
                                   compress_level=1 if interacting else 6)
         t_encode = time.perf_counter()
         out = bytearray()
-        out += _HOME + data
+        # The image is placed at the strip's right edge (col list_w+1, row 1)
+        # instead of the home position -- with no strip (_list_w == 0) this
+        # is exactly _HOME, so single-structure placement is unchanged.
+        out += b"\x1b[1;%dH" % (self._list_w + 1)
+        out += data
+        if self._list_w:
+            out += self._draw_list()
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)

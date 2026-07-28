@@ -669,3 +669,110 @@ def test_viewer_cycle_frame_preserves_the_whole_structure_set(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# -- structure list strip (design §4) --------------------------------------
+
+def test_viewer_reserves_list_columns_when_multi_structure(tmp_path):
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v._update_geometry()
+        assert v._cols == 80  # environment default, no COLUMNS/LINES set
+        list_w = min(28, max(18, v._cols // 5))
+        assert v._img_cols == v._cols - list_w
+        assert v._img_origin_px == (list_w * 9.0, 0)
+    finally:
+        os.close(fd)
+
+
+def test_viewer_single_structure_reserves_no_list_columns(tmp_path):
+    from vimol.viewer import Viewer
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        v._update_geometry()
+        assert v._img_cols == v._cols
+        assert v._img_origin_px == (0, 0)
+    finally:
+        os.close(fd)
+
+
+def _multi_viewer(tmp_path, fd_name="out.bin", **kw):
+    from vimol.viewer import Viewer
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / fd_name), os.O_WRONLY | os.O_CREAT, 0o644)
+    v = Viewer(frames[0], frames=frames, fd_out=fd, **kw)
+    v._update_geometry()
+    return v, fd
+
+
+def test_viewer_list_shows_header_rows_and_atom_counts(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_w = 40   # wide enough that labels aren't middle-truncated
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "STRUCTURES 3" in text
+        for entry in v.structures:
+            assert entry.label in text
+            assert str(entry.molecule.n_atoms) in text
+        assert len(v._list_row_spans) == 3
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_truncates_long_labels_keeping_extension(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.structures[0].label = "a_very_long_trajectory_name_here.xyz#1"
+        v._list_w = 18
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "…" in text
+        assert "z#1" in text   # the tail (extension/frame suffix) stays legible (design §4.1)
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_active_and_marked_row_markers(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.structures.toggle_mark(2)
+        text = v._draw_list()
+        lines = text.decode("utf-8", "replace").split("\x1b[H")
+        # crude check: the active row (index 0) leads with the pointer glyph,
+        # somewhere in the byte stream near its row
+        assert "▸" in text.decode("utf-8", "replace")   # ▸ active marker
+        assert "✓" in text.decode("utf-8", "replace")   # ✓ marked row
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_footer_overlay_and_camera_shared(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.structures.overlay = True
+        v.structures.toggle_mark(2)
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "overlay 1+3" in text
+        assert "camera shared" in text
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_footer_blank_when_overlay_off(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "overlay" not in text
+        assert "camera shared" in text
+    finally:
+        os.close(fd)
