@@ -611,5 +611,61 @@ def test_viewer_single_frame_has_no_pill(tmp_path):
         os.close(fd)
 
 
+def test_viewer_multi_model_file_gets_hash_k_labels(tmp_path):
+    """A multi-model file collapses to one StructureSet entry per model,
+    labelled '<basename>#k', 1-based (design §1, §2)."""
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, source_path="traj.xyz", fd_out=fd)
+        assert v.structures.labels == ["traj.xyz#1", "traj.xyz#2", "traj.xyz#3"]
+        assert len(v.structures) == 3
+    finally:
+        os.close(fd)
+
+
+def test_viewer_frame_index_setter_refreshes_widget(tmp_path):
+    """`viewer.frame_index = idx` (app.py's --frame path) must actually swap
+    what the widget renders -- not just update a number nobody reads."""
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v.frame_index = 2
+        assert v.frame_index == 2
+        assert v.widget.molecule is v.structures[2].molecule
+        assert v.widget.scene.molecule is v.structures[2].molecule
+    finally:
+        os.close(fd)
+
+
+def test_viewer_cycle_frame_preserves_the_whole_structure_set(tmp_path):
+    """Cycling frames must NOT collapse the StructureSet down to one entry --
+    that was Scene.set_molecule's old job, which the design redefines as
+    'replace with a single entry' specifically so cycling must avoid it."""
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")),
+              vimol.load(os.path.join(EX, "water.xyz")),
+              vimol.load(os.path.join(EX, "benzene.xyz"))]
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, fd_out=fd)
+        v._cycle_frame(1)
+        assert len(v.structures) == 3
+        assert v.frame_index == 1
+        assert v.widget.molecule is v.structures[1].molecule
+    finally:
+        os.close(fd)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

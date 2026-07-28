@@ -19,13 +19,14 @@ this class.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import numpy as np
 
 from .molecule import Molecule, VectorField
 from .render import Style, _atom_radii
 from .scene import Scene
+from .structures import StructureSet
 from .input import MouseEvent, KeyEvent, Event
 from . import editor
 
@@ -45,7 +46,7 @@ _CLEANUP_SETTLED = 1e-3
 
 
 class MoleculeWidget:
-    def __init__(self, molecule: Molecule, width: int = 320, height: int = 240,
+    def __init__(self, molecule: Union[Molecule, StructureSet], width: int = 320, height: int = 240,
                  style: Optional[Style] = None, supersample: int = 1,
                  picking: bool = True, backend: str = "auto", editable: bool = False):
         self.style = style or Style()
@@ -91,9 +92,33 @@ class MoleculeWidget:
         return self.scene.molecule
 
     def set_molecule(self, molecule: Molecule) -> None:
+        """Replace the WHOLE StructureSet with a single new entry.
+
+        For a multi-structure session, prefer :meth:`refresh_active` (driven
+        by ``StructureSet.set_active``/``cycle_active``) -- this method
+        discards every other loaded structure, by design (see
+        ``Scene.set_molecule``'s docstring).
+        """
         rot = self.scene.camera.rotation.copy()
         self.scene.set_molecule(molecule)
         self.scene.camera.rotation = rot
+        self._reset_editor_state()
+
+    def refresh_active(self) -> None:
+        """Re-fit and redraw after the active structure changed via
+        ``StructureSet.set_active``/``cycle_active`` (``Viewer.frame_index``,
+        the structure-list strip) -- unlike :meth:`set_molecule`, the rest of
+        the StructureSet is preserved.
+        """
+        rot = self.scene.camera.rotation.copy()
+        self.scene.fit()
+        self.scene.camera.rotation = rot
+        self._reset_editor_state()
+
+    def _reset_editor_state(self) -> None:
+        """Shared by set_molecule/refresh_active: drop everything that
+        indexes into (or caches) the molecule that was just switched away
+        from."""
         self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self.measure_sel = []                   # stale indices into the old molecule

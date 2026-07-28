@@ -19,6 +19,7 @@ from .molecule import Molecule
 from .render import Style
 from .widget import MoleculeWidget, REPRESENTATIONS
 from .bonds import ensure_bonds
+from .structures import StructureSet
 from . import editor
 from . import kitty
 from . import input as _input
@@ -165,13 +166,23 @@ class Viewer:
                  autospin: bool = False, target_fps: float = 120.0, picking: bool = True,
                  transparent: bool = True, backend: str = "auto",
                  source_path: Optional[str] = None, editable: bool = False,
-                 probe: Optional[kitty.TerminalProbe] = None):
-        self.frames = frames or [molecule]
+                 probe: Optional[kitty.TerminalProbe] = None,
+                 structures: Optional[StructureSet] = None):
         self.source_path = source_path
         self.editable = editable
-        for m in self.frames:
-            ensure_bonds(m)
-        self.frame_index = 0
+        if structures is not None:
+            self.structures = structures
+        else:
+            frame_list = frames or [molecule]
+            for m in frame_list:
+                ensure_bonds(m)
+            self.structures = StructureSet()
+            basename = os.path.basename(source_path) if source_path else None
+            multi = len(frame_list) > 1
+            for i, m in enumerate(frame_list):
+                stem = basename or (m.name or "structure")
+                label = f"{stem}#{i + 1}" if multi else stem
+                self.structures.append(m, label=label, path=source_path)
         self.style = style or Style()
         if style is None:
             # default to a terminal-matching transparent background
@@ -181,7 +192,7 @@ class Viewer:
         self.autospin = autospin
         self.target_fps = target_fps
 
-        self.widget = MoleculeWidget(self.frames[0], 320, 240, style=self.style,
+        self.widget = MoleculeWidget(self.structures, 320, 240, style=self.style,
                                      supersample=1, picking=picking, backend=backend,
                                      editable=editable)
         # Editing keys ('a' append, 's' save, 'u' undo, 'o' autospin) are only
@@ -283,6 +294,20 @@ class Viewer:
         # would clobber a shape pushed by something outside vimol (tmux, the
         # hosting app), and an unbalanced push leaks ours onto their stack.
         self._pointer_pushed = False
+
+    # -- files x frames: one axis, backed by self.structures (design §2) ---
+    @property
+    def frames(self) -> List[Molecule]:      # deprecated; use .structures
+        return self.structures.molecules
+
+    @property
+    def frame_index(self) -> int:
+        return self.structures.active_index
+
+    @frame_index.setter
+    def frame_index(self, i: int) -> None:
+        self.structures.set_active(i)
+        self.widget.refresh_active()
 
     # -- pointer shape (OSC 22 push/pop stack) -----------------------------
     def _push_pointer(self, shape: str) -> None:
@@ -1422,9 +1447,15 @@ class Viewer:
         return True
 
     def _cycle_frame(self, step: int) -> None:
-        """Advance the active structure by *step* (wrapping); redraw it."""
-        self.frame_index = (self.frame_index + step) % len(self.frames)
-        self.widget.set_molecule(self.frames[self.frame_index])
+        """Advance the active structure by *step* (wrapping); redraw it.
+
+        Goes through StructureSet.cycle_active + widget.refresh_active, NOT
+        widget.set_molecule -- set_molecule is redefined (design §3) as
+        "replace the set with a single entry", which would silently discard
+        every other loaded structure on the first press of 'n'.
+        """
+        self.structures.cycle_active(step)
+        self.widget.refresh_active()
         self._last_interact = time.time()
 
     # -- save prompt ------------------------------------------------------
