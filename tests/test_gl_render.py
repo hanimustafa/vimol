@@ -258,5 +258,98 @@ def test_gl_scene_picking_unaffected_by_backend(gl_available):
     assert w.pick(sx / w.scene.supersample, sy / w.scene.supersample) == front
 
 
+
+# -- flat shading (design §4.4/§4.5): GL backend ----------------------------
+
+def test_sphere_batch_flat_defaults_to_zeros_matching_length(gl_available):
+    """SphereBatch built without `flat` (every existing caller) must keep
+    working -- the field defaults to zeros shaped like the other arrays."""
+    spheres = SphereBatch(
+        centers=np.zeros((3, 3), np.float32),
+        radii=np.ones(3, np.float32),
+        colors=np.zeros((3, 3), np.float32),
+    )
+    assert spheres.flat.shape == (3,)
+    assert not spheres.flat.any()
+    assert SphereBatch.empty().flat.shape == (0,)
+
+
+def test_cylinder_batch_flat_defaults_to_zeros_matching_length(gl_available):
+    cyl = CylinderBatch(
+        a=np.zeros((2, 3), np.float32), b=np.zeros((2, 3), np.float32),
+        radii=np.ones(2, np.float32),
+        colors_a=np.zeros((2, 3), np.float32), colors_b=np.zeros((2, 3), np.float32),
+    )
+    assert cyl.flat.shape == (2,)
+    assert not cyl.flat.any()
+    assert CylinderBatch.empty().flat.shape == (0,)
+
+
+def test_gl_flat_sphere_renders_uniform_color_no_shading(gl_available):
+    """Mirrors the CPU flat-shading test: a flat sphere must render with a
+    perfectly uniform color across its silhouette (mix(..., v_flat) with
+    v_flat=1 collapses to the plain color, no diffuse/specular gradient)."""
+    r = GLRenderer(200, 200)
+    spheres = SphereBatch(
+        centers=np.array([[-3.0, 0.0, 0.0], [3.0, 0.0, 0.0]], np.float32),
+        radii=np.array([2.0, 2.0], np.float32),
+        colors=np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], np.float32),
+        flat=np.array([0.0, 1.0], np.float32),
+    )
+    img = r.render(spheres, CylinderBatch.empty(), _proj(w=200, h=200, extent=6.0),
+                   ShadingParams(depth_cue=0.0))
+    blue_mask = (img[:, :, 2] > 150) & (img[:, :, 0] < 50)
+    assert blue_mask.sum() > 100
+    blue_pixels = img[blue_mask]
+    assert (blue_pixels == blue_pixels[0]).all()
+    red_mask = (img[:, :, 0] > 50) & (img[:, :, 2] < 50)
+    assert red_mask.sum() > 100
+    red_pixels = img[red_mask]
+    assert not (red_pixels == red_pixels[0]).all()
+
+
+def test_gl_flat_cylinder_renders_uniform_color_no_shading(gl_available):
+    r = GLRenderer(160, 80)
+    cyl = CylinderBatch(
+        a=np.array([[-2.0, 0.0, 0.0]], np.float32),
+        b=np.array([[2.0, 0.0, 0.0]], np.float32),
+        radii=np.array([1.0], np.float32),
+        colors_a=np.array([[0.0, 1.0, 0.0]], np.float32),
+        colors_b=np.array([[0.0, 1.0, 0.0]], np.float32),
+        flat=np.array([1.0], np.float32),
+    )
+    img = r.render(SphereBatch.empty(), cyl, _proj(w=160, h=80, extent=3.0),
+                   ShadingParams(depth_cue=0.0))
+    row = img[40, :, :]
+    green_cols = np.where((row[:, 1] > 100) & (row[:, 0] < 60))[0]
+    assert len(green_cols) > 5
+    pixels = row[green_cols]
+    assert (pixels == pixels[0]).all()
+
+
+def test_gl_adapter_builds_flat_arrays_from_style_flat_mask(gl_available):
+    """gl_adapter must translate style.flat_mask into SphereBatch.flat /
+    CylinderBatch.flat, with arrow shafts always flat=0 (design: arrows are
+    never flat)."""
+    from vimol.gl_adapter import molecule_to_gl_inputs
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    ensure_bonds(mol)
+    vectors = np.zeros((mol.n_atoms, 3))
+    vectors[0] = [2.0, 0.0, 0.0]
+    mol.add_vector_field(vectors)
+    style = Style(flat_mask=np.array([True] + [False] * (mol.n_atoms - 1)))
+    from vimol.camera import Camera
+    cam = Camera(center=mol.centroid(), extent=mol.radius_of_gyration_extent())
+    cam.fit(160, 160, cam.extent)
+    spheres, cylinders, cones, proj, shading = molecule_to_gl_inputs(mol, cam, style, 160, 160)
+    assert spheres.flat[0] == 1.0
+    assert not spheres.flat[1:].any()
+    # bonds touching atom 0 should be flat too (endpoint's flag)
+    assert cylinders.flat[: len(mol.bonds)].sum() > 0
+    # the arrow shaft (appended after real bonds) must stay unflattened
+    assert not cylinders.flat[len(mol.bonds):].any()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

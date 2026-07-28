@@ -36,6 +36,11 @@ class SphereBatch:
     centers: np.ndarray  # (N, 3) float
     radii: np.ndarray    # (N,) float
     colors: np.ndarray   # (N, 3) float, 0..1
+    flat: np.ndarray = None   # (N,) float, 0/1 -- 1 skips shading (design §4.4/§4.5)
+
+    def __post_init__(self) -> None:
+        if self.flat is None:
+            self.flat = np.zeros(len(self.radii), np.float32)
 
     @staticmethod
     def empty() -> "SphereBatch":
@@ -43,6 +48,7 @@ class SphereBatch:
             centers=np.zeros((0, 3), np.float32),
             radii=np.zeros((0,), np.float32),
             colors=np.zeros((0, 3), np.float32),
+            flat=np.zeros((0,), np.float32),
         )
 
 
@@ -55,6 +61,11 @@ class CylinderBatch:
     radii: np.ndarray     # (M,) float
     colors_a: np.ndarray  # (M, 3) float — color at the `a` end
     colors_b: np.ndarray  # (M, 3) float — color at the `b` end
+    flat: np.ndarray = None    # (M,) float, 0/1 -- 1 skips shading (design §4.4/§4.5)
+
+    def __post_init__(self) -> None:
+        if self.flat is None:
+            self.flat = np.zeros(len(self.radii), np.float32)
 
     @staticmethod
     def empty() -> "CylinderBatch":
@@ -64,6 +75,7 @@ class CylinderBatch:
             radii=np.zeros((0,), np.float32),
             colors_a=np.zeros((0, 3), np.float32),
             colors_b=np.zeros((0, 3), np.float32),
+            flat=np.zeros((0,), np.float32),
         )
 
 
@@ -107,6 +119,7 @@ layout(location = 0) in vec2 in_corner;
 layout(location = 1) in vec3 in_center;
 layout(location = 2) in float in_radius;
 layout(location = 3) in vec3 in_color;
+layout(location = 4) in float in_flat;
 
 uniform mat4 u_proj;
 
@@ -114,12 +127,14 @@ out vec2 v_offset;
 out vec3 v_center;
 out float v_radius;
 out vec3 v_color;
+out float v_flat;
 
 void main() {
     v_offset = in_corner * in_radius;
     v_center = in_center;
     v_radius = in_radius;
     v_color = in_color;
+    v_flat = in_flat;
     gl_Position = u_proj * vec4(in_center.xy + v_offset, in_center.z, 1.0);
 }
 """
@@ -130,6 +145,7 @@ in vec2 v_offset;
 in vec3 v_center;
 in float v_radius;
 in vec3 v_color;
+in float v_flat;
 
 uniform float u_proj_z_scale;
 uniform float u_proj_z_bias;
@@ -161,7 +177,7 @@ void main() {
     float nh = clamp(dot(normal, u_half_vec), 0.0, 1.0);
     float spec = pow(nh, u_shininess) * u_specular_strength;
     float diff = u_ambient + nl + nf;
-    vec3 shaded = v_color * diff + vec3(spec);
+    vec3 shaded = mix(v_color * diff + vec3(spec), v_color, v_flat);
 
     if (u_depth_cue > 0.0) {
         float f = clamp((depth_view - u_zmin) / u_zspan, 0.0, 1.0);
@@ -183,6 +199,7 @@ layout(location = 2) in vec3 in_b;
 layout(location = 3) in float in_radius;
 layout(location = 4) in vec3 in_color_a;
 layout(location = 5) in vec3 in_color_b;
+layout(location = 6) in float in_flat;
 
 uniform mat4 u_proj;
 
@@ -192,6 +209,7 @@ out vec3 v_b;
 out float v_radius;
 out vec3 v_color_a;
 out vec3 v_color_b;
+out float v_flat;
 
 void main() {
     vec2 lo = min(in_a.xy, in_b.xy) - vec2(in_radius);
@@ -206,6 +224,7 @@ void main() {
     v_radius = in_radius;
     v_color_a = in_color_a;
     v_color_b = in_color_b;
+    v_flat = in_flat;
 
     float z_mid = 0.5 * (in_a.z + in_b.z);
     gl_Position = u_proj * vec4(pos, z_mid, 1.0);
@@ -220,6 +239,7 @@ in vec3 v_b;
 in float v_radius;
 in vec3 v_color_a;
 in vec3 v_color_b;
+in float v_flat;
 
 uniform float u_proj_z_scale;
 uniform float u_proj_z_bias;
@@ -281,7 +301,7 @@ void main() {
     float nh = clamp(dot(normal, u_half_vec), 0.0, 1.0);
     float spec = pow(nh, u_shininess) * u_specular_strength;
     float diff = u_ambient + nl + nf;
-    vec3 shaded = albedo * diff + vec3(spec);
+    vec3 shaded = mix(albedo * diff + vec3(spec), albedo, v_flat);
 
     if (u_depth_cue > 0.0) {
         float f = clamp((depth_view - u_zmin) / u_zspan, 0.0, 1.0);
@@ -589,17 +609,21 @@ class GLRenderer:
         centers = np.asarray(spheres.centers, dtype=np.float32).reshape(-1, 3)
         radii_s = np.asarray(spheres.radii, dtype=np.float32).reshape(-1)
         colors_s = np.asarray(spheres.colors, dtype=np.float32).reshape(-1, 3)
+        flat_s = np.asarray(spheres.flat, dtype=np.float32).reshape(-1)
         keep_s = radii_s > 0
-        centers, radii_s, colors_s = centers[keep_s], radii_s[keep_s], colors_s[keep_s]
+        centers, radii_s, colors_s, flat_s = (
+            centers[keep_s], radii_s[keep_s], colors_s[keep_s], flat_s[keep_s],
+        )
 
         ca = np.asarray(cylinders.a, dtype=np.float32).reshape(-1, 3)
         cb = np.asarray(cylinders.b, dtype=np.float32).reshape(-1, 3)
         radii_c = np.asarray(cylinders.radii, dtype=np.float32).reshape(-1)
         colors_a = np.asarray(cylinders.colors_a, dtype=np.float32).reshape(-1, 3)
         colors_b = np.asarray(cylinders.colors_b, dtype=np.float32).reshape(-1, 3)
+        flat_c = np.asarray(cylinders.flat, dtype=np.float32).reshape(-1)
         keep_c = radii_c > 0
-        ca, cb, radii_c, colors_a, colors_b = (
-            ca[keep_c], cb[keep_c], radii_c[keep_c], colors_a[keep_c], colors_b[keep_c],
+        ca, cb, radii_c, colors_a, colors_b, flat_c = (
+            ca[keep_c], cb[keep_c], radii_c[keep_c], colors_a[keep_c], colors_b[keep_c], flat_c[keep_c],
         )
 
         cone_base = np.asarray(cones.base, dtype=np.float32).reshape(-1, 3)
@@ -642,9 +666,9 @@ class GLRenderer:
         )
 
         if len(ca):
-            self._draw_bonds(ca, cb, radii_c, colors_a, colors_b, proj_gl, common)
+            self._draw_bonds(ca, cb, radii_c, colors_a, colors_b, flat_c, proj_gl, common)
         if len(centers):
-            self._draw_atoms(centers, radii_s, colors_s, proj_gl, common)
+            self._draw_atoms(centers, radii_s, colors_s, flat_s, proj_gl, common)
         if len(cone_base):
             self._draw_cones(cone_base, cone_apex, radii_h, colors_h, proj_gl, common)
 
@@ -677,18 +701,19 @@ class GLRenderer:
         for name, value in common.items():
             program[name].value = value
 
-    def _draw_atoms(self, centers, radii, colors, proj_gl, common) -> None:
+    def _draw_atoms(self, centers, radii, colors, flat, proj_gl, common) -> None:
         n = centers.shape[0]
-        data = np.empty((n, 7), dtype=np.float32)
+        data = np.empty((n, 8), dtype=np.float32)
         data[:, 0:3] = centers
         data[:, 3] = radii
         data[:, 4:7] = colors
+        data[:, 7] = flat
         inst_vbo = self.ctx.buffer(data.tobytes())
         vao = self.ctx.vertex_array(
             self._atom_program,
             [
                 (self._quad_vbo, "2f", "in_corner"),
-                (inst_vbo, "3f 1f 3f/i", "in_center", "in_radius", "in_color"),
+                (inst_vbo, "3f 1f 3f 1f/i", "in_center", "in_radius", "in_color", "in_flat"),
             ],
         )
         self._set_uniforms(self._atom_program, proj_gl, common)
@@ -696,20 +721,21 @@ class GLRenderer:
         vao.release()
         inst_vbo.release()
 
-    def _draw_bonds(self, a, b, radii, colors_a, colors_b, proj_gl, common) -> None:
+    def _draw_bonds(self, a, b, radii, colors_a, colors_b, flat, proj_gl, common) -> None:
         n = a.shape[0]
-        data = np.empty((n, 13), dtype=np.float32)
+        data = np.empty((n, 14), dtype=np.float32)
         data[:, 0:3] = a
         data[:, 3:6] = b
         data[:, 6] = radii
         data[:, 7:10] = colors_a
         data[:, 10:13] = colors_b
+        data[:, 13] = flat
         inst_vbo = self.ctx.buffer(data.tobytes())
         vao = self.ctx.vertex_array(
             self._bond_program,
             [
                 (self._quad_vbo, "2f", "in_corner"),
-                (inst_vbo, "3f 3f 1f 3f 3f/i", "in_a", "in_b", "in_radius", "in_color_a", "in_color_b"),
+                (inst_vbo, "3f 3f 1f 3f 3f 1f/i", "in_a", "in_b", "in_radius", "in_color_a", "in_color_b", "in_flat"),
             ],
         )
         self._set_uniforms(self._bond_program, proj_gl, common)

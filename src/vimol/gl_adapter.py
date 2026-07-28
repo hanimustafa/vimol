@@ -59,11 +59,19 @@ def molecule_to_gl_inputs(molecule: Molecule, camera: Camera, style: Style,
             dtype=np.float32,
         )
 
+    # Per-atom flat-shading flag (design §4.4/§4.5): overlay entries other
+    # than the active one render flat/tinted, no diffuse gradient. None (the
+    # default, and every single-structure render) means "nothing is flat".
+    if style.flat_mask is not None:
+        atom_flat = np.asarray(style.flat_mask, dtype=np.float32)
+    else:
+        atom_flat = np.zeros(molecule.n_atoms, dtype=np.float32)
+
     if molecule.n_atoms == 0:
         spheres = SphereBatch.empty()
     else:
         radii = _atom_radii(molecule, style).astype(np.float32)
-        spheres = SphereBatch(centers=vpos, radii=radii, colors=colors)
+        spheres = SphereBatch(centers=vpos, radii=radii, colors=colors, flat=atom_flat)
 
     draw_bonds = style.representation in ("ball_and_stick", "wireframe", "licorice") and molecule.bonds
     if draw_bonds:
@@ -75,21 +83,28 @@ def molecule_to_gl_inputs(molecule: Molecule, camera: Camera, style: Style,
         bond_r = np.full(len(molecule.bonds), rb, dtype=np.float32)
         bond_ca = colors[idx_i]
         bond_cb = colors[idx_j]
+        # Bonds never span structures in the composite, so both endpoints
+        # agree on flatness -- either one's flag works.
+        bond_flat = atom_flat[idx_i]
     else:
         bond_a = bond_b = bond_ca = bond_cb = np.zeros((0, 3), np.float32)
         bond_r = np.zeros((0,), np.float32)
+        bond_flat = np.zeros((0,), np.float32)
 
     # Arrow shafts are literally cylinders -- fold them into the same batch
     # as bonds. Arrow heads (cones) need the new GL primitive. Reuse the
     # atom view positions already computed above rather than transforming
-    # them again.
+    # them again. Arrows are never flat (design §4.5), so their flat entries
+    # are all zero regardless of style.flat_mask.
     geom = build_arrow_geometry(molecule, camera, view_pos=vpos)
+    shaft_flat = np.zeros(geom.shaft_a.shape[0], dtype=np.float32)
     cylinders = CylinderBatch(
         a=np.concatenate([bond_a, geom.shaft_a.astype(np.float32)]),
         b=np.concatenate([bond_b, geom.shaft_b.astype(np.float32)]),
         radii=np.concatenate([bond_r, geom.shaft_radius.astype(np.float32)]),
         colors_a=np.concatenate([bond_ca, geom.shaft_color.astype(np.float32)]),
         colors_b=np.concatenate([bond_cb, geom.shaft_color.astype(np.float32)]),
+        flat=np.concatenate([bond_flat, shaft_flat]),
     )
     cones = ConeBatch(
         base=geom.head_base.astype(np.float32),
