@@ -1607,11 +1607,18 @@ class Viewer:
         """Mouse click on structure-list row *i* (design §4.3, focus-
         independent): a plain click replaces the active structure and clears
         the overlay; opt+click adds it to the overlay alongside the current
-        one. Clicking any row also gives the strip keyboard focus."""
+        one. Clicking any row also gives the strip keyboard focus.
+
+        opt+click is a *toggle*: opt+clicking an already-marked row unmarks
+        it, leaving the other marks alone. Dropping the last mark also turns
+        the overlay back off -- overlay with an empty mark set means "draw
+        every visible structure" (StructureSet.drawn_indices), which is the
+        opposite of what unmarking your last selection asks for."""
         self._list_focused = True
         if opt:
-            self.structures[i].marked = True
-            self.structures.overlay = True
+            entry = self.structures[i]
+            entry.marked = not entry.marked
+            self.structures.overlay = bool(self.structures.marked)
             self._list_cursor = i
         else:
             self._activate_structure(i)

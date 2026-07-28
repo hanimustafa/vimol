@@ -514,8 +514,11 @@ namespace.
 
 Mouse, focus-independent: **click** a row → `set_active(k)`, `clear_marks()`,
 `overlay = False` — "that structure replaces the pane", identical to next/prev.
-**opt+click** a row → `marked = True` on it, `overlay = True` — "add it to the
-overlay alongside the current one".
+**opt+click** a row *toggles* `marked` on it — "add it to / drop it from the
+overlay alongside the current one" — and sets `overlay` to whether any mark
+survives. Unmarking the last mark therefore turns the overlay off: overlay
+with an empty mark set means "draw every visible structure" (§3
+`drawn_indices`), which is not what dropping your last selection asks for.
 
 **The row cursor is not the active index.** `j`/`k` move a cursor without
 changing what is rendered, so `space` / `z` / `h` need an unambiguous target:

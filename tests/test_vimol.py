@@ -984,6 +984,42 @@ def test_viewer_opt_click_row_marks_and_enables_overlay(tmp_path):
         os.close(fd)
 
 
+def test_viewer_opt_click_toggles_a_marked_row_back_off(tmp_path):
+    """opt+click is a TOGGLE: opt+clicking an already-marked row unmarks it
+    and leaves every other mark intact. Unmarking the LAST mark also turns
+    the overlay off -- an empty mark set would otherwise fall back to
+    'draw everything visible' (drawn_indices), the opposite of what
+    unmarking your last selection means."""
+    from vimol.input import MouseEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._draw_list()
+
+        def opt_click(k):
+            row0, col_start, _c1 = v._list_row_spans[k]
+            return v._dispatch([MouseEvent("down", float(col_start), float(row0),
+                                           button=0, alt=True)])
+
+        assert opt_click(1) is True
+        assert opt_click(2) is True
+        assert [e.marked for e in v.structures] == [False, True, True]
+        assert v.structures.overlay is True
+
+        # toggling row 1 back off leaves row 2 marked and the overlay on
+        assert opt_click(1) is True
+        assert [e.marked for e in v.structures] == [False, False, True]
+        assert v.structures.overlay is True
+
+        # ... and dropping the last mark turns the overlay off again
+        assert opt_click(2) is True
+        assert [e.marked for e in v.structures] == [False, False, False]
+        assert v.structures.overlay is False
+        assert v.frame_index == 0   # the active structure never moved
+    finally:
+        os.close(fd)
+
+
 def test_viewer_global_bindings_unaffected_when_list_not_focused(tmp_path):
     """The pre-existing global 1-4 (representation), [/] (roll), h (orbit)
     bindings must keep working exactly as before when the list isn't
