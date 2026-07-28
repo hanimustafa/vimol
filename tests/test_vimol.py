@@ -1080,3 +1080,21 @@ def test_viewer_list_focused_unclaimed_keys_fall_through_to_global_bindings(tmp_
         assert v._running is False
     finally:
         os.close(fd)
+
+
+def test_viewer_hiding_active_structure_while_hovered_does_not_crash(tmp_path):
+    """Hiding the active row (design §4.3: allowed, does not auto-advance)
+    while an atom is hovered must not crash _apply_highlight -- the active
+    structure is no longer in the composite's drawn sources at all."""
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v.widget.hovered = 0
+        v._list_focused = True
+        v._list_cursor = v.frame_index
+        assert v._dispatch([KeyEvent("h")]) is True
+        v._draw()   # must not raise
+    finally:
+        os.close(fd)

@@ -696,6 +696,12 @@ class MoleculeWidget:
         # map them through the composite's offset before writing into the
         # composite-sized color array.
         active_index = self.scene.structures.active_index
+        if not (composite.sources == active_index).any():
+            # The active structure isn't drawn at all (hidden -- design §4.3
+            # allows this without advancing active_index), so there is no
+            # composite slot to map hovered/selected/measure_sel into.
+            self.style.color_override = None
+            return
         cols = composite.base_colors.copy()
         yellow = np.array([1.0, 0.95, 0.3])
         # every picked atom in the live measurement selection gets the same
