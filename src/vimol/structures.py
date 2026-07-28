@@ -100,6 +100,28 @@ TINTS = [
 ]
 
 
+@dataclass
+class Composite:
+    """One flattened, POST-transform ``Molecule`` built from the drawn
+    entries of a :class:`StructureSet`, handed to the existing single-molecule
+    renderer unchanged (design §3)."""
+    molecule: Molecule          # flattened; positions are POST-transform
+    offsets: np.ndarray         # (K+1,) int; atom-index base per drawn slot
+    sources: np.ndarray         # (K,) int; index into StructureSet.entries
+    base_colors: np.ndarray     # (N,3) see "overlay colouring", §4
+    flat: np.ndarray            # (N,) bool; per-atom flat-shading flag, §4
+
+    def locate(self, i: int) -> Tuple[int, int]:
+        """Composite atom index -> (entry index, local atom index)."""
+        k = int(np.searchsorted(self.offsets, i, side="right")) - 1
+        return int(self.sources[k]), i - int(self.offsets[k])
+
+    def globalize(self, entry_index: int, local: np.ndarray) -> np.ndarray:
+        """Entry-local atom indices -> composite indices (inverse of locate)."""
+        k = int(np.where(self.sources == entry_index)[0][0])
+        return np.asarray(local) + int(self.offsets[k])
+
+
 class StructureSet:
     """N molecules with stable identity, per-structure state, and one active
     index. Everything downstream flattens it into a single throwaway
@@ -110,6 +132,14 @@ class StructureSet:
         self.active_index: int = 0
         self.overlay: bool = False   # False: draw active only. True: draw the marked set.
         self._solo_restore: Optional[List[bool]] = None
+        # composite() caching -- see "Caching" in design §3. `_topology_cache`
+        # holds (key, dict) for symbols/bonds/base_colors/flat, keyed on
+        # everything EXCEPT transform (a transform-only change, e.g. a camera
+        # drag with nothing edited, must not re-run the Python bond loop).
+        # `_composite_cache` holds (key, Composite) for the full result,
+        # keyed including transform, so a pure cache hit costs 0ms.
+        self._composite_cache: Optional[Tuple[tuple, "Composite"]] = None
+        self._topology_cache: Optional[Tuple[tuple, dict]] = None
 
     # -- sequence protocol --------------------------------------------------
     def __len__(self) -> int:
@@ -212,3 +242,127 @@ class StructureSet:
         rest = marked if marked else [i for i, e in enumerate(self.entries) if e.visible]
         rest = [i for i in rest if i != self.active_index]
         return ([self.active_index] if self.active.visible else []) + rest
+
+    # -- composite render path (design §3) -----------------------------
+    def invalidate(self) -> None:
+        """Drop the composite cache (both the topology and the full cache)."""
+        self._composite_cache = None
+        self._topology_cache = None
+
+    def _entry_state(self, i: int, include_transform: bool) -> tuple:
+        e = self.entries[i]
+        base = (id(e.molecule), e.revision, e.visible, e.marked, e.tint)
+        return base + (e.transform.key(),) if include_transform else base
+
+    def _full_key(self, drawn: List[int]) -> tuple:
+        return (len(self.entries), tuple(self._entry_state(i, True) for i in drawn))
+
+    def _topology_key(self, drawn: List[int]) -> tuple:
+        return (len(self.entries), tuple(self._entry_state(i, False) for i in drawn))
+
+    def _build_topology(self, drawn: List[int]) -> dict:
+        """Everything about the composite that doesn't depend on transforms:
+        symbols, bonds (offset per entry), base colors and the flat mask
+        (design §4.4 -- first drawn entry is CPK/shaded, the rest tinted/flat)."""
+        symbols: List[str] = []
+        bonds: List[Tuple[int, int, int]] = []
+        offsets = [0]
+        base_parts = []
+        flat_parts = []
+        off = 0
+        for k, i in enumerate(drawn):
+            e = self.entries[i]
+            mol = e.molecule
+            n = mol.n_atoms
+            symbols.extend(mol.symbols)
+            for a, b, order in mol.bonds:
+                bonds.append((a + off, b + off, order))
+            if k == 0:
+                base_parts.append(mol.element_colors() if n else np.zeros((0, 3)))
+                flat_parts.append(np.zeros(n, dtype=bool))
+            else:
+                tinted = np.tile(np.asarray(e.tint, dtype=np.float64), (n, 1)) if n else np.zeros((0, 3))
+                base_parts.append(tinted)
+                flat_parts.append(np.ones(n, dtype=bool))
+            off += n
+            offsets.append(off)
+        base_colors = np.concatenate(base_parts) if base_parts else np.zeros((0, 3))
+        flat = np.concatenate(flat_parts) if flat_parts else np.zeros((0,), dtype=bool)
+        return dict(symbols=symbols, bonds=bonds, offsets=np.array(offsets),
+                    sources=np.array(drawn, dtype=int), base_colors=base_colors, flat=flat)
+
+    def _build_vector_fields(self, drawn: List[int], offsets: np.ndarray, total: int):
+        from .molecule import VectorField
+        fields = []
+        for k, i in enumerate(drawn):
+            e = self.entries[i]
+            mol = e.molecule
+            lo, hi = int(offsets[k]), int(offsets[k + 1])
+            for vf in mol.vector_fields:
+                if np.asarray(vf.vectors).shape != (mol.n_atoms, 3):
+                    continue  # stale field -- same guard as Molecule.vector_extent
+                vectors = np.zeros((total, 3))
+                vectors[lo:hi] = e.transform.apply_directions(vf.vectors)
+                fields.append(VectorField(vectors=vectors, color=vf.color, scale=vf.scale,
+                                          radius=vf.radius, head_scale=vf.head_scale,
+                                          head_length_frac=vf.head_length_frac))
+        return fields
+
+    def composite(self) -> "Composite":
+        """Build (or return the cached) flattened world-space Molecule for
+        rendering. See design §3 for the fast path and caching rules."""
+        drawn = self.drawn_indices()
+        if not drawn:
+            return Composite(molecule=Molecule(), offsets=np.array([0]),
+                             sources=np.array([], dtype=int),
+                             base_colors=np.zeros((0, 3)), flat=np.zeros((0,), dtype=bool))
+
+        full_key = self._full_key(drawn)
+        if self._composite_cache is not None and self._composite_cache[0] == full_key:
+            return self._composite_cache[1]
+
+        # Fast path: exactly one drawn entry with an identity transform ->
+        # the composite IS that entry's Molecule object, zero copy. Keyed on
+        # drawn state, not tint (see design §3): every entry has a tint from
+        # append() onward, so gating on tint would disable this path even
+        # for the common single-frame-drawn case.
+        if len(drawn) == 1:
+            entry = self.entries[drawn[0]]
+            if entry.transform.is_identity:
+                mol = entry.molecule
+                n = mol.n_atoms
+                comp = Composite(
+                    molecule=mol,
+                    offsets=np.array([0, n]),
+                    sources=np.array([drawn[0]]),
+                    base_colors=mol.element_colors(),
+                    flat=np.zeros(n, dtype=bool),
+                )
+                self._composite_cache = (full_key, comp)
+                return comp
+
+        topo_key = self._topology_key(drawn)
+        if self._topology_cache is not None and self._topology_cache[0] == topo_key:
+            topo = self._topology_cache[1]
+        else:
+            topo = self._build_topology(drawn)
+            self._topology_cache = (topo_key, topo)
+
+        offsets = topo["offsets"]
+        pos_parts = []
+        for k, i in enumerate(drawn):
+            e = self.entries[i]
+            mol = e.molecule
+            p = e.transform.apply(mol.positions) if mol.n_atoms else np.zeros((0, 3))
+            pos_parts.append(p)
+        positions = np.concatenate(pos_parts) if pos_parts else np.zeros((0, 3))
+        total = int(offsets[-1])
+        vector_fields = self._build_vector_fields(drawn, offsets, total)
+
+        mol = Molecule(symbols=list(topo["symbols"]), positions=positions,
+                       bonds=list(topo["bonds"]), name="composite",
+                       vector_fields=vector_fields)
+        comp = Composite(molecule=mol, offsets=offsets, sources=topo["sources"],
+                         base_colors=topo["base_colors"], flat=topo["flat"])
+        self._composite_cache = (full_key, comp)
+        return comp

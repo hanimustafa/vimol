@@ -232,3 +232,142 @@ def test_structure_set_solo_toggle_restores_prior_visibility():
     assert [s.visible for s in sset] == [True, False, False]
     sset.solo(0)             # second press restores
     assert [s.visible for s in sset] == [True, False, True]
+
+
+def _mol_with_bond():
+    m = Molecule()
+    m.add_atom("C", 0.0, 0.0, 0.0)
+    m.add_atom("H", 1.0, 0.0, 0.0)
+    m.add_bond(0, 1, 1)
+    return m
+
+
+def test_composite_single_visible_identity_is_zero_copy():
+    sset = StructureSet()
+    mol = _mol_with_bond()
+    sset.append(mol, label="a")
+    comp = sset.composite()
+    assert comp.molecule is mol
+    assert np.allclose(comp.base_colors, mol.element_colors())
+    assert not comp.flat.any()
+    assert list(comp.offsets) == [0, 2]
+    assert list(comp.sources) == [0]
+
+
+def test_composite_single_visible_non_identity_transform_moves_positions():
+    from vimol.structures import Transform
+    sset = StructureSet()
+    mol = _mol_with_bond()
+    entry = sset.append(mol, label="a")
+    entry.transform = Transform(translation=np.array([5.0, 0.0, 0.0]))
+    comp = sset.composite()
+    assert comp.molecule is not mol
+    assert np.allclose(comp.molecule.positions, mol.positions + [5.0, 0.0, 0.0])
+    # still alone -> CPK colors, not flat
+    assert np.allclose(comp.base_colors, mol.element_colors())
+    assert not comp.flat.any()
+
+
+def test_composite_overlay_first_entry_cpk_rest_flat_tinted():
+    sset = StructureSet()
+    a = sset.append(_mol_with_bond(), label="a")
+    b = sset.append(_mol_with_bond(), label="b")
+    sset.overlay = True
+    comp = sset.composite()
+    assert comp.sources.tolist() == [0, 1]
+    assert list(comp.offsets) == [0, 2, 4]
+    assert np.allclose(comp.base_colors[0:2], a.molecule.element_colors())
+    assert not comp.flat[0:2].any()
+    assert np.allclose(comp.base_colors[2:4], b.tint)
+    assert comp.flat[2:4].all()
+
+
+def test_composite_bonds_offset_by_entry():
+    sset = StructureSet()
+    sset.append(_mol_with_bond(), label="a")
+    sset.append(_mol_with_bond(), label="b")
+    sset.overlay = True
+    comp = sset.composite()
+    assert comp.molecule.bonds == [(0, 1, 1), (2, 3, 1)]
+
+
+def test_composite_locate_and_globalize_round_trip():
+    sset = StructureSet()
+    sset.append(_mol_with_bond(), label="a")
+    sset.append(_mol_with_bond(), label="b")
+    sset.overlay = True
+    comp = sset.composite()
+    assert comp.locate(0) == (0, 0)
+    assert comp.locate(1) == (0, 1)
+    assert comp.locate(2) == (1, 0)
+    assert comp.locate(3) == (1, 1)
+    g = comp.globalize(1, np.array([0, 1]))
+    assert list(g) == [2, 3]
+
+
+def test_composite_cache_hit_returns_same_object_when_nothing_changed():
+    sset = StructureSet()
+    sset.append(_mol_with_bond(), label="a")
+    sset.append(_mol_with_bond(), label="b")
+    sset.overlay = True
+    c1 = sset.composite()
+    c2 = sset.composite()
+    assert c1 is c2
+
+
+def test_composite_cache_invalidated_by_touch():
+    sset = StructureSet()
+    a = sset.append(_mol_with_bond(), label="a")
+    sset.append(_mol_with_bond(), label="b")
+    sset.overlay = True
+    c1 = sset.composite()
+    a.molecule.positions = a.molecule.positions + 1.0
+    a.touch()
+    c2 = sset.composite()
+    assert c1 is not c2
+    assert np.allclose(c2.molecule.positions[0:2], a.molecule.positions)
+
+
+def test_composite_cache_invalidated_by_mark_change():
+    sset = StructureSet()
+    sset.append(_mol_with_bond(), label="a")
+    sset.append(_mol_with_bond(), label="b")
+    sset.append(_mol_with_bond(), label="c")
+    sset.set_active(0)
+    sset.overlay = True
+    c1 = sset.composite()
+    sset.toggle_mark(2)
+    c2 = sset.composite()
+    assert c1 is not c2
+    assert comp_sources_matches(c2, [0, 2])
+
+
+def comp_sources_matches(comp, expected):
+    return comp.sources.tolist() == expected
+
+
+def test_composite_explicit_invalidate_forces_rebuild():
+    sset = StructureSet()
+    sset.append(_mol_with_bond(), label="a")
+    c1 = sset.composite()
+    sset.invalidate()
+    c2 = sset.composite()
+    assert c1 is not c2
+    assert c1.molecule is c2.molecule  # same underlying data, just re-served
+
+
+def test_composite_concatenates_and_rotates_vector_fields():
+    from vimol.structures import Transform
+    sset = StructureSet()
+    a = sset.append(_mol_with_bond(), label="a")
+    b = sset.append(_mol_with_bond(), label="b")
+    a.molecule.add_vector_field(np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]))
+    rot = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    b.transform = Transform(rotation=rot)
+    sset.overlay = True
+    comp = sset.composite()
+    assert len(comp.molecule.vector_fields) == 1
+    vf = comp.molecule.vector_fields[0]
+    assert vf.vectors.shape == (4, 3)
+    assert np.allclose(vf.vectors[0:2], [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    assert np.allclose(vf.vectors[2:4], 0.0)
