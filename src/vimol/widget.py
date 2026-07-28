@@ -83,7 +83,7 @@ class MoleculeWidget:
         self._drag_shift = False
         self._last = (0.0, 0.0)
         self._press = (0.0, 0.0)                 # where the current press started
-        self._base_colors = molecule.element_colors()
+        self._base_colors = self.scene.structures.composite().base_colors
 
     # -- configuration ----------------------------------------------------
     @property
@@ -94,7 +94,7 @@ class MoleculeWidget:
         rot = self.scene.camera.rotation.copy()
         self.scene.set_molecule(molecule)
         self.scene.camera.rotation = rot
-        self._base_colors = molecule.element_colors()
+        self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self.measure_sel = []                   # stale indices into the old molecule
         self._undo_stack.clear()
@@ -121,6 +121,13 @@ class MoleculeWidget:
     def cycle_representation(self, step: int = 1) -> None:
         i = REPRESENTATIONS.index(self.style.representation)
         self.set_representation(REPRESENTATIONS[(i + step) % len(REPRESENTATIONS)])
+
+    def _touch_active(self) -> None:
+        """Bump the active structure's revision after any in-place mutation
+        of its Molecule (design §5's "one new obligation") -- this busts the
+        StructureSet's composite cache, whose base_colors/offsets would
+        otherwise go stale in shape the moment an edit changes atom count."""
+        self.scene.structures.active.touch()
 
     # -- direct manipulation ---------------------------------------------
     def orbit(self, dx_px: float, dy_px: float) -> None:
@@ -347,7 +354,8 @@ class MoleculeWidget:
         mol.bonds = list(bonds)
         mol.manual_bonds = list(manual_bonds)
         mol.new_atoms = set(new_atoms)
-        self._base_colors = mol.element_colors()
+        self._touch_active()
+        self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self.measure_sel = []                    # stale indices into the reverted geometry
         self._refresh_dirty()
@@ -384,7 +392,8 @@ class MoleculeWidget:
             editor.birth_molecule(mol, self.unproject(px, py),
                                   element=self.build_element, template=tmpl)
         # atom count changed: refresh color cache and drop stale hover/selection
-        self._base_colors = mol.element_colors()
+        self._touch_active()
+        self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self._refresh_dirty()
         return True
@@ -403,7 +412,8 @@ class MoleculeWidget:
         self._push_undo()                       # snapshot for 'u' before mutating
         editor.delete_atom(mol, idx)
         # atom count changed: refresh color cache and drop stale hover/selection
-        self._base_colors = mol.element_colors()
+        self._touch_active()
+        self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self._refresh_dirty()
         return True
@@ -481,6 +491,7 @@ class MoleculeWidget:
             snapshot = self._snapshot()          # taken before mutating
             if editor.add_manual_bond(mol, anchor, target):
                 self._commit_undo(snapshot)
+                self._touch_active()
                 self._refresh_dirty()
             # else: already a manual bond between this pair -- no-op, no undo entry
         return True
@@ -527,6 +538,7 @@ class MoleculeWidget:
         if self._cleanup_budget <= 0 or disp < _CLEANUP_SETTLED:
             state, self._cleanup_state = self._cleanup_state, None
             editor.cleanup_finish(self.scene.molecule, state)
+        self._touch_active()
         self._refresh_dirty()
         return True
 
@@ -583,22 +595,33 @@ class MoleculeWidget:
 
     # -- rendering --------------------------------------------------------
     def _apply_highlight(self) -> None:
+        # widget._base_colors is the composite's base colors (design §3):
+        # CPK for the first-drawn (active) entry, tint for the rest.
+        composite = self.scene.structures.composite()
+        self._base_colors = composite.base_colors
         hi = self.hovered if self.hovered is not None else self.selected
         if hi is None and not self.measure_sel:
             self.style.color_override = None
             return
-        cols = self._base_colors.copy()
+        # hovered/selected/measure_sel are ACTIVE-LOCAL indices (design §3);
+        # map them through the composite's offset before writing into the
+        # composite-sized color array.
+        active_index = self.scene.structures.active_index
+        cols = composite.base_colors.copy()
         yellow = np.array([1.0, 0.95, 0.3])
         # every picked atom in the live measurement selection gets the same
         # yellow tint as a hover -- hover (below) is applied on top, so it
         # still shows through even for an atom that is also selected.
-        for sel_idx in self.measure_sel:
-            cols[sel_idx] = np.clip(cols[sel_idx] * 0.4 + yellow * 0.9, 0, 1)
+        if self.measure_sel:
+            g_sel = composite.globalize(active_index, np.asarray(self.measure_sel, dtype=np.int64))
+            for gidx in g_sel:
+                cols[gidx] = np.clip(cols[gidx] * 0.4 + yellow * 0.9, 0, 1)
         if hi is not None:
             # brighten + tint the highlighted atom: red in delete mode (a preview of
             # "this disappears if you click here"), yellow otherwise.
             tint = np.array([1.0, 0.2, 0.2]) if self.delete_mode else yellow
-            cols[hi] = np.clip(cols[hi] * 0.4 + tint * 0.9, 0, 1)
+            ghi = int(composite.globalize(active_index, np.array([hi]))[0])
+            cols[ghi] = np.clip(cols[ghi] * 0.4 + tint * 0.9, 0, 1)
         self.style.color_override = cols
 
     def render(self) -> np.ndarray:

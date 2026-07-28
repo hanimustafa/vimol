@@ -83,3 +83,59 @@ def test_scene_fit_uses_composite_extent_for_overlay():
     scene = Scene(sset, 64, 64)
     # extent should be influenced by the far, translated structure
     assert scene.camera.extent > 10.0
+
+
+# -- widget wiring: cache invalidation + composite-index highlight mapping --
+
+from vimol.widget import MoleculeWidget
+from vimol.structures import Transform
+
+
+def test_widget_edit_keeps_composite_base_colors_in_sync(tmp_path):
+    """Appending an atom must invalidate the cached composite (design §5:
+    'every edit path ends with entry.touch()') -- else base_colors/offsets
+    stay the old shorter shape."""
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    w._edit_at(100.0, 100.0)   # empty space under append mode -> births an atom
+    comp = w.scene.structures.composite()
+    assert comp.base_colors.shape[0] == w.molecule.n_atoms
+
+
+def test_widget_highlight_maps_active_local_index_through_composite_offset():
+    """hovered/selected/measure_sel are ACTIVE-LOCAL indices (design §3); when
+    the active structure isn't the first entry of the composite, the
+    highlight must land on the right GLOBAL atom, not local index 0."""
+    from vimol.scene import Scene
+    from vimol.structures import StructureSet
+
+    sset = StructureSet()
+    first = Molecule(symbols=["C", "C"], positions=np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]))
+    active = Molecule(symbols=["O", "O"], positions=np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]))
+    sset.append(first, label="first")
+    sset.append(active, label="active")
+    sset.set_active(1)
+    sset.overlay = True   # both drawn; active listed first in drawn_indices()
+
+    w = MoleculeWidget.__new__(MoleculeWidget)
+    w.style = __import__("vimol.render", fromlist=["Style"]).Style()
+    w.scene = Scene(sset, 100, 100, style=w.style, backend="cpu")
+    w.hovered = 1          # active-local index 1 ("O" atom at x=2)
+    w.selected = None
+    w.measure_sel = []
+    w.delete_mode = False
+    w._base_colors = w.scene.structures.composite().base_colors
+
+    w._apply_highlight()
+    cols = w.style.color_override
+    assert cols is not None
+    comp = w.scene.structures.composite()
+    active_idx = sset.active_index
+    global_idx = int(comp.globalize(active_idx, np.array([1]))[0])
+    # the atom actually tinted yellow is the GLOBAL index, not local index 1
+    assert not np.allclose(cols[global_idx], comp.base_colors[global_idx])
+    # and no other atom (in particular local-index-shaped index 1 of entry 0,
+    # which would be a bug if the mapping were skipped) was touched
+    other = 1 if global_idx != 1 else 0
+    assert np.allclose(cols[other], comp.base_colors[other])
