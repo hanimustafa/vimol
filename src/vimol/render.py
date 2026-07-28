@@ -37,6 +37,7 @@ class Style:
     depth_cue: float = 0.55                  # 0 = off, 1 = strong fog toward the back
     outline: bool = True                     # subtle silhouette darkening
     color_override: object = None            # optional (N,3) array to replace element colors
+    flat_mask: object = None                 # optional (N,) bool array: True -> unshaded, uniform color
 
 
 # render worker threads: bands of the frame raycast concurrently (numpy

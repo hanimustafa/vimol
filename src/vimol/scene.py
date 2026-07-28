@@ -10,9 +10,12 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from dataclasses import replace
+
 from .camera import Camera
 from .molecule import Molecule
 from .render import Renderer, Style
+from .structures import StructureSet
 from . import kitty
 
 
@@ -58,19 +61,33 @@ def _downsample(img: np.ndarray, factor: int) -> np.ndarray:
 
 
 class Scene:
-    def __init__(self, molecule: Molecule, width: int = 640, height: int = 480,
+    def __init__(self, molecule, width: int = 640, height: int = 480,
                  style: Optional[Style] = None, supersample: int = 1,
                  backend: str = "auto"):
-        self.molecule = molecule
+        if isinstance(molecule, StructureSet):
+            self.structures = molecule
+        else:
+            self.structures = StructureSet()
+            self.structures.append(molecule, label=molecule.name or "molecule")
         self.style = style or Style()
         self.width = width
         self.height = height
         self.supersample = max(1, int(supersample))
         self.render_scale = 1.0        # dynamic-resolution factor, see set_render_scale
-        self.camera = Camera(center=molecule.centroid(), extent=molecule.radius_of_gyration_extent())
+        comp_mol = self.structures.composite().molecule
+        self.camera = Camera(center=comp_mol.centroid(), extent=comp_mol.radius_of_gyration_extent())
         self._backend_name, self._renderer = self._make_renderer(
             backend, width * self.supersample, height * self.supersample)
         self.fit()
+
+    # -- structure-set-aware molecule access -------------------------------
+    @property
+    def molecule(self) -> Molecule:
+        """The ACTIVE structure's editable Molecule (design §3's "what reads
+        the composite vs. the active structure" table) -- for a single
+        structure this is the exact object the caller passed in, so
+        ``mol is scene.molecule`` still holds."""
+        return self.structures.active.molecule
 
     @staticmethod
     def _make_renderer(backend: str, w: int, h: int):
@@ -177,13 +194,17 @@ class Scene:
             max(1, int(round(self.height * self.supersample * self.render_scale))))
 
     def fit(self, keep_orientation: bool = False, keep_zoom: bool = False) -> None:
+        """Fit the camera to the COMPOSITE's extent (design §3): fitting on
+        the active structure alone would leave other overlaid structures
+        sitting off-screen."""
         rot = self.camera.rotation.copy()
         pan = self.camera.pan.copy()
         zoom = self.camera.zoom
-        self.camera.center = self.molecule.centroid()
+        mol = self.structures.composite().molecule
+        self.camera.center = mol.centroid()
         ext = max(
-            self.molecule.radius_of_gyration_extent() + self._max_atom_radius(),
-            self.molecule.vector_extent(),
+            mol.radius_of_gyration_extent() + self._max_atom_radius(mol),
+            mol.vector_extent(),
         )
         self.camera.fit(self._renderer.width, self._renderer.height, ext)
         if keep_orientation:
@@ -192,15 +213,20 @@ class Scene:
         if keep_zoom:
             self.camera.zoom = zoom
 
-    def _max_atom_radius(self) -> float:
-        if self.molecule.n_atoms == 0:
+    def _max_atom_radius(self, mol: Optional[Molecule] = None) -> float:
+        mol = mol if mol is not None else self.structures.composite().molecule
+        if mol.n_atoms == 0:
             return 0.0
         if self.style.representation == "spacefill":
-            return float(self.molecule.vdw_radii().max())
-        return float(self.molecule.vdw_radii().max()) * self.style.atom_scale
+            return float(mol.vdw_radii().max())
+        return float(mol.vdw_radii().max()) * self.style.atom_scale
 
     def set_molecule(self, molecule: Molecule) -> None:
-        self.molecule = molecule
+        """Replace the whole set with a single entry (design §3) -- this is
+        what keeps ``widget.set_molecule`` and every existing embedder that
+        calls ``scene.set_molecule`` working unchanged."""
+        self.structures = StructureSet()
+        self.structures.append(molecule, label=molecule.name or "molecule")
         self.camera.center = molecule.centroid()
         self.fit()
 
@@ -210,17 +236,39 @@ class Scene:
         return self._renderer.width, self._renderer.height
 
     # -- rendering --------------------------------------------------------
+    def _effective_style(self, composite) -> Style:
+        """A per-call Style with the composite's colouring folded in.
+
+        ``color_override``/``flat_mask`` are composite-sized arrays (design
+        §3/§4.4). When the caller (typically ``widget._apply_highlight``)
+        already provided an explicit ``color_override`` (e.g. a hover/measure
+        tint, already computed against the composite), it is used as-is;
+        otherwise the composite's own base colors are the default -- which,
+        for the single-structure fast path, are exactly ``mol.element_colors()``
+        (the same values the old "no override" path computed), so this is
+        byte-identical to today's behaviour whether or not other structures
+        are loaded alongside. ``dataclasses.replace`` makes a shallow per-call
+        copy so ``self.style`` itself is never mutated.
+        """
+        color_override = (self.style.color_override if self.style.color_override is not None
+                          else composite.base_colors)
+        flat_mask = composite.flat if composite.flat.any() else None
+        return replace(self.style, color_override=color_override, flat_mask=flat_mask)
+
     def render(self) -> np.ndarray:
+        composite = self.structures.composite()
+        mol = composite.molecule
+        style = self._effective_style(composite)
         if self._backend_name == "gl":
             from .gl_adapter import molecule_to_gl_inputs
             w, h = self._renderer.width, self._renderer.height
             spheres, cylinders, cones, proj, shading = molecule_to_gl_inputs(
-                self.molecule, self.camera, self.style, w, h)
+                mol, self.camera, style, w, h)
             # the GL renderer supersamples/downsamples on the GPU, so it returns
             # a display-size image directly -- no CPU _downsample pass.
             return self._renderer.render(spheres, cylinders, proj, shading,
                                          downsample=self.supersample, cones=cones)
-        img = self._renderer.render(self.molecule, self.camera, self.style)
+        img = self._renderer.render(mol, self.camera, style)
         return _downsample(img, self.supersample)
 
     def to_kitty(self, *, image_id: Optional[int] = None, cols: Optional[int] = None,
