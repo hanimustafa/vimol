@@ -920,6 +920,161 @@ def test_viewer_list_footer_blank_when_overlay_off(tmp_path):
         os.close(fd)
 
 
+# -- structure-list scrolling (design §4.1) --------------------------------
+
+def test_viewer_list_scrolls_to_reach_entries_past_the_viewport(tmp_path):
+    """A list longer than the strip is scrollable: entries past the bottom
+    are unreachable otherwise (60 frames, ~20 visible rows)."""
+    from vimol.input import KeyEvent
+
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        v._draw_list()
+        assert v._list_scroll == 0
+        assert len(v._list_row_struct) < 60          # can't all fit
+        assert 59 not in v._list_row_struct          # the last frame is off-screen
+
+        v._list_focused = True
+        assert v._dispatch([KeyEvent("end")]) is True
+        v._draw_list()
+        assert 59 in v._list_row_struct              # ... now reachable
+        assert v._list_cursor == 59
+
+        assert v._dispatch([KeyEvent("home")]) is True
+        v._draw_list()
+        assert v._list_scroll == 0
+        assert v._list_cursor == 0
+        assert 0 in v._list_row_struct
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_scroll_offset_clamps_at_both_ends(tmp_path):
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        v._draw_list()
+        cap = v._list_capacity()
+        assert cap > 1
+        for _ in range(200):
+            v._list_scroll_by(1)
+        assert v._list_scroll == v._list_max_scroll()
+        assert v._list_max_scroll() == len(v._list_display_rows()) - cap
+        for _ in range(200):
+            v._list_scroll_by(-1)
+        assert v._list_scroll == 0
+    finally:
+        os.close(fd)
+
+
+def test_viewer_wheel_over_the_strip_scrolls_the_list_without_zooming(tmp_path):
+    """Mouse-wheel events over the strip scroll it and must NOT reach the
+    widget's zoom -- they were swallowed outright before."""
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        v._draw_list()
+        zoom0 = v.widget.scene.camera.zoom
+        down = MouseEvent("scroll", 1.0, 4.0, scroll="down")
+        assert v._dispatch([down]) is True
+        assert v._list_scroll > 0
+        assert v.widget.scene.camera.zoom == zoom0
+
+        scrolled = v._list_scroll
+        up = MouseEvent("scroll", 1.0, 4.0, scroll="up")
+        assert v._dispatch([up]) is True
+        assert v._list_scroll < scrolled
+        assert v.widget.scene.camera.zoom == zoom0
+
+        # over the viewport the wheel still zooms
+        assert v._dispatch([MouseEvent("scroll", float(v._list_w + 5), 4.0,
+                                       scroll="up")]) is True
+        assert v.widget.scene.camera.zoom != zoom0
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_click_hits_the_right_structure_while_scrolled(tmp_path):
+    """Row hit-testing must follow the scroll offset -- the easiest thing to
+    get wrong, and it silently activates the wrong structure."""
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        v._list_scroll = 12
+        v._draw_list()
+        row0, col_start, _c1 = v._list_row_spans[3]
+        want = v._list_row_struct[3]
+        assert want > 3                       # genuinely a scrolled-to row
+        assert v._dispatch([MouseEvent("down", float(col_start), float(row0),
+                                       button=0)]) is True
+        assert v.frame_index == want
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_jk_autoscroll_keeps_the_cursor_visible(tmp_path):
+    from vimol.input import KeyEvent
+
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        v._list_focused = True
+        v._draw_list()
+        cap = v._list_capacity()
+        for _ in range(cap + 5):
+            v._dispatch([KeyEvent("j")])
+        v._draw_list()
+        assert v._list_cursor == cap + 5
+        assert v._list_cursor in v._list_row_struct     # scrolled into view
+        assert v._list_scroll > 0
+        for _ in range(cap + 5):
+            v._dispatch([KeyEvent("k")])
+        v._draw_list()
+        assert v._list_cursor == 0
+        assert v._list_scroll == 0
+        assert 0 in v._list_row_struct
+    finally:
+        os.close(fd)
+
+
+def test_viewer_activating_an_offscreen_structure_scrolls_it_into_view(tmp_path):
+    """n / opt+down / a digit jump can walk the active structure past the
+    bottom of the strip; the strip follows it."""
+    from vimol.input import KeyEvent
+
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        v._draw_list()
+        for _ in range(v._list_capacity() + 4):
+            v._dispatch([KeyEvent("n")])
+        v._draw_list()
+        assert v.frame_index in v._list_row_struct
+        assert v._list_scroll > 0
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_header_marks_that_there_is_more_to_scroll(tmp_path):
+    """An overflowing list says so -- otherwise nothing tells the user the
+    strip has more below."""
+    v, fd = _traj_viewer(tmp_path, n=60)
+    try:
+        head = v._draw_list().decode("utf-8", "replace").split("\x1b[2;1H")[0]
+        assert "↓" in head and "↑" not in head
+        v._list_scroll = v._list_max_scroll()
+        head = v._draw_list().decode("utf-8", "replace").split("\x1b[2;1H")[0]
+        assert "↑" in head and "↓" not in head
+    finally:
+        os.close(fd)
+
+    v2, fd2 = _traj_viewer(tmp_path, n=3, fd_name="short.bin")
+    try:
+        head = v2._draw_list().decode("utf-8", "replace").split("\x1b[2;1H")[0]
+        assert "↑" not in head and "↓" not in head     # nothing to scroll
+    finally:
+        os.close(fd2)
+
+
 # -- structure-list keymap: Tab focus, list-focused keys (design §4.3) -----
 
 def test_viewer_tab_toggles_list_focus(tmp_path):

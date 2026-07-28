@@ -61,6 +61,12 @@ _LIST_W_MAX = 28
 
 # Structure-list strip colors (design §4.1).
 _LIST_CURSOR_BG = (55, 62, 82)      # cursor-row highlight background
+# Strip rows spent on chrome rather than entries: the header above, and the
+# separator plus footer lines below. _list_capacity() derives what fits from
+# these, and _draw_list lays the panel out to match.
+_LIST_ROWS_ABOVE = 1
+_LIST_ROWS_BELOW = 3
+_LIST_WHEEL_STEP = 3                # display rows per mouse-wheel notch
 
 _HELP_HEAD = [
     "  vimol — terminal molecular viewer",
@@ -302,6 +308,9 @@ class Viewer:
         # headers and off-screen rows appear in neither).
         self._list_row_spans: List[Tuple[int, int, int]] = []
         self._list_row_struct: List[int] = []
+        # index of the first VISIBLE display row (see _list_display_rows):
+        # the strip scrolls, so a 100-frame trajectory is reachable.
+        self._list_scroll = 0
         # the row cursor: distinct from active_index (design §4.3) so
         # j/k/1-9/space/z/h have an unambiguous target while list-focused.
         self._list_cursor = self.structures.active_index
@@ -562,6 +571,51 @@ class Viewer:
             i = j
         return rows
 
+    # -- strip scrolling ---------------------------------------------------
+    def _list_capacity(self) -> int:
+        """How many display rows the strip can show at the current height.
+
+        The single source of truth for the entry block's height: _draw_list
+        slices the rows with it, and the scroll clamps are computed from it,
+        so the two cannot disagree about what fits."""
+        max_row = max(self._rows - 1, 0)     # never draw over the status bar
+        return max(1, max_row - _LIST_ROWS_ABOVE - _LIST_ROWS_BELOW)
+
+    def _list_max_scroll(self) -> int:
+        return max(0, len(self._list_display_rows()) - self._list_capacity())
+
+    def _list_scroll_to(self, first: int) -> bool:
+        """Put display row *first* at the top of the strip, clamped. True if
+        the offset actually moved."""
+        first = max(0, min(self._list_max_scroll(), int(first)))
+        if first == self._list_scroll:
+            return False
+        self._list_scroll = first
+        return True
+
+    def _list_scroll_by(self, delta: int) -> bool:
+        return self._list_scroll_to(self._list_scroll + delta)
+
+    def _list_ensure_visible(self, i: int) -> None:
+        """Scroll the minimum needed to bring structure *i*'s row into view.
+
+        Works in DISPLAY rows, not structure indices -- group headers push
+        the two apart, and doing this arithmetic on the structure index is
+        exactly how a cursor ends up 'visible' at the wrong row."""
+        rows = self._list_display_rows()
+        row = next((r for r, (kind, k, _t) in enumerate(rows)
+                    if kind == "struct" and k == i), None)
+        if row is None:
+            return
+        # scrolling up to the first frame of a file brings its header along:
+        # a bare 'frame 7' with no filename above it says nothing.
+        top = row - 1 if (row and rows[row - 1][0] == "group") else row
+        cap = self._list_capacity()
+        if top < self._list_scroll:
+            self._list_scroll_to(top)
+        elif row >= self._list_scroll + cap:
+            self._list_scroll_to(row - cap + 1)
+
     @staticmethod
     def _truncate_middle(s: str, width: int) -> str:
         """Middle-truncate *s* to *width* visible columns, keeping the file
@@ -601,15 +655,25 @@ class Viewer:
             out.extend(b"\x1b[0m")
             return True
 
-        header = f" STRUCTURES {len(sset)}"
-        put(0, f"\x1b[1m{header.ljust(list_w)[:list_w]}\x1b[22m")
-
         rows = self._list_display_rows()
+        cap = self._list_capacity()
+        # Re-clamp here as well as on every scroll: a terminal resize changes
+        # the capacity under a stored offset that was legal for the old one.
+        self._list_scroll = max(0, min(max(0, len(rows) - cap), self._list_scroll))
+        first = self._list_scroll
+        visible = rows[first:first + cap]
+
+        more_up, more_down = first > 0, first + cap < len(rows)
+        marker = ("↑" if more_up else "") + ("↓" if more_down else "")
+        header = f" STRUCTURES {len(sset)}"
+        head = header[:max(0, list_w - len(marker))].ljust(list_w - len(marker))
+        put(0, f"\x1b[1m{head}\x1b[22m\x1b[2m{marker}\x1b[22m")
+
         fixed = 1 + 2 + 1 + 1 + 1           # leader+idx+sp+swatch+sp
         label_w = max(1, list_w - fixed)
         drawn_rows = 0
-        for n_row, (kind, i, text) in enumerate(rows):
-            row0 = 1 + n_row
+        for n_row, (kind, i, text) in enumerate(visible):
+            row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
                 name = self._truncate_middle(text, max(1, list_w - 1))
                 if not put(row0, f"\x1b[2m {name}\x1b[22m"):
@@ -637,7 +701,7 @@ class Viewer:
             self._list_row_spans.append((row0, 0, list_w))
             self._list_row_struct.append(i)
 
-        sep_row = 1 + drawn_rows
+        sep_row = _LIST_ROWS_ABOVE + drawn_rows
         put(sep_row, "─" * list_w)
         if sset.overlay:
             drawn = sset.drawn_indices()
@@ -1571,7 +1635,15 @@ class Viewer:
                         continue
                 elif ev.action in ("move", "scroll"):
                     col, row = self._event_cell(ev)
-                    if self._in_list_zone(col) or self._in_status_zone(row):
+                    if self._in_list_zone(col):
+                        # the wheel scrolls the strip; it must never fall
+                        # through to the widget and zoom the 3D view.
+                        if ev.action == "scroll" and ev.scroll in ("up", "down"):
+                            step = _LIST_WHEEL_STEP if ev.scroll == "down" else -_LIST_WHEEL_STEP
+                            if self._list_scroll_by(step):
+                                changed = True
+                        continue
+                    if self._in_status_zone(row):
                         continue
             if isinstance(ev, _input.KeyEvent) and ev.key in self._driver_keys:
                 if self._driver_key(ev.key):
@@ -1657,6 +1729,7 @@ class Viewer:
         """
         self.structures.cycle_active(step)
         self._list_cursor = self.structures.active_index
+        self._list_ensure_visible(self._list_cursor)
         self.widget.refresh_active()
         self._last_interact = time.time()
 
@@ -1667,6 +1740,7 @@ class Viewer:
         reset) without discarding the rest of the StructureSet."""
         self.structures.set_active(i)
         self._list_cursor = i
+        self._list_ensure_visible(i)
         self.widget.refresh_active()
 
     def _hide_toggle(self, i: int) -> None:
@@ -1720,14 +1794,21 @@ class Viewer:
         # fall through to the global driver keys below.
         if key == "j":
             self._list_cursor = min(n - 1, self._list_cursor + 1)
+            self._list_ensure_visible(self._list_cursor)
             return True
         if key == "k":
             self._list_cursor = max(0, self._list_cursor - 1)
+            self._list_ensure_visible(self._list_cursor)
+            return True
+        if key in ("home", "end"):
+            self._list_cursor = 0 if key == "home" else n - 1
+            self._list_scroll_to(0 if key == "home" else self._list_max_scroll())
             return True
         if key in "123456789":
             i = int(key) - 1
             if i < n:
                 self._list_cursor = i
+                self._list_ensure_visible(i)
                 return True
             return False
         if key == "]":

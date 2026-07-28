@@ -467,6 +467,17 @@ structure, so clicking one is inert. Grouping runs over *consecutive*
 structures — they load in file order, and grouping across a gap would reorder
 the strip behind the user's back.
 
+**The strip scrolls.** `Viewer._list_scroll` is the first visible display row.
+`_list_capacity()` — terminal height minus the header above and the separator
+and footer below — is the single source of truth for what fits: `_draw_list`
+slices the rows with it and every scroll clamps against it, so a resize can
+never strand the offset. The mouse wheel over the strip scrolls it (and never
+reaches the widget's zoom); `Home`/`End` jump to the ends; `j`/`k`, `1`–`9`,
+`]`/`[` and `n`/`p` scroll the minimum needed to keep their target visible,
+computed on **display** rows (`_list_ensure_visible`) — scrolling up to a
+file's first frame brings its header along. A dim `↑`/`↓` in the header row
+says there is more above/below.
+
 - `▸` marks the active row (also reverse-video); `●` is the tint swatch in the
   structure's own truecolor RGB, `○` when hidden; the whole row dims when
   `visible` is False. A `✓` prefix replaces the space for marked rows.
