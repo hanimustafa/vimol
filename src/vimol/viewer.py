@@ -50,8 +50,11 @@ _IMAGE_Z_INDEX = -1_200_000_000
 _STATUS_ZONE_ROWS = 4
 # Footer hint shown inside the geometry picker (also sizes its minimum width).
 _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
-# Fixed visible width of the status bar's left-hand (hover/molecule-info)
-# field -- see _status_bar for why this must be constant, not just capped.
+# Fallback visible width of the status bar's left-hand (hover/molecule-info)
+# field, used ONLY before the terminal size is known (_cols == 0, i.e. before
+# the first _update_geometry). Once it is known the field is sized
+# dynamically to every column the right-anchored trailer does not need -- see
+# _status_bar for why that width must never depend on the hover text.
 _LEFT_WIDTH = 24
 
 # Structure-list strip width, in columns (design §4.1): a fifth of the
@@ -1512,25 +1515,13 @@ class Viewer:
         # left-segment behavior applies.
         measure = (editor.measurement(mol, self.widget.measure_sel)
                    if self.widget.measure_mode else "")
+        # The molecule "name" is the xyz file's comment line (parsers/xyz.py
+        # keeps it at 60 chars, which stays the real ceiling here). It gets
+        # no cap of its own: the left field's width below is what bounds it,
+        # so a wide terminal actually shows the comment instead of clipping
+        # it to a stub while the middle of the bar sits empty.
         raw_left = measure or self.widget.pick_refusal or hov or (self._msg or
-            f"{(mol.name or 'molecule')[:22]}  {mol.formula()}  {mol.n_atoms} atoms")
-        # Fixed-width, not just truncated: hover text changes on every mouse
-        # move and can be shorter *or* longer than the previous frame's, so
-        # only a constant width (never just a cap) keeps the trailer -- and
-        # the clickable element button in it -- from drifting sideways as
-        # the cursor merely moves around the molecule.
-        #
-        # The truncation marker MUST be a single-column-guaranteed ASCII
-        # character, not the Unicode ellipsis "…" (U+2026): its East Asian
-        # Width is "Ambiguous", and terminals/fonts that render it 2 columns
-        # wide push this line 1 column past _LEFT_WIDTH on the LAST row of
-        # the screen. With no row below to wrap into, that overflow scrolls
-        # the whole terminal up instead -- and since hover text is stable
-        # while the mouse sits still, every subsequent redraw (each edit
-        # forces one) re-triggers it, which is what actually produced the
-        # "status line duplicates on every edit" bug: not a second draw, but
-        # the same line scrolling up and leaving its old position visible.
-        left = (raw_left[:_LEFT_WIDTH - 1] + ">") if len(raw_left) > _LEFT_WIDTH else raw_left.ljust(_LEFT_WIDTH)
+            f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
         rep = self.style.representation
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
@@ -1582,9 +1573,52 @@ class Viewer:
         pieces.append((" ", 1))
 
         trailer, trailer_len, offsets = self._build_segment(pieces)
-        left_len = 1 + _LEFT_WIDTH   # leading space; `base` itself is 0-width
+        # Last-resort shedding, for a terminal too narrow to hold the trailer
+        # at all. The trailer is right-anchored and its RIGHTMOST pieces are
+        # the ones worth keeping ("? help  q quit"), so drop from the FRONT
+        # -- clipping the right end would cost the quit hint exactly when the
+        # user is most likely to want it. Pieces are shed whole, so no SGR
+        # sequence is ever cut in half.
+        while self._cols > 0 and trailer_len > self._cols - 1 and len(pieces) > 1:
+            pieces.pop(0)
+            if elem_piece_idx is not None:
+                elem_piece_idx = elem_piece_idx - 1 if elem_piece_idx > 0 else None
+            trailer, trailer_len, offsets = self._build_segment(pieces)
+
+        # The left field's width is DYNAMIC: every column the trailer does
+        # not need. It must be derived ONLY from things that change rarely --
+        # the terminal width and the trailer's own length -- and NEVER from
+        # `raw_left`, which carries hover text that changes on every mouse
+        # move: a width that tracked it would drag the right-anchored
+        # clickable element/geometry buttons out from under the cursor
+        # between a move and the click that follows. Padding to a fixed width
+        # (never merely truncating) is what keeps that stable.
+        #
+        # It is also what keeps the bar inside the terminal. The bar sits on
+        # the LAST row, which has no row below to wrap into, so an overflow
+        # scrolls the whole terminal up instead -- and since hover text is
+        # stable while the mouse sits still, every subsequent redraw (each
+        # edit forces one) re-triggers it. That is what actually produced the
+        # "status line duplicates on every edit" bug: not a second draw, but
+        # the same line scrolling up and leaving its old position visible.
+        # (The strip does not shrink this budget: _draw_list never emits on
+        # the last row, so the bar owns the full width, strip or no strip.)
+        #
+        # For the same reason the truncation marker MUST be a single-column-
+        # guaranteed ASCII character, not the Unicode ellipsis "…" (U+2026):
+        # its East Asian Width is "Ambiguous", and terminals/fonts that
+        # render it 2 columns wide push this line 1 column over the edge.
+        left_w = (max(0, self._cols - 1 - trailer_len)   # 1 = the leading space
+                  if self._cols > 0 else _LEFT_WIDTH)    # size not known yet
+        if left_w == 0:
+            left = ""
+        elif len(raw_left) > left_w:
+            left = raw_left[:left_w - 1] + ">"
+        else:
+            left = raw_left.ljust(left_w)
+        left_len = 1 + left_w        # leading space; `base` itself is 0-width
         pad = max(self._cols - left_len - trailer_len, 0)
-        if show_buttons:
+        if elem_piece_idx is not None:
             base_col = left_len + pad + offsets[elem_piece_idx] + 2
             self._elem_button_span = (self._rows - 1, base_col + elem_rel[0], base_col + elem_rel[1])
             self._geom_button_span = (self._rows - 1, base_col + geom_rel[0], base_col + geom_rel[1])

@@ -2276,34 +2276,164 @@ def test_status_bar_button_column_stable_across_hover_and_name_changes():
     assert v._elem_button_span == baseline, "a transient status message must not move the button"
 
 
+# -- status bar: the left segment scales with the terminal (VIM-9) --------
+
+def _plain(s):
+    """The printable text of an SGR-decorated string (escapes are 0-width;
+    measuring a decorated string with len() is what corrupts this layout)."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+# A realistic xyz comment line: parsers/xyz.py stores it as Molecule.name,
+# truncated to 60 chars, and that is the real ceiling on this field.
+_LONG_COMMENT = "benzene dimer parallel-displaced B3LYP-D3/def2-TZVP opt r=3.4"[:60]
+
+
+def _bar_viewer(cols, *, editable=False, append=False, strip=0, name=_LONG_COMMENT):
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C", "O"], positions=np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]))
+    mol.name = name
+    v = Viewer(mol, backend="cpu", editable=editable)
+    v.widget.set_pixel_size(240, 200)
+    v._cols, v._rows = cols, 30
+    v._list_w = strip
+    if append:
+        v._dispatch([KeyEvent("a")])
+    return v
+
+
+def test_status_bar_left_segment_grows_with_the_terminal_width():
+    """The xyz comment line used to be pinned to a 24-column field and capped
+    at 22 characters, wasting the whole middle of a wide status bar. The left
+    segment now scales with the terminal, so a wide one shows more of it."""
+    seen = {}
+    for cols in (80, 120, 200):
+        v = _bar_viewer(cols)
+        plain = _plain(v._status_bar())
+        # everything left of the right-anchored trailer, minus the run of
+        # padding spaces that separates them
+        seen[cols] = len(plain[1:].split("[")[0].rstrip())
+    assert seen[200] > seen[80], seen
+    assert seen[120] >= seen[80], seen
+    # at 200 columns the comment is no longer truncated at all
+    v = _bar_viewer(200)
+    assert _LONG_COMMENT in _plain(v._status_bar())
+    # ... while at 80 the old 22-char cap is already beaten
+    assert _LONG_COMMENT[:23] in _plain(_bar_viewer(80)._status_bar())
+
+
+def test_status_bar_never_exceeds_the_terminal_width():
+    """Invariant: the bar lives on the LAST terminal row, where an overflow
+    has no row below to wrap into -- the terminal scrolls the whole screen
+    instead, and since a resting hover string is stable every redraw
+    re-triggers it (the historical 'status line duplicates on every edit'
+    bug). The strip never reaches this row (_draw_list refuses rows >= the
+    last), so the budget is the full _cols with or without it."""
+    for cols in (60, 80, 120, 200):
+        for strip in (0, 24):
+            for kw in ({}, {"editable": True}, {"editable": True, "append": True}):
+                v = _bar_viewer(cols, strip=strip, **kw)
+                width = len(_plain(v._status_bar()))
+                assert width <= cols, (cols, strip, kw, width)
+                assert "?" not in _plain(v._status_bar())[:1]   # sanity
+
+
+def test_status_bar_trailer_stays_intact_and_right_anchored():
+    """The comment yields space to the trailer, never the other way round:
+    whatever the width, the quit hint survives and sits flush right."""
+    for cols in (60, 80, 120, 200):
+        for strip in (0, 24):
+            v = _bar_viewer(cols, strip=strip)
+            plain = _plain(v._status_bar())
+            assert plain.endswith("? help  q quit "), (cols, strip, repr(plain[-30:]))
+            assert "[ballstick]" in plain or "[" in plain
+
+
+def test_status_bar_sheds_leading_trailer_pieces_on_a_too_narrow_terminal():
+    """When even a zero-width comment cannot make the trailer fit, the bar
+    still must not overflow the last row. It sheds trailer pieces from the
+    FRONT (the representation tag first), never clipping the right end --
+    'q quit' is the last thing worth losing on a tiny terminal."""
+    for cols in (30, 40, 50):
+        v = _bar_viewer(cols, editable=True, append=True)
+        plain = _plain(v._status_bar())
+        assert len(plain) <= cols, (cols, len(plain), plain)
+        assert plain.endswith("q quit "), (cols, repr(plain))
+    # at 40 the representation tag is the piece that goes; the quit hint stays
+    plain = _plain(_bar_viewer(40, editable=True)._status_bar())
+    assert "[ball_and_stick]" not in plain
+    assert "q quit" in plain
+    # ... and the element/geometry button spans go with their piece rather
+    # than pointing at columns that were never drawn
+    v = _bar_viewer(30, editable=True, append=True)
+    v._status_bar()
+    for span in (v._elem_button_span, v._geom_button_span):
+        if span is not None:
+            assert span[2] <= v._cols, span
+
+
+def test_status_bar_width_is_independent_of_the_strip_and_of_hover():
+    """The left width may be derived from _cols and the trailer -- both change
+    rarely -- but NEVER from hover text, which changes on every mouse move and
+    would drag the right-anchored clickable buttons out from under the cursor
+    between a move and a click."""
+    a = _bar_viewer(120, editable=True, append=True, strip=0)
+    b = _bar_viewer(120, editable=True, append=True, strip=24)
+    a._status_bar(); b._status_bar()
+    assert a._elem_button_span == b._elem_button_span   # strip is irrelevant
+
+    v = _bar_viewer(120, editable=True, append=True)
+    v._status_bar()
+    baseline = v._elem_button_span
+    widths = {len(_plain(v._status_bar()))}
+    for hovered in (0, 1, None):
+        v.widget.hovered = hovered
+        v._status_bar()
+        assert v._elem_button_span == baseline, hovered
+        widths.add(len(_plain(v._status_bar())))
+    v._msg = "saved a-rather-long-file-name-here.xyz"
+    v._status_bar()
+    assert v._elem_button_span == baseline
+    widths.add(len(_plain(v._status_bar())))
+    assert len(widths) == 1, widths      # total width never moved either
+
+
 def test_truncated_hover_text_uses_ascii_marker_not_wide_ellipsis():
     # Regression: the truncation marker used to be "…" (U+2026), whose East
     # Asian Width is Ambiguous -- terminals/fonts that render it 2 columns
-    # wide push the fixed-width left field 1 column past _LEFT_WIDTH. On the
-    # status bar's row (the terminal's last line) that overflow has nowhere
-    # to wrap to, so the terminal scrolls the whole screen up instead; since
-    # hover text is stable while the mouse sits still, every redraw (each
-    # edit forces one) re-triggers it, which read as the status line
-    # "duplicating with every edit". The marker must be plain ASCII.
-    from vimol.viewer import Viewer, _LEFT_WIDTH
+    # wide push the left field 1 column past its budget. On the status bar's
+    # row (the terminal's last line) that overflow has nowhere to wrap to, so
+    # the terminal scrolls the whole screen up instead; since hover text is
+    # stable while the mouse sits still, every redraw (each edit forces one)
+    # re-triggers it, which read as the status line "duplicating with every
+    # edit". The marker must be plain ASCII.
+    #
+    # The field's width is now dynamic (it takes whatever the right-anchored
+    # trailer leaves), so this drives a NARROW terminal to make truncation
+    # actually fire -- at 100 columns the hover string fits outright and the
+    # marker would never be reached.
+    from vimol.viewer import Viewer
     # multi-digit negative coordinates (like a real hover far from the
-    # origin -- see the bug report's "#3 H (-0.63, 0.63, -0.6...)") push
-    # atom_info() comfortably past _LEFT_WIDTH=24, forcing truncation.
+    # origin -- see the bug report's "#3 H (-0.63, 0.63, -0.6...)") give a
+    # long atom_info() string.
     mol = Molecule(symbols=["C"], positions=np.array([[-12.34, 56.78, -90.12]]))
     v = Viewer(mol, backend="cpu", editable=True)
     v.widget.set_pixel_size(240, 200)
-    v._cols, v._rows = 100, 30
+    v._cols, v._rows = 60, 30
     v.widget.hovered = 0
     long_hov = v.widget.atom_info(0)
-    assert len(long_hov) > _LEFT_WIDTH
     bar = v._status_bar()
     assert "…" not in bar
-    # the visible left field is ASCII-truncated with '>' and exactly _LEFT_WIDTH wide
     import re
     plain = re.sub(r"\x1b\[[0-9;]*m", "", bar)
-    visible_left = plain[1:1 + _LEFT_WIDTH]   # bar starts with a leading space (see _status_bar's seg)
-    assert visible_left == long_hov[:_LEFT_WIDTH - 1] + ">"
+    # the bar starts with a leading space (see _status_bar's seg); the left
+    # field runs from there to wherever the trailer's own '[rep]' begins
+    visible_left = plain[1:plain.index("[")]
+    assert len(long_hov) > len(visible_left)          # truncation really fired
+    assert visible_left == long_hov[:len(visible_left) - 1] + ">"
     assert all(ord(c) < 128 for c in visible_left)
+    # and the whole line still fits the last row -- the point of the marker
+    assert len(plain) <= v._cols
 
 
 # -- status-bar dead zone: protect it from accidental 3D-viewport clicks ---
