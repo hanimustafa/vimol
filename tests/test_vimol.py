@@ -1119,12 +1119,16 @@ def test_viewer_list_legend_renders_key_caps(tmp_path):
         rows = _strip_rows(v)
         below = "".join(t for r, t in sorted(rows.items())
                         if r > v._list_row_spans[-1][0])
-        for word in ("jump to", "next/prev", "mark", "solo", "hide"):
+        for word in ("jump to", "next/prev", "solo", "hide"):
             assert word in _visible(below)
         # key caps: padded key text on a lighter background
         assert _sgr_bg((42, 49, 66)) in below
-        for cap in (" 1 ", " 9 ", " ] ", " [ ", " space ", " z ", " h "):
+        for cap in (" 1 ", " 9 ", " n ", " p ", " z ", " h "):
             assert cap in _visible(below)
+        # ]/[ are the global roll keys; the legend must not advertise them
+        # as the strip's next/prev any more (VIM-9).
+        for gone in (" ] ", " [ "):
+            assert gone not in _visible(below)
     finally:
         os.close(fd)
 
@@ -1333,16 +1337,47 @@ def test_viewer_list_focused_digit_jumps_to_index_without_activating(tmp_path):
         os.close(fd)
 
 
-def test_viewer_list_focused_bracket_keys_cycle_active(tmp_path):
+def test_viewer_list_focused_n_p_cycle_active(tmp_path):
+    """next/prev is n/p, not ]/[ (design §4.3). Both are global driver keys,
+    so they must still reach the driver through a focused strip -- the strip
+    claims nothing for them and unclaimed keys fall through."""
     from vimol.viewer import Viewer
     from vimol.input import KeyEvent
 
     v, fd = _multi_viewer(tmp_path)
     try:
         v._list_focused = True
-        assert v._dispatch([KeyEvent("]")]) is True
+        assert v._dispatch([KeyEvent("n")]) is True
         assert v.frame_index == 1
+        assert v._dispatch([KeyEvent("n")]) is True
+        assert v.frame_index == 2
+        assert v._dispatch([KeyEvent("p")]) is True
+        assert v.frame_index == 1
+        assert v._dispatch([KeyEvent("p")]) is True
+        assert v.frame_index == 0
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_bracket_keys_roll_the_camera_not_the_strip(tmp_path):
+    """]/[ are the GLOBAL roll bindings (widget.py). The strip used to shadow
+    them with next/prev; it must not -- focused or not, they reach the widget
+    and roll the camera, leaving the active structure alone."""
+    import numpy as np
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_focused = True
+        cam = v.widget.scene.camera
+        before = cam.rotation.copy()
+        assert v._dispatch([KeyEvent("]")]) is True
+        rolled = cam.rotation.copy()
+        assert not np.allclose(rolled, before)      # ] rolled the camera
+        assert v.frame_index == 0                   # ... and did NOT cycle
         assert v._dispatch([KeyEvent("[")]) is True
+        assert np.allclose(cam.rotation, before)    # [ rolled it back
         assert v.frame_index == 0
     finally:
         os.close(fd)

@@ -151,8 +151,8 @@ two competing concepts.
 
 **Decision: collapse them.** `load_all()` on a multi-model file yields N
 molecules → N `Structure` entries with `#k` labels. `n`/`p`, the worktree's
-`opt+up`/`opt+down`, the `struc N/total` pill and the strip's `]`/`[` (§4.3)
-all call `cycle_active`.
+`opt+up`/`opt+down` and the strip's row activation (§4.3) all call
+`cycle_active`.
 
 `Viewer` keeps both names as live properties, not read-only aliases —
 `app.py:240` already does `viewer.frame_index = idx`:
@@ -189,7 +189,7 @@ cheapest possible proving ground for the container before multi-file loading
 adds per-file failure handling, mixed formats and cross-file labels on top.
 
 VIM-9 delivers: `load_all` → `StructureSet` with `#k` labels, the structure
-list strip (§4), `]`/`[`/`n`/`p`/digit navigation, overlay of a marked subset,
+list strip (§4), `n`/`p`/digit navigation, overlay of a marked subset,
 and per-structure tint. Everything in §§1, 3, 4 is exercised; nothing in §§6–8
 is required.
 
@@ -438,7 +438,7 @@ image — so it costs nothing to render and never touches the renderer.
  ░ 3 mutant.pdb       <- hidden: hollow swatch, whole row dimmed
  ──────────────────
   1 - 9  jump to
-  ]  [  next/prev
+  n  p  next/prev
   space  mark
   z  solo  h  hide
  overlay 1+2 · aligned
@@ -478,7 +478,7 @@ and footer below — is the single source of truth for what fits: `_draw_list`
 slices the rows with it and every scroll clamps against it, so a resize can
 never strand the offset. The mouse wheel over the strip scrolls it (and never
 reaches the widget's zoom); `Home`/`End` jump to the ends; `j`/`k`, `1`–`9`,
-`]`/`[` and `n`/`p` scroll the minimum needed to keep their target visible,
+and `n`/`p` scroll the minimum needed to keep their target visible,
 computed on **display** rows (`_list_ensure_visible`) — scrolling up to a
 file's first frame brings its header along. A dim `↑`/`↓` in the header row
 says there is more above/below.
@@ -502,8 +502,8 @@ says there is more above/below.
   Plain `STRUCTURES N`: letter-spacing it would need ~24 of the 18 columns a
   default terminal gives the strip.
 - **separator** — a dim rule inset one column each side, then a **legend** of
-  key caps (padded key text on a lighter background) for `1`-`9`, `]`/`[`,
-  `space`, `z`, `h`.
+  key caps (padded key text on a lighter background) for `1`-`9`, `n`/`p`,
+  `z`, `h`.
 - Every row is emitted by `_list_line`, which lays out `(text, sgr)` segments
   to an exact *visible* width. SGR sequences are zero-width, so measuring a
   pre-decorated string with `len()` is precisely what corrupts the layout;
@@ -555,10 +555,12 @@ status bar's existing handling:
 
 ### 4.3 Keys — a focused strip, so no existing binding changes
 
-`1`–`9`, `[`, `]`, `h` and `z` all collide with bindings that exist today:
-`1`–`4` set the representation, `[`/`]` roll the camera, and `h` is the vim
-orbit-left key (`widget.handle_key`, `widget.py:251-272`). Relocating four
-established bindings to make room is the expensive answer.
+`1`–`9`, `h` and `z` all collide with bindings that exist today: `1`–`4` set
+the representation and `h` is the vim orbit-left key (`widget.handle_key`,
+`widget.py:251-272`). Relocating established bindings to make room is the
+expensive answer. (`[`/`]` — camera roll — are deliberately *not* in the
+strip's keymap at all: next/prev is the global `n`/`p`, so the strip never
+shadows the roll keys, focused or not.)
 
 **Decision: the strip takes keyboard focus.** `Tab` toggles focus between the
 viewport (default) and the strip; clicking any row also focuses it; `Esc`
@@ -571,7 +573,6 @@ namespace.
 | `Tab` | global | toggle strip focus |
 | `n` / `p` | global | next / prev structure (unchanged, already shipped) |
 | `opt+↑` / `opt+↓` | global | next / prev structure (from the worktree branch) |
-| `]` / `[` | strip | next / prev structure |
 | `j` / `k` | strip | move the row cursor without activating |
 | `↑` / `↓` | global | orbit the camera — the strip never claims the plain arrows |
 | `1`–`9` | strip | jump to structure N |
@@ -1105,7 +1106,7 @@ Every README snippet, and why it still works:
 | `widget.to_kitty(cols=, rows=)` | unchanged |
 | `examples/embed_demo.py` | uses only the above |
 | `vimol file.xyz`, `--render`, `--kitty`, `--info`, `--frame` | single-file behaviour byte-identical |
-| every existing keybinding (`1`–`4`, `[`/`]`, `h`/`j`/`k`/`l`, `n`/`p`, …) | the strip's colliding keys are focus-scoped; only `Tab` is new (§4.3) |
+| every existing keybinding (`1`–`4`, `[`/`]`, `h`/`j`/`k`/`l`, `n`/`p`, …) | the strip's colliding keys are focus-scoped, and `[`/`]` are not claimed at all; only `Tab` is new (§4.3) |
 | host apps embedding `MoleculeWidget` | the strip lives in `Viewer`, not the widget — an embedder's layout is untouched |
 | `Style(...)` constructed by a caller | `flat_mask` is a new field defaulting to `None`, which is exactly today's shading |
 | `SphereBatch(...)` / `CylinderBatch(...)` built directly | new `flat` field defaults to zeros; `.empty()` unchanged |
@@ -1205,7 +1206,7 @@ mechanism.
 
 - **Keymap.** §4.3 introduces exactly one new global binding (`Tab`, strip
   focus) and changes none. That was chosen over relocating `1`–`4`
-  (representation), `[`/`]` (roll) and `h` (orbit-left), all of which the
+  (representation) and `h` (orbit-left), which the
   requested list-key set collides with. If a bare, unfocused `1`–`9` is wanted
   instead, four existing bindings need new homes — say so and it is a small
   change to this section, not to the model.

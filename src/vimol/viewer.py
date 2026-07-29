@@ -684,7 +684,7 @@ class Viewer:
         cap = self._list_cap
         return [
             [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
-            [(" ", ""), cap("]"), cap("["), (" next/prev", muted)],
+            [(" ", ""), cap("n"), cap("p"), (" next/prev", muted)],
             [(" ", ""), cap("space"), (" mark", muted)],
             [(" ", ""), cap("z"), (" solo ", muted), cap("h"), (" hide", muted)],
         ]
@@ -1893,12 +1893,10 @@ class Viewer:
                 self._list_ensure_visible(i)
                 return True
             return False
-        if key == "]":
-            self._activate_structure((sset.active_index + 1) % n)
-            return True
-        if key == "[":
-            self._activate_structure((sset.active_index - 1) % n)
-            return True
+        # NOT ]/[ -- those are the global roll bindings (widget.handle_key),
+        # and the strip must not shadow them. next/prev is n/p, which the
+        # strip deliberately leaves unclaimed so it falls through to the
+        # global driver keys (design §4.3).
         if key == "enter":
             self._activate_structure(self._list_cursor)
             sset.clear_marks()
