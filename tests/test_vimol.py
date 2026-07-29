@@ -1126,8 +1126,9 @@ def test_viewer_list_legend_renders_key_caps(tmp_path):
         for cap in (" 1 ", " 9 ", " n ", " p ", " z ", " h "):
             assert cap in _visible(below)
         # ]/[ are the global roll keys; the legend must not advertise them
-        # as the strip's next/prev any more (VIM-9).
-        for gone in (" ] ", " [ "):
+        # as the strip's next/prev any more (VIM-9). 'space'/'mark' are gone
+        # with the mark concept: overlay membership is opt+click only.
+        for gone in (" ] ", " [ ", " space ", "mark"):
             assert gone not in _visible(below)
     finally:
         os.close(fd)
@@ -1383,7 +1384,10 @@ def test_viewer_list_focused_bracket_keys_roll_the_camera_not_the_strip(tmp_path
         os.close(fd)
 
 
-def test_viewer_list_focused_space_marks_row(tmp_path):
+def test_viewer_list_focused_space_no_longer_changes_overlay_membership(tmp_path):
+    """The user-facing 'mark' concept is gone (VIM-9): overlay membership is
+    reachable ONLY by opt+click. 'space' must claim nothing in the strip's
+    keymap and must not change what the overlay draws."""
     from vimol.viewer import Viewer
     from vimol.input import KeyEvent
 
@@ -1391,10 +1395,25 @@ def test_viewer_list_focused_space_marks_row(tmp_path):
     try:
         v._list_focused = True
         v._list_cursor = 1
-        assert v._dispatch([KeyEvent(" ")]) is True
-        assert v.structures[1].marked is True
-        assert v._dispatch([KeyEvent(" ")]) is True
-        assert v.structures[1].marked is False
+        before = v.structures.drawn_indices()
+        assert v._handle_list_key(" ") is False
+        v._dispatch([KeyEvent(" ")])
+        assert v.structures.drawn_indices() == before
+        assert v.structures.overlay is False
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_legend_is_three_rows_and_matches_the_reserved_footer(tmp_path):
+    """The legend lost its 'space mark' row, so the footer height reserved by
+    _LIST_ROWS_BELOW (separator + legend) has to shrink with it -- otherwise
+    _list_capacity() lies about what fits and the scroll clamps drift."""
+    from vimol.viewer import _LIST_ROWS_BELOW
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        assert len(v._list_legend()) == 3
+        assert _LIST_ROWS_BELOW == 1 + len(v._list_legend())
     finally:
         os.close(fd)
 

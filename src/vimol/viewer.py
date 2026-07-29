@@ -75,7 +75,7 @@ _LIST_CAP_BG = (42, 49, 66)         # legend "key cap" background
 # separator plus footer lines below. _list_capacity() derives what fits from
 # these, and _draw_list lays the panel out to match.
 _LIST_ROWS_ABOVE = 2                # header + a blank row
-_LIST_ROWS_BELOW = 5                # separator + the four legend lines
+_LIST_ROWS_BELOW = 4                # separator + the three legend lines
 _LIST_WHEEL_STEP = 3                # display rows per mouse-wheel notch
 
 _HELP_HEAD = [
@@ -685,7 +685,6 @@ class Viewer:
         return [
             [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
             [(" ", ""), cap("n"), cap("p"), (" next/prev", muted)],
-            [(" ", ""), cap("space"), (" mark", muted)],
             [(" ", ""), cap("z"), (" solo ", muted), cap("h"), (" hide", muted)],
         ]
 
@@ -754,13 +753,15 @@ class Viewer:
             active = i == sset.active_index
             # The active row IS its background (no leader glyph); the cursor
             # row gets a subtler one, so the two stay tellable apart when
-            # they differ (design §4.3). A marked row wears its own tint on
-            # the label -- the mark has to stay visible without a leader.
+            # they differ (design §4.3). A row that is IN THE OVERLAY wears
+            # its own tint on the label -- with no leader glyph and no key
+            # binding for it, that tint is the only way to read the overlay
+            # set off the screen at all (membership is opt+click only).
             bg = (_LIST_ACTIVE_BG if active
                   else _LIST_CURSOR_BG if i == self._list_cursor else None)
             dim = "\x1b[2m" if not entry.visible else ""
-            # The tint outranks the active row's near-white label: pressing
-            # 'space' on the active row has to change something on screen,
+            # The tint outranks the active row's near-white label:
+            # opt+clicking the active row has to change something on screen,
             # and the background is already saying which row is active.
             label_fg = (self._sgr_fg(tint) if entry.marked
                         else self._sgr_fg(_LIST_LABEL_FG if active else _LIST_DIM_FG))
@@ -1841,11 +1842,15 @@ class Viewer:
         the overlay; opt+click adds it to the overlay alongside the current
         one. Clicking any row also gives the strip keyboard focus.
 
-        opt+click is a *toggle*: opt+clicking an already-marked row unmarks
-        it, leaving the other marks alone. Dropping the last mark also turns
-        the overlay back off -- overlay with an empty mark set means "draw
-        every visible structure" (StructureSet.drawn_indices), which is the
-        opposite of what unmarking your last selection asks for."""
+        opt+click is the ONLY way to change overlay membership -- the
+        strip's keymap binds nothing to it.
+
+        opt+click is a *toggle*: opt+clicking a row that is already in the
+        overlay drops it, leaving the rest of the set alone. Dropping the
+        last one also turns the overlay back off -- overlay with an empty
+        membership set means "draw every visible structure"
+        (StructureSet.drawn_indices), which is the opposite of what dropping
+        your last selection asks for."""
         self._list_focused = True
         if opt:
             entry = self.structures[i]
@@ -1901,9 +1906,6 @@ class Viewer:
             self._activate_structure(self._list_cursor)
             sset.clear_marks()
             self._list_focused = False
-            return True
-        if key == " ":
-            sset.toggle_mark(self._list_cursor)
             return True
         if key == "z":
             sset.solo(self._list_cursor)

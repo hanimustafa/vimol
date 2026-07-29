@@ -439,7 +439,6 @@ image — so it costs nothing to render and never touches the renderer.
  ──────────────────
   1 - 9  jump to
   n  p  next/prev
-  space  mark
   z  solo  h  hide
  overlay 1+2 · aligned
  camera shared
@@ -466,7 +465,7 @@ gets no header, just its own row labelled with the basename. Otherwise a
 `Viewer._list_display_rows()` is the *only* place display rows and structure
 indices are related: it returns `(kind, structure_index, text)` per row, and
 `_draw_list` registers a click span (plus its structure index in
-`_list_row_struct`) only for the rows it actually emitted. Keys, marks and
+`_list_row_struct`) only for the rows it actually emitted. Keys, clicks and
 `1`–`9` address **structures**, never display rows; group headers own no
 structure, so clicking one is inert. Grouping runs over *consecutive*
 structures — they load in file order, and grouping across a gap would reorder
@@ -490,11 +489,13 @@ says there is more above/below.
   the leading and trailing padding, not just the text) plus a near-white
   label. **cursor row** — the same idea in a subtler background, so the two
   stay tellable apart on the rows where they differ.
-- **marked row** — the label in the structure's own tint. Marks still have to
-  be visible once `✓` is gone, and colour already identifies a structure
-  everywhere else (§4.4). The tint outranks the active row's near-white
-  label: `space` on the active row must change something on screen, and the
-  background already says which row is active.
+- **row in the overlay** — the label in the structure's own tint. Overlay
+  membership still has to be visible once `✓` is gone, and colour already
+  identifies a structure everywhere else (§4.4). With no key bound to
+  membership it is the *only* on-screen reading of the overlay set, so it
+  matters more, not less. The tint outranks the active row's near-white
+  label: opt+clicking the active row must change something on screen, and
+  the background already says which row is active.
 - **swatch** — `█` in the structure's truecolor tint, `░` and dimmed when
   hidden (the whole row dims). **index** — 1-based, in a grey dimmer than the
   label.
@@ -576,8 +577,7 @@ namespace.
 | `j` / `k` | strip | move the row cursor without activating |
 | `↑` / `↓` | global | orbit the camera — the strip never claims the plain arrows |
 | `1`–`9` | strip | jump to structure N |
-| `Enter` | strip | activate the row cursor, clear marks, return focus |
-| `space` | strip | toggle **mark** on the cursor row |
+| `Enter` | strip | activate the row cursor, clear the overlay set, return focus |
 | `z` | strip | **solo** toggle |
 | `h` | strip | **hide** toggle on the cursor row |
 | `o` | strip | toggle `overlay` |
@@ -585,14 +585,17 @@ namespace.
 
 Mouse, focus-independent: **click** a row → `set_active(k)`, `clear_marks()`,
 `overlay = False` — "that structure replaces the pane", identical to next/prev.
-**opt+click** a row *toggles* `marked` on it — "add it to / drop it from the
-overlay alongside the current one" — and sets `overlay` to whether any mark
-survives. Unmarking the last mark therefore turns the overlay off: overlay
-with an empty mark set means "draw every visible structure" (§3
-`drawn_indices`), which is not what dropping your last selection asks for.
+**opt+click** a row *toggles* its overlay membership (`Structure.marked`,
+the internal flag) — "add it to / drop it from the overlay alongside the
+current one" — and sets `overlay` to whether any member survives. **opt+click
+is the only way to change membership**; there is no key binding for it, and
+the UI never calls it a "mark". Dropping the last member therefore turns the
+overlay off: overlay with an empty membership set means "draw every visible
+structure" (§3 `drawn_indices`), which is not what dropping your last
+selection asks for.
 
 **The row cursor is not the active index.** `j`/`k` move a cursor without
-changing what is rendered, so `space` / `z` / `h` need an unambiguous target:
+changing what is rendered, so `z` / `h` need an unambiguous target:
 they all act on **`Viewer._list_cursor`**, an int that starts at `active_index`
 and is reset to it by every `set_active`. The two are drawn differently — `▸`
 plus tint-coloured text marks the *active* row, a reverse-video background
@@ -603,11 +606,13 @@ key that promotes cursor → active.
 
 Semantics against `StructureSet`:
 
-- **mark** (`space`) — `Structure.marked`, the multi-select. It is the *one*
-  subset concept, consumed by both overlay (`drawn_indices`, §3) and alignment
-  (`align_marked(onto=active)` fits every marked structure onto the active one).
-  Rejected: separate overlay-set and align-set state; users would have to build
-  the same selection twice.
+- **overlay membership** (opt+click only) — `Structure.marked`, the internal
+  multi-select flag. It is the *one* subset concept, consumed by both overlay
+  (`drawn_indices`, §3) and alignment (`align_marked(onto=active)` fits every
+  member onto the active one). Rejected: separate overlay-set and align-set
+  state; users would have to build the same selection twice. The flag keeps
+  its `marked` name in the model; the **UI never says "mark"** — a row is
+  either in the overlay or not, and opt+click is how it gets there.
 - **solo** (`z`) — a **toggle**. `solo(i)` stores the current visibility vector
   in `_solo_restore` and sets `visible` True on `i` only; `z` again restores it.
   One-way solo would strand the user re-showing rows by hand.
