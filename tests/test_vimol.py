@@ -1459,7 +1459,7 @@ def test_viewer_list_focused_h_hides_but_refuses_to_hide_the_last_visible(tmp_pa
         os.close(fd)
 
 
-def test_viewer_list_focused_o_toggles_overlay(tmp_path):
+def test_viewer_list_focused_v_toggles_overlay(tmp_path):
     from vimol.viewer import Viewer
     from vimol.input import KeyEvent
 
@@ -1467,8 +1467,27 @@ def test_viewer_list_focused_o_toggles_overlay(tmp_path):
     try:
         v._list_focused = True
         assert v.structures.overlay is False
-        assert v._dispatch([KeyEvent("o")]) is True
+        assert v._dispatch([KeyEvent("v")]) is True
         assert v.structures.overlay is True
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_focused_o_falls_through_to_autospin_when_editable(tmp_path):
+    # The strip no longer claims 'o' (it collided with the editable-mode
+    # autospin binding, _EDIT_DRIVER_KEYS); unclaimed keys fall through to
+    # the global driver keys (design §4.3).
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path, editable=True)
+    try:
+        v._list_focused = True
+        assert v.autospin is False
+        assert v.structures.overlay is False
+        assert v._dispatch([KeyEvent("o")]) is True
+        assert v.autospin is True
+        assert v.structures.overlay is False
     finally:
         os.close(fd)
 

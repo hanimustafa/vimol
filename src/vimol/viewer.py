@@ -1947,7 +1947,9 @@ class Viewer:
         if key == "h":
             self._hide_toggle(self._list_cursor)
             return True
-        if key == "o":
+        # NOT 'o' -- that is _EDIT_DRIVER_KEYS' autospin binding when editable,
+        # and the strip must not shadow it (design §4.3).
+        if key == "v":
             sset.overlay = not sset.overlay
             return True
         return False

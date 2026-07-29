@@ -563,6 +563,12 @@ expensive answer. (`[`/`]` — camera roll — are deliberately *not* in the
 strip's keymap at all: next/prev is the global `n`/`p`, so the strip never
 shadows the roll keys, focused or not.)
 
+The overlay toggle is `v`, not `o`: `o` is claimed by `_EDIT_DRIVER_KEYS`
+(`viewer.py`) as the editable-mode relocation of autospin, and the strip's
+keymap only applies while it has focus — an editable viewer with the strip
+focused would otherwise have `o` toggle the overlay instead of autospin. `v`
+collides with nothing in `widget.handle_key` or the driver keys.
+
 **Decision: the strip takes keyboard focus.** `Tab` toggles focus between the
 viewport (default) and the strip; clicking any row also focuses it; `Esc`
 returns focus to the viewport. While the strip has focus its keymap applies and
@@ -580,7 +586,7 @@ namespace.
 | `Enter` | strip | activate the row cursor, clear the overlay set, return focus |
 | `z` | strip | **solo** toggle |
 | `h` | strip | **hide** toggle on the cursor row |
-| `o` | strip | toggle `overlay` |
+| `v` | strip | toggle `overlay` |
 | `Esc` | strip | return focus to the viewport |
 
 Mouse, focus-independent: **click** a row → `set_active(k)`, `clear_marks()`,
