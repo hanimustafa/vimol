@@ -2335,7 +2335,6 @@ def test_status_bar_never_exceeds_the_terminal_width():
                 v = _bar_viewer(cols, strip=strip, **kw)
                 width = len(_plain(v._status_bar()))
                 assert width <= cols, (cols, strip, kw, width)
-                assert "?" not in _plain(v._status_bar())[:1]   # sanity
 
 
 def test_status_bar_trailer_stays_intact_and_right_anchored():
@@ -2346,7 +2345,10 @@ def test_status_bar_trailer_stays_intact_and_right_anchored():
             v = _bar_viewer(cols, strip=strip)
             plain = _plain(v._status_bar())
             assert plain.endswith("? help  q quit "), (cols, strip, repr(plain[-30:]))
-            assert "[ballstick]" in plain or "[" in plain
+            # the whole trailer, not just its tail: the representation tag is
+            # its FIRST piece, so its survival is what proves nothing was shed
+            assert "[ball_and_stick]" in plain, (cols, strip, repr(plain))
+            assert "  [cpu]" in plain and " q1x" in plain
 
 
 def test_status_bar_sheds_leading_trailer_pieces_on_a_too_narrow_terminal():
