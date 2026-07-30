@@ -41,6 +41,10 @@ dependencies = ["numpy>=1.20", "moderngl>=5.6"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+# numba compiles the CPU raycaster's inner loop (_render_fast) to machine
+# code: ~10-25x faster CPU rendering, bit-identical output. Entirely
+# optional -- without it the pure-numpy path runs unchanged.
+fast = ["numba>=0.59"]
 
 [project.scripts]
 vimol = "vimol.app:main"
