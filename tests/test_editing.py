@@ -1202,6 +1202,35 @@ def test_save_prompt_default_path_uses_source(tmp_path):
     assert v._input_buf == "/some/where/mol.xyz"
 
 
+def _multi_file_viewer(tmp_path):
+    """Two single-model files loaded as one multi-file session (VIM-1)."""
+    from vimol.viewer import Viewer
+    a = tmp_path / "a.xyz"
+    a.write_text("2\nmymol\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
+    b = tmp_path / "b.xyz"
+    b.write_text("1\nother\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(a), str(b)], no_bonds=False, tolerance=0.45)
+    return Viewer(sset[0].molecule, structures=sset, backend="cpu", editable=True), a, b
+
+
+def test_save_prompt_default_path_follows_active_structure(tmp_path):
+    # multi-file has no single source_path, so the default must come from the
+    # ACTIVE structure's own file -- not the molecule's comment-line name.
+    v, a, b = _multi_file_viewer(tmp_path)
+    assert v._default_save_path() == str(a)
+    v.frame_index = 1
+    assert v._default_save_path() == str(b)
+
+
+def test_save_as_does_not_leak_the_path_to_the_next_structure(tmp_path):
+    # saving structure a under a new name must not become the default for b.
+    v, a, b = _multi_file_viewer(tmp_path)
+    v._do_save(str(tmp_path / "renamed.xyz"))
+    assert v._default_save_path() == str(tmp_path / "renamed.xyz")
+    v.frame_index = 1
+    assert v._default_save_path() == str(b)
+
+
 def test_save_prompt_escape_cancels(tmp_path):
     v = _new_viewer(tmp_path)
     v.widget.dirty = True

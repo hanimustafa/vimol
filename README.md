@@ -32,10 +32,10 @@ status-bar pills pick the element and geometry), option-drag to draw bonds,
 every binding.
 
 Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
-session, auto-overlaid — the first structure of each file shown together,
-tinted to tell them apart — so you can compare shapes immediately; `opt+click`
-a row in the structure list to add another loaded frame into the overlay or
-drop one out.
+session, auto-overlaid — the first structure of each file shown together, the
+active one in normal element colours and the rest flat-tinted so you can tell
+them apart. Multi-model files keep every frame loaded; `opt+click` a row in the
+structure list to add one into the overlay or drop it out.
 
 ```bash
 vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling

@@ -216,14 +216,19 @@ Consequences for `app.py`:
 - `--frame K` selects the initial `active_index` **into the whole set**, in load
   order — unchanged meaning for the single-file case, and unambiguous for many.
   `--active LABEL` is the readable form for multi-file sessions.
-- `--render` / `--kitty` with 2+ structures render the **overlay** (all visible):
-  it is the only meaningful single image. Colouring is §4.4's rule verbatim —
-  the active structure in CPK, the rest flat and tinted — so a batch still
-  matches what the interactive viewer shows, with no batch-specific path.
-  `--frame K` / `--active LABEL` still narrows to one, which then takes the
-  fast path and renders exactly as a single-file run does today.
-- `--info` prints today's block per structure, separated by a blank line, then
-  a `structures: N` totals line.
+- ~~`--render` / `--kitty` with 2+ structures render the **overlay**~~ and
+  ~~`--info` prints today's block per structure~~ — **superseded 2026-07-30.**
+  `--render`, `--kitty` and `--info` (and the `--size` / `--supersample` flags
+  that only configured them) were **removed from the CLI entirely** when VIM-1
+  shipped, rather than extended to multi-file. There is no batch-still or
+  batch-inspection flag left for a multi-structure rule to apply to. The
+  underlying `Scene.to_png()` / `Scene.to_kitty()` library API is untouched.
+  See `docs/superpowers/specs/2026-07-30-multi-file-cli-design.md`.
+- **Auto-overlay (VIM-1, as shipped).** 2+ files → `overlay = True` with the
+  **first model of each file** marked, so the overlay opens showing one
+  structure per file; every other model stays loaded and reachable (`n`/`p`,
+  the list strip, `opt+click` to add or drop). A single file opened alone is
+  unaffected: `overlay` stays `False` and nothing is auto-marked.
 
 The worktree branch should be **rebased onto this API as part of VIM-2**, not
 merged first: its `self.frames` / `self.frame_index` references become
@@ -1116,7 +1121,7 @@ Every README snippet, and why it still works:
 | `InputDecoder` / `MouseEvent` / `widget.handle_mouse(ev, origin=...)` | input layer untouched |
 | `widget.to_kitty(cols=, rows=)` | unchanged |
 | `examples/embed_demo.py` | uses only the above |
-| `vimol file.xyz`, `--render`, `--kitty`, `--info`, `--frame` | single-file behaviour byte-identical |
+| `vimol file.xyz`, `--frame` | single-file behaviour byte-identical (`--render` / `--kitty` / `--info` were removed from the CLI in VIM-1 — see §2) |
 | every existing keybinding (`1`–`4`, `[`/`]`, `h`/`j`/`k`/`l`, `n`/`p`, …) | the strip's colliding keys are focus-scoped, and `[`/`]` are not claimed at all; only `Tab` is new (§4.3) |
 | host apps embedding `MoleculeWidget` | the strip lives in `Viewer`, not the widget — an embedder's layout is untouched |
 | `Style(...)` constructed by a caller | `flat_mask` is a new field defaulting to `None`, which is exactly today's shading |

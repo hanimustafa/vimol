@@ -2322,6 +2322,17 @@ class Viewer:
 
     # -- save prompt ------------------------------------------------------
     def _default_save_path(self) -> str:
+        """Where 's' proposes to write: the ACTIVE structure's own file.
+
+        Per-structure rather than per-session, because a multi-file session
+        (VIM-1) has no single source path -- and because ``source_path``
+        alone would otherwise carry one structure's save-as target over to
+        the next one the user tabs to. For a single-file session every entry
+        was appended with ``path=source_path``, so this returns exactly what
+        it always did.
+        """
+        if self.structures.entries and self.structures.active.path:
+            return self.structures.active.path
         if self.source_path:
             return self.source_path
         name = (self.widget.molecule.name or "molecule").strip() or "molecule"
@@ -2390,6 +2401,10 @@ class Viewer:
             self._quit_after_save = False       # a failed save stays running
         else:
             self.source_path = path
+            if self.structures.entries:
+                # a save-as retargets THIS structure only; the next one the
+                # user tabs to must still default to its own file.
+                self.structures.active.path = path
             self.widget.mark_saved()
             self._msg = f"saved {os.path.basename(path)}"
             if self._quit_after_save:           # ESC-quit routed through save
