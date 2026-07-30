@@ -43,7 +43,7 @@ def parse(text: str) -> List[Molecule]:
         mol = Molecule(
             symbols=symbols,
             positions=np.array(coords, float) if coords else np.zeros((0, 3)),
-            name=comment.strip()[:60],
+            name=comment.strip(),
         )
         mols.append(mol)
         i += 2 + count

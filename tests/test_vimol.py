@@ -112,6 +112,18 @@ def test_xyz_roundtrip_and_bonds():
     assert mol.formula() == "C6H6"
 
 
+def test_xyz_keeps_full_comment_past_60_chars():
+    from vimol.parsers import xyz as xyz_parser
+    long_comment = "SCF Energy = -76.123456789012 Hartree, converged in 42 cycles, RMS grad 1e-9"
+    assert len(long_comment) > 60
+    text = f"1\n{long_comment}\nO 0.0 0.0 0.0\n"
+    mols = xyz_parser.parse(text)
+    assert mols[0].name == long_comment
+    # round-trips through dumps()/parse() unchanged
+    again = xyz_parser.parse(xyz_parser.dumps(mols[0]))
+    assert again[0].name == long_comment
+
+
 def test_c60_topology():
     mol = vimol.load(os.path.join(EX, "c60.xyz"))
     ensure_bonds(mol)
