@@ -264,6 +264,11 @@ class Viewer:
         # capability probe handed in by the CLI (it may have probed already
         # to decide whether to launch at all); None -> probe in _finish_startup.
         self._probe = probe
+        # How frame pixels reach the terminal: "direct" (base64 escape codes)
+        # or "shm" (a shared-memory name), chosen in _finish_startup from the
+        # probe. See _draw for why this is what governs whether interactive
+        # frames can afford full resolution at all.
+        self._transmit = "direct"
         # frame delivery fence (see _arm_fence): when it went out, which kind
         # of frame it trails ("interact" | "settle"), that frame's local
         # (render+encode+write) cost, and a tail of raw input scanned for the
@@ -418,6 +423,17 @@ class Viewer:
             # raises it as fast settles are actually observed.
             self._idle_scale = 1.0 if (probe.rtt is not None
                                        and probe.rtt <= _LOCAL_RTT) else 0.5
+            # A terminal that accepted our shared-memory object is provably on
+            # this machine: send pixels that way and skip the per-frame zlib
+            # (~24 of the ~27 ms a full-resolution 1600x1000 frame used to
+            # cost). That is what lets _next_render_scale ride near 1.0 while
+            # you drag instead of settling around 0.34 -- the interactive
+            # blur was never bandwidth, it was compressing every frame.
+            # shm implies a replying terminal, hence _paced below, so exactly
+            # one frame is ever in flight. A wedged terminal (fence timeout)
+            # is bounded separately by kitty._SHM_KEEP, which only ever
+            # recycles stale frames -- see the test for that invariant.
+            self._transmit = "shm" if probe.shm else "direct"
             if probe.rtt is not None:
                 # the terminal answers DA1: fence every frame and self-clock
                 # to the link (one frame in flight, no bufferbloat backlog).
@@ -496,6 +512,9 @@ class Viewer:
                           + _SHOW_CURSOR + _ALT_SCREEN_OFF, self.fd_out)
         if self._old_termios is not None:
             termios.tcsetattr(self.fd_in, termios.TCSADRAIN, self._old_termios)
+        # A POSIX shm object outlives its creator, and the frame we wrote just
+        # before quitting may never have been read: unlink what's left.
+        kitty.shm_cleanup()
         # With VIMOL_TIMING on, print the session's worst per-stage latencies
         # to the shell after quitting, and record them in the log too.
         summary = self._tsummary()
@@ -1018,7 +1037,10 @@ class Viewer:
                                   z_index=_IMAGE_Z_INDEX,
                                   # fast, slightly-larger compression while moving;
                                   # the resting still gets the smaller default.
-                                  compress_level=1 if interacting else 6)
+                                  # (Both ignored on the shm path, which never
+                                  # compresses -- see kitty.encode_image.)
+                                  compress_level=1 if interacting else 6,
+                                  transmit=self._transmit)
         t_encode = time.perf_counter()
         out = bytearray()
         # The image is placed at the strip's right edge (col list_w+1, row 1)

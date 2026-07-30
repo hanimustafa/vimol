@@ -1689,6 +1689,116 @@ def test_startup_seeds_idle_resolution_from_link_latency(monkeypatch):
     assert v._idle_scale == 0.5                  # no answer: assume slow
 
 
+def test_startup_picks_shared_memory_transfer_when_the_terminal_proves_local(monkeypatch):
+    """An OK to the t=s query means the terminal opened an object on THIS
+    machine: switch frames to shared memory, which skips the per-frame zlib
+    that is the real reason interactive frames get their resolution cut."""
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    v._old_termios = "raw"
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, True, None, rtt=0.001, shm=True))
+    v._probe = None
+    v._finish_startup()
+    assert v._transmit == "shm"
+
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, True, None, rtt=0.001, shm=False))
+    v._probe = None
+    v._finish_startup()
+    assert v._transmit == "direct"       # remote, or no support: inline base64
+
+    # never asked (probe handed in by a caller that predates the question)
+    monkeypatch.setattr(kitty, "probe_terminal", lambda *a, **k:
+                        kitty.TerminalProbe(True, True, None, rtt=0.001))
+    v._probe = None
+    v._finish_startup()
+    assert v._transmit == "direct"
+
+
+def test_frames_go_out_over_shared_memory_once_selected(monkeypatch):
+    """Both frame kinds use the chosen transfer: a settle frame is the most
+    expensive one to compress, so it must not stay on the base64 path."""
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    writes = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: writes.extend(data))
+    v._transmit = "shm"
+    try:
+        v._draw()
+        assert b"t=s" in bytes(writes)
+        assert b"o=z" not in bytes(writes)        # nothing was compressed
+        writes.clear()
+        v._transmit = "direct"
+        v._draw()
+        assert b"t=s" not in bytes(writes)
+        assert b"o=z" in bytes(writes)
+    finally:
+        kitty.shm_cleanup()
+
+
+def test_exit_releases_unread_shared_memory(monkeypatch):
+    """A frame written just before quitting may never be read, and a POSIX
+    shm object outlives the process that made it -- so quitting must unlink
+    whatever is still outstanding."""
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    from multiprocessing import shared_memory
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+    v._transmit = "shm"
+    v._draw()
+    name = kitty._shm_pending[-1]                 # the frame nobody read
+    shared_memory.SharedMemory(name=name).close()  # it exists right now
+    v._exit()
+    with pytest.raises(FileNotFoundError):
+        shared_memory.SharedMemory(name=name)
+
+
+def test_unread_shared_memory_frames_stay_bounded(monkeypatch):
+    """Frames nobody reads must not pile up without limit.
+
+    Healthy sessions can't get here (shm implies a replying terminal, so the
+    fence gates the loop to one frame in flight), but a wedged terminal --
+    suspended, flow-controlled, a stalled tmux pane -- lets _FENCE_TIMEOUT
+    expire and frames resume with nothing consuming them. What may be
+    recycled is only ever a STALE frame: the image id is replaced in place,
+    so a dropped intermediate frame is invisible, and q=2 suppresses the
+    error the terminal would report for it. The newest frame is never
+    touched -- that's the one whose loss would be visible.
+    """
+    import vimol.kitty as kitty
+    from vimol.viewer import Viewer
+    from multiprocessing import shared_memory
+    mol = Molecule(symbols=["C"], positions=np.array([[0.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: None)
+    v._transmit = "shm"
+    names = []
+    try:
+        for _ in range(6):                        # no fence acks, ever
+            v._draw()
+            names.append(kitty._shm_pending[-1])
+        assert len(kitty._shm_pending) <= kitty._SHM_KEEP
+        alive = []
+        for n in names:
+            try:
+                s = shared_memory.SharedMemory(name=n); s.close(); alive.append(n)
+            except FileNotFoundError:
+                pass
+        assert alive == names[-kitty._SHM_KEEP:]   # newest kept, oldest recycled
+        assert names[-1] in alive                  # the frame that matters survives
+    finally:
+        kitty.shm_cleanup()
+
+
 def test_startup_probe_preserves_early_keystrokes(monkeypatch):
     # Keys typed while the startup probe's reply is in flight must be
     # dispatched, not swallowed with the reply bytes.
@@ -2587,6 +2697,33 @@ def test_probe_reply_keeps_early_keystroke_bytes():
     p = kitty.parse_probe_reply(b"q\x1b_Gi=31;OK\x1b\\x\x1b[?6c")
     assert p.graphics is True
     assert p.leftover == b"qx"
+
+
+def test_probe_query_can_ask_about_shared_memory():
+    """The shm question rides along in the same one-round-trip probe: a t=s
+    query naming an object we created. Only a terminal on THIS machine can
+    open it, so an OK proves local *and* supported in one answer."""
+    import base64 as _b64
+    import vimol.kitty as kitty
+    q = kitty.probe_query_bytes(shm_name="/vimol-probe-test")
+    assert b"t=s" in q
+    assert _b64.standard_b64encode(b"/vimol-probe-test") in q
+    assert q.endswith(b"\x1b[c")                  # DA1 fence still sent last
+    # unasked (no name) -> no t=s query at all, byte-identical to before
+    assert b"t=s" not in kitty.probe_query_bytes()
+
+
+def test_probe_reply_reports_shared_memory_support():
+    import vimol.kitty as kitty
+    ok = b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;OK\x1b\\\x1b[?62c"
+    p = kitty.parse_probe_reply(ok)
+    assert p.shm is True
+    assert p.leftover == b""                      # both replies consumed
+    # the terminal rejected it (no support, or it could not open our object)
+    bad = b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;EBADF:no\x1b\\\x1b[?62c"
+    assert kitty.parse_probe_reply(bad).shm is False
+    # ignored the t=s query but answered the fence: definitive no
+    assert kitty.parse_probe_reply(b"\x1b_Gi=31;OK\x1b\\\x1b[?62c").shm is False
 
 
 def test_probe_terminal_measures_rtt_and_parses(monkeypatch):
