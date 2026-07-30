@@ -35,6 +35,48 @@ def test_element_data():
     assert len(elements.element_color("O")) == 3
 
 
+def test_theme_dark_matches_original_constants():
+    from vimol import theme
+    assert theme.DARK.panel_bg == (30, 33, 44)
+    assert theme.DARK.panel_fg == (230, 232, 240)
+    assert theme.DARK.list_active_bg == (37, 45, 64)
+    assert theme.DARK.pt_border_fg == (60, 200, 180)
+    assert theme.DARK.cleanup_hint_fg == (255, 170, 60)
+
+
+def test_theme_luminance():
+    from vimol import theme
+    assert theme.luminance((255, 255, 255)) == pytest.approx(255.0)
+    assert theme.luminance((0, 0, 0)) == 0.0
+    assert theme.luminance((255, 170, 60)) == pytest.approx(
+        0.299 * 255 + 0.587 * 170 + 0.114 * 60)
+
+
+def test_theme_from_colorfgbg():
+    from vimol import theme
+    assert theme.from_colorfgbg("15;0") is theme.DARK
+    assert theme.from_colorfgbg("0;15") is theme.LIGHT
+    assert theme.from_colorfgbg("0;7") is theme.LIGHT
+    assert theme.from_colorfgbg("15;1") is theme.DARK
+    assert theme.from_colorfgbg("garbage") is None
+    assert theme.from_colorfgbg("") is None
+
+
+def test_theme_resolve_precedence():
+    from vimol import theme
+    # explicit wins over everything
+    assert theme.resolve("light", (10, 10, 10), "15;0") is theme.LIGHT
+    assert theme.resolve("dark", (250, 250, 250), "0;15") is theme.DARK
+    # osc11 wins over colorfgbg
+    assert theme.resolve(None, (245, 245, 245), "15;0") is theme.LIGHT
+    assert theme.resolve(None, (10, 10, 10), "0;15") is theme.DARK
+    # colorfgbg is the fallback when osc11 is unknown
+    assert theme.resolve(None, None, "0;15") is theme.LIGHT
+    # default is dark
+    assert theme.resolve(None, None, None) is theme.DARK
+    assert theme.resolve(None, None, "garbage") is theme.DARK
+
+
 def test_xyz_roundtrip_and_bonds():
     mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     assert mol.n_atoms == 12
