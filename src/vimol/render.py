@@ -7,6 +7,16 @@ primitive's screen-space bounding box. A shared z-buffer resolves occlusion, so
 spheres and cylinders interpenetrate correctly. Everything is vectorized over
 the pixels of each primitive, which keeps interactive frame-rates for
 small/medium molecules in pure Python + numpy.
+
+Framebuffer note: primitives shade in float32 but quantize to uint8 as they
+write (the quantization is bit-identical to a float frame followed by a
+full-frame clip/scale/cast -- the values written are always in [0, 255] after
+an upper clamp, and the cast truncates, exactly like the old ``_finish``).
+This removes several full-frame float passes that used to dominate the cost
+of a frame at terminal resolutions. Transparent frames render straight into
+one (H, W, 4) buffer -- rgb primitives write channels 0-2, coverage writes
+channel 3 -- so finishing a frame is a single flat copy either way, never an
+``np.dstack`` interleave.
 """
 from __future__ import annotations
 
@@ -16,6 +26,7 @@ from typing import Tuple
 
 import numpy as np
 
+from . import _render_fast as _fast
 from .arrows import ArrowGeometry, build_arrow_geometry
 from .camera import Camera
 from .molecule import Molecule
@@ -78,14 +89,25 @@ class Renderer:
     def __init__(self, width: int, height: int):
         self.width = int(width)
         self.height = int(height)
-        # persistent framebuffers, re-filled per frame -- allocating ~25 MB of
-        # fresh pages every frame (np.full/np.empty) costs real time at
-        # supersampled full-screen sizes; reuse keeps the pages warm.
-        self._color = None
-        self._zbuf = None
-        self._bg_template = None     # pre-filled background frame (see below)
+        # persistent framebuffers, re-filled per frame -- allocating fresh
+        # pages every frame (np.full/np.empty) costs real time at supersampled
+        # full-screen sizes; reuse keeps the pages warm. Color is uint8: see
+        # the module docstring for why quantizing at write time is safe.
+        self._color = None             # (H, W, 3) uint8, or (H, W, 4) rgba when transparent
+        self._zbuf = None              # (H, W) float32
+        self._bg_template = None       # pre-filled background frame (see below)
         self._bg_key = None
-        self._pool = None            # lazy render thread pool (see _threads)
+        self._pool = None              # lazy render thread pool (see _threads)
+        # per-size coordinate grids: every primitive's bbox math slices these
+        # instead of calling np.arange per primitive per band (which profiled
+        # at thousands of calls per frame).
+        self._xs = None                # (W,) float32
+        self._ys = None                # (H,) float32
+        self._xi = None                # (W,) int64 (the cone path computes in float64)
+        self._yi = None                # (H,) int64
+        # Kick the optional numba kernel's JIT compile (no-op when numba is
+        # missing): frames render via numpy until _fast.ready() flips.
+        _fast.warm_async()
 
     def resize(self, width: int, height: int) -> None:
         self.width = int(width)
@@ -94,24 +116,41 @@ class Renderer:
         self._zbuf = None
         self._bg_template = None
         self._bg_key = None
+        self._xs = None
+        self._ys = None
+        self._xi = None
+        self._yi = None
 
     def _framebuffers(self, style: Style):
         H, W = self.height, self.width
-        if self._color is None or self._color.shape[:2] != (H, W):
-            self._color = np.empty((H, W, 3), np.float32)
+        if self._zbuf is None or self._zbuf.shape != (H, W):
             self._zbuf = np.empty((H, W), np.float32)
+            self._xs = np.arange(W, dtype=np.float32)
+            self._ys = np.arange(H, dtype=np.float32)
+            self._xi = np.arange(W)
+            self._yi = np.arange(H)
+        # transparent frames render straight into rgba; switching styles on
+        # one Renderer reallocates (rare -- styles are sticky per session)
+        channels = 4 if style.transparent else 3
+        if self._color is None or self._color.shape != (H, W, channels):
+            self._color = np.empty((H, W, channels), np.uint8)
         if style.transparent:
-            self._color.fill(0.0)   # premultiplied-zero for undrawn pixels
+            self._color.fill(0)       # premultiplied-zero rgb + zero coverage
         else:
             # Broadcasting a (3,) background into (H, W, 3) is a strided store
             # that measures >10x slower than a flat memcpy at full-screen sizes
-            # (~100 ms vs ~8 ms at 3200x2000) -- so keep one pre-filled frame
-            # per background color and copy it in whole.
+            # -- so keep one pre-filled frame per background color and copy it
+            # in whole. The template holds the *quantized* background: the old
+            # float path's clip/scale/truncating-cast applied to a constant.
             key = tuple(style.background)
             if self._bg_key != key or self._bg_template is None \
                     or self._bg_template.shape[:2] != (H, W):
-                self._bg_template = np.empty((H, W, 3), np.float32)
-                self._bg_template[...] = np.asarray(style.background, np.float32)
+                t = np.asarray(style.background, np.float32)
+                np.maximum(t, 0.0, out=t)
+                np.minimum(t, 1.0, out=t)
+                t *= 255.0
+                self._bg_template = np.empty((H, W, 3), np.uint8)
+                self._bg_template[...] = t.astype(np.uint8)
                 self._bg_key = key
             np.copyto(self._color, self._bg_template)
         self._zbuf.fill(-np.inf)
@@ -122,9 +161,13 @@ class Renderer:
         style = style or Style()
         W, H = self.width, self.height
         transparent = style.transparent
-        color, zbuf = self._framebuffers(style)
+        buf, zbuf = self._framebuffers(style)
+        # primitives write rgb through a 3-channel view and coverage through
+        # the 4th channel; for opaque frames buf IS the rgb plane.
+        color = buf[..., :3] if transparent else buf
+        alpha = buf[..., 3] if transparent else None
         if mol.n_atoms == 0:
-            return self._finish(color, zbuf, transparent)
+            return self._finish(buf)
 
         vpos = camera.view_positions(mol.positions).astype(np.float64)  # (N,3) view space
         zoom = camera.zoom
@@ -191,7 +234,7 @@ class Renderer:
         shininess = style.shininess
         depth_cue = float(style.depth_cue)
 
-        def shade_write(sub_c, sub_z, win, depth, nx, ny, nz, albedo, flat=False):
+        def shade_write(sub_c, sub_a, sub_z, win, depth, nx, ny, nz, albedo, flat=False):
             """Shade a full bounding box and masked-write the winners.
 
             ``nx``/``ny``/``nz`` may be broadcastable pieces ((1,w), (h,1) or
@@ -203,6 +246,13 @@ class Renderer:
             far outweighing the extra arithmetic on masked-out pixels. Fog is
             folded into the diffuse/specular terms ((a*d+s)*m == a*(d*m)+s*m),
             saving a separate full-box multiply of the (h,w,3) color.
+
+            ``sub_c`` is uint8: the shaded float color is quantized in place
+            (upper clamp at 1 -- values are never negative -- then *255 and a
+            truncating unsafe cast, bit-identical to the old float framebuffer
+            plus full-frame ``_finish``), so no full-frame float passes remain
+            at the end of the frame. ``sub_a`` is the matching uint8 coverage
+            view, or None when the frame is opaque.
 
             ``flat=True`` (design §4.4/§4.5 -- overlay colouring for
             non-active structures) skips diffuse/fill/specular entirely and
@@ -216,10 +266,14 @@ class Renderer:
                     np.minimum(fog, 1.0, out=fog)
                     fog *= depth_cue
                     fog += 1.0 - depth_cue
-                    rgb = albedo * fog[..., None]
+                    rgb = albedo * fog[..., None]         # <= 1: no clamp needed
+                    rgb *= 255.0
                 else:
-                    rgb = np.broadcast_to(albedo, depth.shape + (3,))
-                np.copyto(sub_c, rgb, where=win[..., None])
+                    # (3,) scalar math only; the clamp mirrors the old _finish.
+                    rgb = np.minimum(albedo, np.float32(1.0)) * np.float32(255.0)
+                np.copyto(sub_c, rgb, where=win[..., None], casting="unsafe")
+                if sub_a is not None:
+                    np.copyto(sub_a, 255, where=win)
                 np.copyto(sub_z, depth, where=win)
                 return
             diff = nx * l0 + ny * l1 + nz * l2
@@ -243,7 +297,13 @@ class Renderer:
                 spec *= fog
             rgb = albedo * diff[..., None]
             rgb += spec[..., None]
-            np.copyto(sub_c, rgb, where=win[..., None])
+            # quantize (see docstring): upper clamp only -- albedo >= 0,
+            # diff >= ambient > 0, spec >= 0, fog > 0, so rgb is never negative.
+            np.minimum(rgb, 1.0, out=rgb)
+            rgb *= 255.0
+            np.copyto(sub_c, rgb, where=win[..., None], casting="unsafe")
+            if sub_a is not None:
+                np.copyto(sub_a, 255, where=win)
             np.copyto(sub_z, depth, where=win)
 
         radii = _atom_radii(mol, style)
@@ -276,6 +336,54 @@ class Renderer:
             # endpoints always agree on flatness -- either endpoint's flag works.
             bond_flat = atom_flat[bi] if atom_flat is not None else None
 
+        # Optional compiled inner loop (_render_fast, numba): identical math
+        # to the numpy path below (tests/test_render_fast.py checks
+        # bit-parity) but 10-25x faster -- per-pixel compiled loops with
+        # z-rejection *before*
+        # shading, instead of ~40 full-bbox array passes per primitive.
+        # Gated on what the kernel reproduces exactly: no arrows (cones stay
+        # on the numpy path) and a power-of-two shininess (_fast_pow's
+        # rounding sequence). Anything else falls through unchanged.
+        e_shin = int(shininess)
+        if (_fast.ready() and not has_arrows and e_shin == shininess
+                and e_shin > 0 and (e_shin & (e_shin - 1)) == 0):
+            n_bonds = len(bond_list)
+            barr = np.zeros((n_bonds, 14), np.float64)
+            bcol = np.zeros((n_bonds, 6), np.float32)
+            bflat = np.zeros(n_bonds, np.uint8)
+            for k in range(n_bonds):
+                i, j, _o = bond_list[k]
+                ax_, ay_, az_ = vpos[i]
+                bx_, by_, bz_ = vpos[j]
+                ux_, uy_, uz_ = bx_ - ax_, by_ - ay_, bz_ - az_
+                L = (ux_ * ux_ + uy_ * uy_ + uz_ * uz_) ** 0.5
+                if L >= 1e-6:
+                    ux_, uy_, uz_ = ux_ / L, uy_ / L, uz_ / L
+                barr[k] = (ax_, ay_, az_, ux_, uy_, uz_, L,
+                           1.0 - uz_ * uz_, float(rb),
+                           ox_s + ax_ * zoom, oy_s - ay_ * zoom,
+                           ox_s + bx_ * zoom, oy_s - by_ * zoom,
+                           float(rb) * zoom)
+                bcol[k, 0:3] = base_colors[i]
+                bcol[k, 3:6] = base_colors[j]
+                if bond_flat is not None:
+                    bflat[k] = bond_flat[k]
+            aflat = (np.zeros(mol.n_atoms, np.uint8) if atom_flat is None
+                     else atom_flat.astype(np.uint8))
+            _fast.render_frame(
+                buf, zbuf, transparent,
+                np.asarray(self._band_ranges(H, W, len(bond_list) + mol.n_atoms),
+                           np.int64),
+                sx, sy, sz, radii, np.ascontiguousarray(base_colors),
+                aflat, order, barr, bcol, bflat,
+                zoom, ox_s, oy_s,
+                l0, l1, l2, f0, f1, f2, hv0, hv1, hv2,
+                ambient, fill_w, spec_w, depth_cue, zmin, zspan,
+                e_shin.bit_length() - 1)
+            return self._finish(buf)
+
+        xs, ys = self._xs, self._ys
+
         def draw_band(y_lo: int, y_hi: int) -> None:
             """Raycast the band's primitives into rows [y_lo, y_hi).
 
@@ -293,7 +401,7 @@ class Renderer:
                     self._draw_cylinder_segment(
                         vpos[i], vpos[j], rb, base_colors[i], base_colors[j],
                         zoom, ox_s, oy_s, style, color, zbuf, shade_write,
-                        zmin, zspan, y_lo, y_hi,
+                        zmin, zspan, y_lo, y_hi, alpha=alpha,
                         flat=bool(bond_flat[k]) if bond_flat is not None else False)
 
             # atoms drawn after bonds; z-buffer keeps whichever is nearer
@@ -313,14 +421,13 @@ class Renderer:
                 if x0 >= x1 or y0 >= y1:
                     continue
                 # squared screen-space distance to the atom centre, via
-                # broadcasting a row and a column (cheaper than materializing
-                # a full meshgrid). float32 per-pixel math: python-float
-                # scalars don't upcast it, and it halves the bandwidth of
-                # every full-bbox pass.
-                dxr = np.arange(x0, x1, dtype=np.float32)
-                dxr -= np.float32(cx)                 # (w,)
-                dyr = np.arange(y0, y1, dtype=np.float32)
-                dyr -= np.float32(cy)                 # (h,)
+                # broadcasting a row and a column sliced from the cached
+                # coordinate grids (one fused ufunc each -- no per-primitive
+                # np.arange). float32 per-pixel math: python-float scalars
+                # don't upcast it, and it halves the bandwidth of every
+                # full-bbox pass.
+                dxr = xs[x0:x1] - np.float32(cx)          # (w,)
+                dyr = ys[y0:y1] - np.float32(cy)          # (h,)
                 d2 = (dxr * dxr)[None, :] + (dyr * dyr)[:, None]   # (h,w)
                 mask = d2 <= sr * sr
                 if not mask.any():
@@ -341,15 +448,16 @@ class Renderer:
                 nx = (dxr * np.float32(inv_zoom * inv_r))[None, :]
                 ny = (dyr * np.float32(-inv_zoom * inv_r))[:, None]
                 nz = hgt * np.float32(inv_r)
-                shade_write(color[y0:y1, x0:x1], sub_z, win, depth,
-                            nx, ny, nz, base_colors[a],
+                shade_write(color[y0:y1, x0:x1],
+                            alpha[y0:y1, x0:x1] if alpha is not None else None,
+                            sub_z, win, depth, nx, ny, nz, base_colors[a],
                             flat=bool(atom_flat[a]) if atom_flat is not None else False)
 
             if has_arrows:
                 self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color,
-                                        zbuf, shade_write, zmin, zspan, y_lo, y_hi)
+                                        alpha, zbuf, shade_write, zmin, zspan, y_lo, y_hi)
                 self._draw_arrow_heads(geom, zoom, ox_s, oy_s, style, color,
-                                       zbuf, shade, zmin, zspan, y_lo, y_hi)
+                                       alpha, zbuf, shade, zmin, zspan, y_lo, y_hi)
 
         bands = self._band_ranges(H, W, len(mol.bonds) + mol.n_atoms)
         if len(bands) == 1:
@@ -359,7 +467,7 @@ class Renderer:
             for f in futures:
                 f.result()
 
-        return self._finish(color, zbuf, transparent)
+        return self._finish(buf)
 
     def _band_ranges(self, H: int, W: int, n_primitives: int):
         """Split the frame into horizontal bands for the render thread pool.
@@ -382,39 +490,35 @@ class Renderer:
         return self._pool
 
     @staticmethod
-    def _finish(color: np.ndarray, zbuf: np.ndarray, transparent: bool) -> np.ndarray:
-        # NOTE: the copying np.clip is deliberate -- np.clip(..., out=...) goes
-        # through numpy's slow deprecated-casting path (~4x the copying form),
-        # and the copy also keeps the renderer's persistent buffer pristine.
-        img = np.clip(color, 0.0, 1.0)
-        img *= 255.0
-        rgb = img.astype(np.uint8)
-        if not transparent:
-            return rgb
-        alpha = (zbuf > -np.inf).astype(np.uint8)
-        alpha *= 255
-        return np.dstack([rgb, alpha])
+    def _finish(buf: np.ndarray) -> np.ndarray:
+        # The frame is already quantized (primitives write uint8 directly)
+        # and, when transparent, already interleaved rgba. The copy keeps the
+        # renderer's persistent buffer pristine for the next frame while the
+        # caller holds onto this one -- a single flat memcpy where the old
+        # float pipeline needed clip+scale+cast full-frame passes (plus an
+        # np.dstack interleave when transparent).
+        return buf.copy()
 
     # ------------------------------------------------------------------
     def _draw_arrow_shafts(self, geom: ArrowGeometry, zoom, ox_s, oy_s, style,
-                           color, zbuf, shade_write, zmin, zspan, y_lo, y_hi):
+                           color, alpha, zbuf, shade_write, zmin, zspan, y_lo, y_hi):
         for k in range(geom.shaft_a.shape[0]):
             c = geom.shaft_color[k].astype(np.float32)
             self._draw_cylinder_segment(geom.shaft_a[k], geom.shaft_b[k], float(geom.shaft_radius[k]),
                                         c, c, zoom, ox_s, oy_s, style, color, zbuf, shade_write, zmin, zspan,
-                                        y_lo, y_hi)
+                                        y_lo, y_hi, alpha=alpha)
 
     def _draw_arrow_heads(self, geom: ArrowGeometry, zoom, ox_s, oy_s, style,
-                          color, zbuf, shade, zmin, zspan, y_lo, y_hi):
+                          color, alpha, zbuf, shade, zmin, zspan, y_lo, y_hi):
         for k in range(geom.head_base.shape[0]):
             self._draw_cone_segment(geom.head_base[k], geom.head_apex[k], float(geom.head_radius[k]),
-                                    geom.head_color[k], zoom, ox_s, oy_s, style, color, zbuf, shade,
+                                    geom.head_color[k], zoom, ox_s, oy_s, style, color, alpha, zbuf, shade,
                                     zmin, zspan, y_lo, y_hi)
 
     # ------------------------------------------------------------------
     def _draw_cylinder_segment(self, a, b, radius, color_a, color_b, zoom, ox_s, oy_s,
                                style, color, zbuf, shade_write, zmin, zspan,
-                               y_lo=0, y_hi=None, flat=False):
+                               y_lo=0, y_hi=None, alpha=None, flat=False):
         """Rasterize one capped-cylinder impostor from view-space *a* to *b*.
 
         Shared by real bonds (``_draw_bonds``, two atom colors split at the
@@ -439,16 +543,15 @@ class Renderer:
         y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H if y_hi is None else y_hi)
         if x0 >= x1 or y0 >= y1:
             return
-        # pixel -> view-plane coordinates (angstrom), broadcasting a row/column.
-        # All full-bbox math in float32 (python-float scalars don't upcast it);
+        # pixel -> view-plane coordinates (angstrom), broadcasting a row/column
+        # sliced from the cached grids (no per-primitive np.arange). All
+        # full-bbox math in float32 (python-float scalars don't upcast it);
         # per-fragment quantities (normals, albedo) are materialized only for
         # the winners of the z-test further down, never over the whole box.
-        ex = np.arange(x0, x1, dtype=np.float32)
-        ex -= np.float32(ox_s)
+        ex = self._xs[x0:x1] - np.float32(ox_s)
         ex *= np.float32(1.0 / zoom)
         ex -= np.float32(ax)                 # (w,) view-plane x offset from a
-        ey = np.arange(y0, y1, dtype=np.float32)
-        ey *= np.float32(-1.0 / zoom)
+        ey = self._ys[y0:y1] * np.float32(-1.0 / zoom)
         ey += np.float32(oy_s / zoom - ay)   # (h,) view-plane y offset from a
         exr = ex[None, :]
         eyc = ey[:, None]
@@ -486,12 +589,14 @@ class Renderer:
         nz = (s - t * np.float32(uz)) * inv_r
         # split color at midpoint
         albedo = np.where((t < np.float32(0.5 * L))[..., None], color_a, color_b)
-        shade_write(color[y0:y1, x0:x1], sub_z, win, zview, nx, ny, nz,
+        shade_write(color[y0:y1, x0:x1],
+                    alpha[y0:y1, x0:x1] if alpha is not None else None,
+                    sub_z, win, zview, nx, ny, nz,
                     albedo.astype(np.float32, copy=False), flat=flat)
 
     # ------------------------------------------------------------------
     def _draw_cone_segment(self, base, apex, radius, color_rgb, zoom, ox_s, oy_s,
-                           style, color, zbuf, shade, zmin, zspan,
+                           style, color, alpha, zbuf, shade, zmin, zspan,
                            y_lo=0, y_hi=None):
         """Rasterize one cone impostor: *radius* at *base*, tapering linearly
         to a point at *apex* (view space). Used for arrow heads.
@@ -523,8 +628,8 @@ class Renderer:
         y1 = min(int(np.ceil(max(say, sby) + srb)) + 1, H if y_hi is None else y_hi)
         if x0 >= x1 or y0 >= y1:
             return
-        gx = np.arange(x0, x1)[None, :]
-        gy = np.arange(y0, y1)[:, None]
+        gx = self._xi[x0:x1][None, :]
+        gy = self._yi[y0:y1][:, None]
         vx = (gx - ox_s) / zoom
         vy = (oy_s - gy) / zoom
         ex = vx - ax
@@ -585,12 +690,12 @@ class Renderer:
         nlen = np.where(nlen < 1e-9, 1.0, nlen)
         normals = np.stack([nx / nlen, ny / nlen, nz / nlen], axis=-1)
         albedo = np.asarray(color_rgb, np.float32)
-        self._composite(color, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
+        self._composite(color, alpha, zbuf, x0, x1, y0, y1, mask, zview.astype(np.float32),
                         normals, albedo, shade, style, zmin, zspan)
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _composite(color, zbuf, x0, x1, y0, y1, mask, depth, normals, albedo,
+    def _composite(color, alpha, zbuf, x0, x1, y0, y1, mask, depth, normals, albedo,
                    shade, style, zmin, zspan):
         """Depth-test the primitive's bounding box, then shade only the pixels
         that survive.
@@ -609,8 +714,15 @@ class Renderer:
         rgb = shade(nrm, alb)                                # (M,3)
         dw = depth[win]
         Renderer._apply_fog(rgb, dw, style, zmin, zspan)
+        # quantize like shade_write does (upper clamp only; shade() output is
+        # never negative), then let the uint8 setitem cast truncate -- the
+        # same result the old float buffer + _finish produced.
+        np.minimum(rgb, 1.0, out=rgb)
+        rgb *= 255.0
         sub_c = color[y0:y1, x0:x1]
         sub_c[win] = rgb
+        if alpha is not None:
+            alpha[y0:y1, x0:x1][win] = 255
         sub_z[win] = dw
 
     @staticmethod
