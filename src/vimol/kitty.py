@@ -291,6 +291,26 @@ _RE_DA1 = re.compile(rb"\x1b\[\?[0-9;]*c")
 _OSC11_QUERY = b"\x1b]11;?\x1b\\"
 _RE_OSC11_REPLY = re.compile(
     rb"\x1b\]11;rgb:([0-9a-fA-F]{2,4})/([0-9a-fA-F]{2,4})/([0-9a-fA-F]{2,4})(?:\x1b\\|\x07)")
+# ANY OSC reply, matched purely to STRIP it from the leftover bytes -- never
+# to interpret it. XParseColor has forms _RE_OSC11_REPLY deliberately doesn't
+# parse (``#rrggbb``, 1-digit channels, ``rgbi:``), and an unparsed reply that
+# stays in `leftover` gets fed to the input decoder as if the user had typed
+# it: "\x1b]11;#f0f2f5\x1b\\" becomes the keystrokes 1,1,f,f,2,f,5 -- which in
+# this viewer means jump-to-structure, re-fit, and quality-toggle firing on
+# their own at startup. Same hazard the graphics-query APC has (see
+# Viewer._late_probe_tick), so it gets the same defense: recognize the span,
+# drop the bytes, whether or not we understood the payload.
+_RE_ANY_OSC = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def strip_probe_replies(buf: bytes) -> bytes:
+    """*buf* minus any terminal reply that must never reach the input decoder.
+
+    Used on the give-up path, where no DA1 fence ever arrived to tell us the
+    replies were complete, so the spans-based :func:`_probe_leftover` never
+    ran. Covers the graphics-query APC and every OSC reply.
+    """
+    return _RE_ANY_OSC.sub(b"", _RE_GFX_REPLY.sub(b"", buf))
 
 
 def _osc11_channel(hexstr: bytes) -> int:
@@ -370,7 +390,12 @@ def _parse_probe_pieces(buf: bytes):
     if m:
         bg_rgb = (_osc11_channel(m.group(1)), _osc11_channel(m.group(2)),
                   _osc11_channel(m.group(3)))
-        spans.append(m.span())
+    # Claim EVERY OSC reply's span, not just the one we parsed above: an
+    # unrecognized colour form must still be dropped rather than handed to
+    # the input decoder as keystrokes (see _RE_ANY_OSC). This subsumes the
+    # OSC 11 match -- same span when it parsed -- so it is not appended
+    # separately.
+    spans.extend(m.span() for m in _RE_ANY_OSC.finditer(buf))
     return graphics, pixel, cell, shm, bg_rgb, spans
 
 

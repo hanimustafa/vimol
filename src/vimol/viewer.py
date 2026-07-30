@@ -180,6 +180,9 @@ class Viewer:
         # DARK. _finish_startup upgrades it once the probe replies.
         self.theme = theme.resolve(os.environ.get("VIMOL_THEME"), None,
                                    os.environ.get("COLORFGBG"))
+        # Set once the user presses ctrl-t: a manual choice outranks a probe
+        # reply that lands afterwards (see _apply_probe_theme).
+        self._theme_pinned = False
         if structures is not None:
             self.structures = structures
         else:
@@ -380,6 +383,34 @@ class Viewer:
         kitty.write_bytes(_input.enable_mouse(pixel=pixel, hover=self.widget.picking),
                           self.fd_out)
 
+    def _apply_probe_theme(self, probe) -> None:
+        """Re-run the theme ladder now that the probe's OSC 11 answer is in.
+
+        Called from BOTH probe landing sites -- the quick window in
+        _finish_startup and the late watch in _late_probe_tick. The late one
+        matters most: a congested link is exactly where the quick window
+        misses, and skipping the upgrade there would leave those sessions
+        stuck on the frame-0 COLORFGBG/DARK guess forever, i.e. auto-detection
+        silently doing nothing on the links it was written for.
+
+        A manual ctrl-t always wins: once the user has stated a preference,
+        a probe reply landing afterwards must not yank it back.
+        """
+        if self._theme_pinned:
+            return
+        resolved = theme.resolve(os.environ.get("VIMOL_THEME"), probe.bg_rgb,
+                                 os.environ.get("COLORFGBG"))
+        if resolved is self.theme:
+            return
+        self.theme = resolved
+        self.widget.theme = resolved.name
+        # Repaint rather than wait for the next settle: the chrome that DOES
+        # paint an opaque background (status bar, help, pickers) would
+        # otherwise sit in the wrong palette until something else happened to
+        # force a frame, which reads as a delayed colour flash.
+        kitty.write_bytes(_CLEAR, self.fd_out)
+        self._last_interact = time.time()
+
     def _finish_startup(self) -> None:
         """Probe the terminal and arm the mouse -- AFTER the first paint.
 
@@ -403,11 +434,7 @@ class Viewer:
         if probe is not None:
             if probe.cell_px is not None:
                 self._cell_px = probe.cell_px
-            resolved = theme.resolve(os.environ.get("VIMOL_THEME"), probe.bg_rgb,
-                                     os.environ.get("COLORFGBG"))
-            if resolved is not self.theme:
-                self.theme = resolved
-                self.widget.theme = resolved.name
+            self._apply_probe_theme(probe)
             self._enable_mouse(probe.pixel_mouse)
             # Seed the settle resolution from the measured link latency: a
             # clearly-local terminal starts crisp at full resolution; a
@@ -472,6 +499,7 @@ class Viewer:
             self._late_buf = b""
             if p.cell_px is not None:
                 self._cell_px = p.cell_px
+            self._apply_probe_theme(p)
             if p.pixel_mouse and not self.decoder.pixel:
                 self._enable_mouse(True)         # upgrade wire+decoder together
             self._paced = True
@@ -486,7 +514,7 @@ class Viewer:
         if time.monotonic() - self._late_t0 > 15.0:
             # never answered: release what the user typed, minus anything
             # that looks like a stray probe reply, and stay unpaced.
-            buf = kitty._RE_GFX_REPLY.sub(b"", self._late_buf)
+            buf = kitty.strip_probe_replies(self._late_buf)
             self._late_t0 = None
             self._late_buf = b""
             if buf:
@@ -1864,6 +1892,8 @@ class Viewer:
         elif key == "\x14":
             self.theme = theme.LIGHT if self.theme is theme.DARK else theme.DARK
             self.widget.theme = self.theme.name
+            self._theme_pinned = True        # beats a probe reply landing later
+            self._msg = f"{self.theme.name} theme"
             kitty.write_bytes(_CLEAR, self.fd_out)
             self._last_interact = time.time()
         elif key in ("n", "p", "alt+down", "alt+up") and len(self.frames) > 1:

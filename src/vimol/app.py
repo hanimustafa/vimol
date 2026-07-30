@@ -100,10 +100,15 @@ def _apply_theme_arg(args) -> None:
     (see docs/design/theme-and-aesthetics.md sec 2) -- implemented by setting
     VIMOL_THEME before the Viewer is constructed, rather than adding a
     parallel parameter to Viewer.__init__ for what VIMOL_THEME already
-    covers. "auto" means "let detection decide", i.e. clear any override."""
-    if args.theme == "auto":
-        os.environ.pop("VIMOL_THEME", None)
-    else:
+    covers.
+
+    "auto" is the DEFAULT, i.e. "the user passed no --theme at all", so it
+    must leave VIMOL_THEME alone rather than clearing it -- clearing would
+    mean the env var only ever worked for direct Viewer() construction and
+    never for the CLI, silently deleting the ladder's second rung on every
+    plain `vimol file.xyz`.
+    """
+    if args.theme != "auto":
         os.environ["VIMOL_THEME"] = args.theme
 
 

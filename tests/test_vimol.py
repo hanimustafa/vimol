@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 
 import numpy as np
 import pytest
@@ -231,6 +232,54 @@ def test_viewer_finish_startup_upgrades_theme_from_osc11(monkeypatch):
     assert v.widget.theme == "light"
 
 
+def test_viewer_late_probe_also_applies_the_osc11_theme(monkeypatch, tmp_path):
+    """The late-reply path is the SSH/congested-link case -- exactly where
+    auto-detection matters most -- so it must apply bg_rgb too, not just
+    cell size and pacing."""
+    from vimol import theme as vimol_theme
+    from vimol.viewer import Viewer
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        assert v.theme is vimol_theme.DARK
+        v._late_t0 = time.monotonic()
+        v._late_buf = b""
+        # a full probe reply arriving late, reporting a light background
+        v._late_probe_tick(b"\x1b_Gi=31;OK\x1b\\\x1b]11;rgb:f5f5/f5f5/f5f5\x1b\\\x1b[?62c")
+        assert v.theme is vimol_theme.LIGHT
+        assert v.widget.theme == "light"
+    finally:
+        os.close(fd)
+
+
+def test_viewer_manual_ctrl_t_outranks_a_later_probe_reply(monkeypatch, tmp_path):
+    """Once the user has pressed ctrl-t, a probe answer landing afterwards
+    must not yank the theme back out from under them."""
+    from vimol import theme as vimol_theme
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        v._dispatch([KeyEvent("\x14")])          # user pins LIGHT
+        assert v.theme is vimol_theme.LIGHT
+        v._late_t0 = time.monotonic()
+        v._late_buf = b""
+        # probe says the terminal is dark -- ignored, the user has spoken
+        v._late_probe_tick(b"\x1b_Gi=31;OK\x1b\\\x1b]11;rgb:1010/1010/1010\x1b\\\x1b[?62c")
+        assert v.theme is vimol_theme.LIGHT
+    finally:
+        os.close(fd)
+
+
 def test_viewer_status_bar_shows_full_untruncated_comment_when_room_allows():
     """The xyz comment is no longer capped at 60 chars on parse, so a wide
     terminal shows the whole energy line instead of a clipped stub."""
@@ -408,6 +457,39 @@ def test_parse_probe_reply_bg_rgb_none_before_da1_fence():
     assert kitty.parse_probe_reply(buf) is None
 
 
+@pytest.mark.parametrize("reply", [
+    b"\x1b]11;#f0f2f5\x1b\\",          # XParseColor '#rrggbb' form
+    b"\x1b]11;rgb:1/2/2\x07",           # 1-digit channels
+    b"\x1b]11;rgbi:1.0/1.0/1.0\x1b\\",  # intensity form
+])
+def test_unparsed_osc_reply_never_leaks_into_leftover(reply):
+    """A colour form we can't parse must still be STRIPPED, not handed to the
+    input decoder -- '\\x1b]11;#f0f2f5\\x1b\\\\' would otherwise arrive as the
+    keystrokes 1,1,f,f,2,f,5 and fire jump-to-structure/re-fit/quality at
+    startup."""
+    buf = b"\x1b_Gi=31;OK\x1b\\" + reply + b"\x1b[?62c"
+    probe = kitty.parse_probe_reply(buf)
+    assert probe is not None
+    assert probe.leftover == b""
+
+
+def test_probe_leftover_still_preserves_real_keystrokes():
+    """Stripping OSC replies must not eat what the user actually typed."""
+    buf = (b"\x1b_Gi=31;OK\x1b\\"
+           b"ab"
+           b"\x1b]11;rgb:1e1e/2020/2828\x1b\\"
+           b"cd"
+           b"\x1b[?62c")
+    probe = kitty.parse_probe_reply(buf)
+    assert probe.bg_rgb == (0x1e, 0x20, 0x28)
+    assert probe.leftover == b"abcd"
+
+
+def test_strip_probe_replies_covers_graphics_and_osc():
+    buf = b"x\x1b_Gi=31;OK\x1b\\y\x1b]11;rgb:1e1e/2020/2828\x1b\\z"
+    assert kitty.strip_probe_replies(buf) == b"xyz"
+
+
 def test_png_roundtrip_header():
     img = np.zeros((16, 16, 3), np.uint8)
     png = kitty.png_bytes(img)
@@ -440,7 +522,10 @@ def test_backend_invalid_name_raises():
 
 def test_cli_theme_flag_sets_env_before_viewer_construction(monkeypatch):
     from vimol import app
-    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    # setenv (not delenv) so monkeypatch records a restore point: delenv on an
+    # ALREADY-ABSENT var records nothing, and _apply_theme_arg's write would
+    # then leak "light" into every test that builds a Viewer afterwards.
+    monkeypatch.setenv("VIMOL_THEME", "dark")
     p = app.make_parser()
     args = p.parse_args(["--theme", "light", os.path.join(EX, "methane.xyz")])
     assert args.theme == "light"
@@ -448,16 +533,23 @@ def test_cli_theme_flag_sets_env_before_viewer_construction(monkeypatch):
     assert os.environ["VIMOL_THEME"] == "light"
 
 
-def test_cli_theme_flag_auto_clears_env():
+def test_cli_theme_auto_leaves_env_override_intact(monkeypatch):
+    """"auto" is the default, i.e. "no --theme given" -- it must not delete
+    the user's VIMOL_THEME, or the env rung of the precedence ladder would
+    never work through the CLI at all."""
     from vimol import app
-    os.environ["VIMOL_THEME"] = "light"
-    try:
-        p = app.make_parser()
-        args = p.parse_args(["--theme", "auto"])
-        app._apply_theme_arg(args)
-        assert "VIMOL_THEME" not in os.environ
-    finally:
-        os.environ.pop("VIMOL_THEME", None)
+    monkeypatch.setenv("VIMOL_THEME", "light")
+    args = app.make_parser().parse_args(["--theme", "auto"])
+    app._apply_theme_arg(args)
+    assert os.environ["VIMOL_THEME"] == "light"
+
+
+def test_cli_theme_flag_outranks_env(monkeypatch):
+    from vimol import app, theme
+    monkeypatch.setenv("VIMOL_THEME", "light")
+    args = app.make_parser().parse_args(["--theme", "dark"])
+    app._apply_theme_arg(args)
+    assert theme.resolve(os.environ.get("VIMOL_THEME"), None, None) is theme.DARK
 
 
 def test_backend_gl_explicit_raises_if_unavailable(monkeypatch):
@@ -1084,11 +1176,19 @@ def test_viewer_single_structure_reserves_no_list_columns(tmp_path):
 
 def _multi_viewer(tmp_path, fd_name="out.bin", **kw):
     from vimol.viewer import Viewer
+    from vimol import theme as _theme
     frames = [vimol.load(os.path.join(EX, "methane.xyz")),
               vimol.load(os.path.join(EX, "water.xyz")),
               vimol.load(os.path.join(EX, "benzene.xyz"))]
     fd = os.open(str(tmp_path / fd_name), os.O_WRONLY | os.O_CREAT, 0o644)
     v = Viewer(frames[0], frames=frames, fd_out=fd, **kw)
+    # Pin the theme: the strip tests below assert specific DARK colour
+    # literals, and Viewer's constructor otherwise picks a theme from the
+    # AMBIENT environment (VIMOL_THEME/COLORFGBG) -- so without this the
+    # suite would fail for anyone whose shell exports COLORFGBG for a light
+    # terminal. Tests that want the light palette set v.theme themselves.
+    v.theme = _theme.DARK
+    v.widget.theme = _theme.DARK.name
     v._update_geometry()
     return v, fd
 

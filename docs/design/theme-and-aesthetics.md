@@ -20,10 +20,9 @@ structure-list strip's non-active rows currently paint no background at all
 — gets fixed as part of the same sweep, since it's the same "text tuned for
 one background" problem.
 
-Separately, the status bar's left field (hover info, molecule name, live
-measurement, or the xyz comment line — often an energy value) is currently
-impossible to copy, because vimol owns SGR mouse reporting and intercepts
-terminal drag-select. A `y` key copies it via OSC 52.
+Separately, the xyz parser's 60-char truncation of the file's comment line
+(often an energy value) is removed, so the status bar can show the whole
+thing. See §4 — an OSC 52 "yank" key was considered here and dropped.
 
 ## 1. `theme.py`
 
