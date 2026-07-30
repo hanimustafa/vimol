@@ -3176,3 +3176,53 @@ def test_build_structure_set_perceives_bonds_by_default(tmp_path):
     a.write_text("2\nh2\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
     sset = vimol_app._build_structure_set([str(a)], no_bonds=False, tolerance=0.45)
     assert len(sset[0].molecule.bonds) == 1
+
+
+def test_make_parser_accepts_multiple_files():
+    args = vimol_app.make_parser().parse_args(["a.xyz", "b.xyz"])
+    assert args.file == ["a.xyz", "b.xyz"]
+
+
+def test_make_parser_with_no_file_gives_empty_list():
+    args = vimol_app.make_parser().parse_args([])
+    assert args.file == []
+
+
+def test_cli_single_file_reaches_interactive_gate_unchanged(tmp_path):
+    a = tmp_path / "a.xyz"
+    a.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    rc = vimol_app.main([str(a)])
+    assert rc == 4
+
+
+def test_cli_single_missing_file_is_still_a_hard_error(tmp_path, capsys):
+    missing = tmp_path / "nope.xyz"
+    rc = vimol_app.main([str(missing)])
+    assert rc == 2
+    assert f"error: no such file: {missing}" in capsys.readouterr().err
+
+
+def test_cli_multiple_files_reaches_interactive_gate(tmp_path):
+    a = tmp_path / "a.xyz"
+    a.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    b = tmp_path / "b.xyz"
+    b.write_text("1\nne\nNe 0.0 0.0 0.0\n")
+    rc = vimol_app.main([str(a), str(b)])
+    assert rc == 4
+
+
+def test_cli_multiple_files_one_missing_still_reaches_interactive_gate(tmp_path, capsys):
+    a = tmp_path / "a.xyz"
+    a.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    missing = tmp_path / "missing.xyz"
+    rc = vimol_app.main([str(a), str(missing)])
+    assert rc == 4
+    assert f"warning: skipping {missing}: no such file" in capsys.readouterr().err
+
+
+def test_cli_multiple_files_all_missing_errors_out(tmp_path, capsys):
+    m1 = tmp_path / "m1.xyz"
+    m2 = tmp_path / "m2.xyz"
+    rc = vimol_app.main([str(m1), str(m2)])
+    assert rc == 3
+    assert "error: no molecules parsed" in capsys.readouterr().err

@@ -31,8 +31,15 @@ status-bar pills pick the element and geometry), option-drag to draw bonds,
 `x` to delete, `c` to relax clashes, `u` to undo, `s` to save. `?` lists
 every binding.
 
+Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
+session, auto-overlaid — the first structure of each file shown together,
+tinted to tell them apart — so you can compare shapes immediately; `opt+click`
+a row in the structure list to add another loaded frame into the overlay or
+drop one out.
+
 ```bash
 vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling
+vimol a.xyz b.pdb                         # load both, auto-overlaid for comparison
 ```
 
 ## Library usage

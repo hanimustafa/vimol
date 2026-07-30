@@ -3,6 +3,7 @@
     vimol                           # opens the bundled C60 demo (checkout only)
     vimol file.pdb                 # interactive viewer (opens editable: a=append)
     vimol file.xyz --spin          # autospinning
+    vimol a.xyz b.pdb              # load both, auto-overlaid for comparison
 """
 from __future__ import annotations
 
@@ -54,7 +55,7 @@ def make_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Supported formats: " + ", ".join(SUPPORTED_EXTENSIONS),
     )
-    p.add_argument("file", nargs="?", help="structure file (xyz/pdb/mol/sdf)")
+    p.add_argument("file", nargs="*", help="one or more structure files (xyz/pdb/mol/sdf)")
     p.add_argument("--style", default="ball_and_stick",
                    choices=["ball_and_stick", "spacefill", "licorice", "wireframe"])
     p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
@@ -117,6 +118,30 @@ def _probe_terminal_raw() -> Optional["kitty.TerminalProbe"]:
         return kitty.probe_terminal(0, 1)
     finally:
         termios.tcsetattr(0, termios.TCSADRAIN, old)
+
+
+def _check_kitty_terminal() -> Tuple[Optional["kitty.TerminalProbe"], int]:
+    """Guard for the interactive path: stdout must be a real terminal, and it
+    must speak the Kitty graphics protocol (checked via env heuristics, then
+    a raw-mode probe if those come up empty). Returns ``(probe, 0)`` to
+    proceed -- reusing the probe avoids a second round trip -- or
+    ``(None, exit_code)`` to abort.
+    """
+    if not sys.stdout.isatty():
+        print("error: interactive mode needs a terminal", file=sys.stderr)
+        return None, 4
+    if kitty.supports_kitty():
+        return None, 0
+    # The environment says nothing (common over SSH) -- ask the terminal
+    # itself. Only an answered probe that lacks graphics support, or no
+    # terminal to ask, refuses; a confirmed terminal proceeds normally.
+    probe = _probe_terminal_raw()
+    if probe is None or probe.graphics is not True:
+        print("warning: this terminal does not appear to support the Kitty "
+              "graphics protocol.", file=sys.stderr)
+        print("         Set VIMOL_FORCE_KITTY=1 to try anyway.", file=sys.stderr)
+        return None, 5
+    return probe, 0
 
 
 def _default_demo_path() -> Optional[str]:
@@ -184,56 +209,61 @@ def main(argv: List[str] | None = None) -> int:
     if args.list_formats:
         print("Supported formats: " + ", ".join(SUPPORTED_EXTENSIONS))
         return 0
-    if not args.file:
-        args.file = _default_demo_path()
-        if not args.file:
+    files = args.file
+    if not files:
+        demo = _default_demo_path()
+        if not demo:
             make_parser().print_help()
             return 1
-    if not os.path.exists(args.file):
-        print(f"error: no such file: {args.file}", file=sys.stderr)
-        return 2
+        files = [demo]
 
-    try:
-        mols = load_all(args.file)
-    except Exception as e:  # noqa: BLE001
-        print(f"error: failed to parse {args.file}: {e}", file=sys.stderr)
-        return 3
-    if not mols:
-        print("error: no molecules parsed", file=sys.stderr)
-        return 3
+    if len(files) == 1:
+        path = files[0]
+        if not os.path.exists(path):
+            print(f"error: no such file: {path}", file=sys.stderr)
+            return 2
 
-    for m in mols:
-        if not args.no_bonds:
-            ensure_bonds(m, tolerance=args.bond_tolerance)
+        try:
+            mols = load_all(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"error: failed to parse {path}: {e}", file=sys.stderr)
+            return 3
+        if not mols:
+            print("error: no molecules parsed", file=sys.stderr)
+            return 3
 
-    idx = max(0, min(args.frame, len(mols) - 1))
-    mol = mols[idx]
+        for m in mols:
+            if not args.no_bonds:
+                ensure_bonds(m, tolerance=args.bond_tolerance)
+
+        idx = max(0, min(args.frame, len(mols) - 1))
+        mol = mols[idx]
+        frames, structures, source_path = mols, None, path
+    else:
+        structures = _build_structure_set(files, args.no_bonds, args.bond_tolerance)
+        if len(structures) == 0:
+            print("error: no molecules parsed", file=sys.stderr)
+            return 3
+
+        idx = max(0, min(args.frame, len(structures) - 1))
+        mol = structures[0].molecule
+        frames, source_path = None, None
 
     style = build_style(args)
 
     # -- interactive viewer ----------------------------------------------
-    if not sys.stdout.isatty():
-        print("error: interactive mode needs a terminal", file=sys.stderr)
-        return 4
-    probe = None
-    if not kitty.supports_kitty():
-        # The environment says nothing (common over SSH) -- ask the terminal
-        # itself. Only an answered probe that lacks graphics support, or no
-        # terminal to ask, refuses; a confirmed terminal proceeds normally.
-        probe = _probe_terminal_raw()
-        if probe is None or probe.graphics is not True:
-            print("warning: this terminal does not appear to support the Kitty "
-                  "graphics protocol.", file=sys.stderr)
-            print("         Set VIMOL_FORCE_KITTY=1 to try anyway.", file=sys.stderr)
-            return 5
+    probe, rc = _check_kitty_terminal()
+    if rc:
+        return rc
 
     # interactive defaults to a terminal-matching transparent background
     if not args.opaque and args.background is None:
         style.transparent = True
 
     from .viewer import Viewer
-    viewer = Viewer(mol, frames=mols, style=style, autospin=args.spin,
-                    backend=args.backend, source_path=args.file, editable=True,
+    viewer = Viewer(mol, frames=frames, structures=structures, style=style,
+                    autospin=args.spin, backend=args.backend,
+                    source_path=source_path, editable=True,
                     probe=probe)   # reuse the detection probe: no second round trip
     viewer.frame_index = idx
     # apply initial rotation
