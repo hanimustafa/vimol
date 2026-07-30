@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import sys
@@ -124,6 +125,28 @@ def test_kitty_encoding_chunks():
     assert b"a=T" in data
     # payload should be chunked with the graphics terminators
     assert data.count(b"\x1b_G") == data.count(b"\x1b\\")
+
+
+def test_kitty_shm_transmission_sends_a_name_not_the_pixels():
+    """`transmit="shm"` hands the terminal a shared-memory *name* (protocol
+    t=s, the "local client" path) instead of zlib+base64 pixel data -- the
+    whole point being that a full-resolution frame costs one memcpy."""
+    from multiprocessing import shared_memory
+    img = np.zeros((32, 48, 4), np.uint8)
+    img[4:20, 4:20] = 200
+    data = kitty.encode_image(img, image_id=7, transmit="shm")
+    assert b"t=s" in data
+    assert b"o=z" not in data                     # nothing compressed
+    assert b"f=32" in data and b"s=48" in data and b"v=32" in data
+    assert len(data) < 200                        # a name, not 6 KB of pixels
+    name = base64.standard_b64decode(data.split(b";", 1)[1].split(b"\x1b\\")[0])
+    assert name.startswith(b"/")                  # the shm_open name kitty opens
+    shm = shared_memory.SharedMemory(name=name.decode()[1:])
+    try:
+        assert bytes(shm.buf[:img.nbytes]) == img.tobytes()
+    finally:
+        shm.close()
+        shm.unlink()
 
 
 def test_png_roundtrip_header():

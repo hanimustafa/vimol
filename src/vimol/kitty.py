@@ -3,8 +3,10 @@
 Reference: https://sw.kovidgoyal.net/kitty/graphics-protocol/
 
 We transmit raw RGB/RGBA pixels (optionally zlib-compressed) in <=4096-byte
-base64 chunks. The public surface is small on purpose so the module can be
-lifted into other terminal apps unchanged.
+base64 chunks, or -- to a terminal the startup probe proved is on this
+machine -- through a POSIX shared-memory object, which costs a memcpy instead
+of a per-frame compress. The public surface is small on purpose so the module
+can be lifted into other terminal apps unchanged.
 """
 from __future__ import annotations
 
@@ -22,6 +24,85 @@ _ESC = b"\x1b"
 _GRAPHICS_START = b"\x1b_G"
 _GRAPHICS_END = b"\x1b\\"
 _CHUNK = 4096
+
+
+# --------------------------------------------------------------------------
+# Shared-memory transfer (the protocol's "local client" path, t=s)
+# --------------------------------------------------------------------------
+# Transmitting pixels as escape codes (t=d) means zlib + base64 of the whole
+# frame: measured ~24 ms for a 1600x1000 RGBA frame, against ~3.5 ms to
+# render it on the GPU. Handing the terminal a POSIX shared-memory *name*
+# instead costs one memcpy (~0.9 ms for the same frame) and lets the terminal
+# skip its decompress too. It only works when the terminal runs on this
+# machine, which is exactly what probing it proves (see probe_query_bytes).
+#
+# The terminal unlinks the object once it has read it, so our own cleanup is
+# a best-effort mop-up of objects a terminal never consumed.
+_SHM_PREFIX = "vimol"
+# Darwin caps shm names at 31 chars including the leading slash, so keep the
+# pid+counter form short.
+_shm_counter = 0
+_shm_pending: list = []
+# Objects kept alive this many frames before we assume the terminal will
+# never read them and unlink. Under frame pacing at most one frame is ever
+# in flight, so this is pure belt-and-braces against a wedged terminal.
+_SHM_KEEP = 3
+
+
+def shm_write(data: bytes) -> str:
+    """Copy *data* into a fresh POSIX shared-memory object; return its name.
+
+    The name is returned in the form the terminal passes to ``shm_open`` --
+    with the leading slash -- which is what the protocol's ``t=s`` payload
+    must carry. The mapping is closed immediately (the object outlives it)
+    and deliberately NOT unlinked: the terminal does that after reading.
+    """
+    from multiprocessing import shared_memory
+    global _shm_counter
+    _shm_counter += 1
+    name = f"{_SHM_PREFIX}-{os.getpid()}-{_shm_counter}"
+    shm = shared_memory.SharedMemory(create=True, size=max(len(data), 1), name=name)
+    try:
+        shm.buf[:len(data)] = data
+    finally:
+        # Python's resource tracker would "helpfully" unlink this at exit and
+        # warn about leaked objects -- but the *terminal* owns the unlink, so
+        # unregister before closing. Private API; a failure here is harmless
+        # (worst case: a warning line at interpreter shutdown).
+        try:
+            from multiprocessing import resource_tracker
+            resource_tracker.unregister(shm._name, "shared_memory")
+        except Exception:
+            pass
+        shm.close()
+    _shm_pending.append(name)
+    if len(_shm_pending) > _SHM_KEEP:
+        shm_release(_shm_pending.pop(0))
+    return "/" + name
+
+
+def shm_release(name: str) -> None:
+    """Unlink shared-memory object *name* if it still exists (no-op if the
+    terminal already consumed and unlinked it, which is the normal case)."""
+    from multiprocessing import shared_memory
+    try:
+        shm = shared_memory.SharedMemory(name=name.lstrip("/"))
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
+    try:
+        shm.close()
+        shm.unlink()
+    except Exception:
+        pass
+
+
+def shm_cleanup() -> None:
+    """Unlink every shared-memory object we still have outstanding (call on
+    exit: a frame written just before quitting may never have been read)."""
+    while _shm_pending:
+        shm_release(_shm_pending.pop())
 
 
 # --------------------------------------------------------------------------
@@ -181,11 +262,16 @@ class TerminalProbe:
     cell_px: Optional[Tuple[float, float]]
     rtt: Optional[float] = None
     leftover: bytes = b""
+    # True when the terminal accepted a shared-memory (t=s) transfer, i.e. it
+    # runs on this machine and supports the protocol's local-client path;
+    # False when it refused or ignored it; None when we never asked.
+    shm: Optional[bool] = None
 
 
-# The probe's graphics query id. With a=q the terminal only *answers* -- no
-# image is stored -- so unlike display ids this can't collide across panes.
+# The probe's graphics query ids. With a=q the terminal only *answers* -- no
+# image is stored -- so unlike display ids these can't collide across panes.
 _PROBE_GFX_ID = 31
+_PROBE_SHM_ID = 32
 
 # Replies the probe can receive, in the order the queries are sent. The DA1
 # reply (CSI ? ... c) is the fence: every xterm-descendant answers it, and
@@ -194,12 +280,13 @@ _PROBE_GFX_ID = 31
 # with CSI ? but ends in $y, so the DA1 pattern (digits/; then a final 'c')
 # cannot match it.
 _RE_GFX_REPLY = re.compile(rb"\x1b_Gi=%d;([^\x1b]*)\x1b\\" % _PROBE_GFX_ID)
+_RE_SHM_REPLY = re.compile(rb"\x1b_Gi=%d;([^\x1b]*)\x1b\\" % _PROBE_SHM_ID)
 _RE_DECRQM_1016 = re.compile(rb"\x1b\[\?1016;(\d+)\$y")
 _RE_CELL_SIZE = re.compile(rb"\x1b\[6;(\d+);(\d+)t")
 _RE_DA1 = re.compile(rb"\x1b\[\?[0-9;]*c")
 
 
-def probe_query_bytes() -> bytes:
+def probe_query_bytes(shm_name: Optional[str] = None) -> bytes:
     """The combined capability query, sent as ONE write (one SSH round trip).
 
     Four questions back to back: (1) a Kitty graphics *query* (``a=q`` with a
@@ -209,24 +296,41 @@ def probe_query_bytes() -> bytes:
     ignore the queries they don't recognize (the graphics APC included), so
     this is safe to fire at anything that calls itself a terminal. Requires
     the tty to be in raw mode to read the replies.
+
+    Pass *shm_name* (a shared-memory object holding one 24-bit pixel, from
+    :func:`shm_write`) to add a fifth question: a ``t=s`` query. Answering it
+    OK requires the terminal to actually open that object, so the reply
+    proves both "supports the local-client path" and "runs on this machine"
+    -- no env-var guessing about SSH. The terminal unlinks the object when it
+    reads it, and a refusal leaves it for :func:`shm_cleanup`.
     """
     gfx = (b"\x1b_Gi=%d,s=1,v=1,a=q,t=d,f=24;" % _PROBE_GFX_ID
            + base64.standard_b64encode(b"\x00\x00\x00") + b"\x1b\\")
+    if shm_name is not None:
+        gfx += (b"\x1b_Gi=%d,s=1,v=1,a=q,t=s,f=24;" % _PROBE_SHM_ID
+                + base64.standard_b64encode(shm_name.encode()) + b"\x1b\\")
     return gfx + b"\x1b[?1016$p" + b"\x1b[16t" + b"\x1b[c"
 
 
 def _parse_probe_pieces(buf: bytes):
-    """Extract (graphics, pixel_mouse, cell_px, spans) from reply bytes.
+    """Extract (graphics, pixel_mouse, cell_px, shm, spans) from reply bytes.
 
     graphics is None when no graphics reply is present at all -- only the
     caller knows whether that silence is meaningful (it is once the DA1
-    fence has arrived).
+    fence has arrived). shm, by contrast, is False on silence: an unanswered
+    t=s query is a "no" the same way an error reply is, and callers that
+    never asked overwrite it with None.
     """
     spans = []
     graphics = None
     m = _RE_GFX_REPLY.search(buf)
     if m:
         graphics = m.group(1).startswith(b"OK")
+        spans.append(m.span())
+    shm = False
+    m = _RE_SHM_REPLY.search(buf)
+    if m:
+        shm = m.group(1).startswith(b"OK")
         spans.append(m.span())
     pixel = False
     m = _RE_DECRQM_1016.search(buf)
@@ -242,7 +346,7 @@ def _parse_probe_pieces(buf: bytes):
         if cw > 0 and ch > 0:
             cell = (float(cw), float(ch))
         spans.append(m.span())
-    return graphics, pixel, cell, spans
+    return graphics, pixel, cell, shm, spans
 
 
 def _probe_leftover(buf: bytes, spans) -> bytes:
@@ -261,33 +365,57 @@ def parse_probe_reply(buf: bytes) -> Optional[TerminalProbe]:
 
     Once the fence is in, a missing graphics reply is a definitive "no
     graphics support" (the terminal processed our queries in order and
-    answered the later one), so ``graphics`` is always True/False here.
+    answered the later one), so ``graphics`` is always True/False here. The
+    same in-order reasoning makes a missing t=s reply a definitive "no
+    shared memory".
     """
     m_da1 = _RE_DA1.search(buf)
     if m_da1 is None:
         return None
-    graphics, pixel, cell, spans = _parse_probe_pieces(buf)
+    graphics, pixel, cell, shm, spans = _parse_probe_pieces(buf)
     spans.append(m_da1.span())
     return TerminalProbe(graphics=bool(graphics), pixel_mouse=pixel, cell_px=cell,
-                         leftover=_probe_leftover(buf, spans))
+                         leftover=_probe_leftover(buf, spans), shm=shm)
 
 
-def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0) -> TerminalProbe:
-    """Ask the terminal what it can do: graphics, pixel mouse, cell size, RTT.
+def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0,
+                   ask_shm: bool = True) -> TerminalProbe:
+    """Ask the terminal what it can do: graphics, pixel mouse, cell size, RTT,
+    and (unless *ask_shm* is False) shared-memory transfer.
 
     One write, then reads until the DA1 fence answers (or *timeout*, which
     only real non-terminals hit -- every xterm descendant answers DA1, so
     capable terminals cost exactly one round trip, not a fixed timeout).
     Requires the tty to be in raw mode. On timeout, whatever partial replies
     did arrive are still used, with ``graphics=None`` (unknown, not "no").
+
+    The shm question carries a real shared-memory object; a terminal that
+    accepts it has already unlinked it, and one that didn't gets the object
+    released here, so the probe never leaks either way.
     """
     import select
     import time as _time
 
+    name = None
+    if ask_shm:
+        try:
+            name = shm_write(b"\x00\x00\x00")
+        except Exception:
+            name = None                  # no POSIX shm here: just skip the question
     try:
-        os.write(fd_out, probe_query_bytes())
+        os.write(fd_out, probe_query_bytes(shm_name=name))
     except OSError:
+        if name is not None:
+            shm_release(name)
         return TerminalProbe(graphics=None, pixel_mouse=False, cell_px=None)
+
+    def _finish(probe: TerminalProbe) -> TerminalProbe:
+        if name is None:
+            probe.shm = None             # never asked: not the same as "no"
+        elif probe.shm is not True:
+            shm_release(name)            # refused/ignored -- mop up our object
+        return probe
+
     t0 = _time.monotonic()
     deadline = t0 + timeout
     buf = b""
@@ -305,10 +433,10 @@ def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0) -> Ter
         probe = parse_probe_reply(buf)
         if probe is not None:
             probe.rtt = _time.monotonic() - t0
-            return probe
-    graphics, pixel, cell, spans = _parse_probe_pieces(buf)
-    return TerminalProbe(graphics=graphics, pixel_mouse=pixel, cell_px=cell,
-                         leftover=_probe_leftover(buf, spans))
+            return _finish(probe)
+    graphics, pixel, cell, shm, spans = _parse_probe_pieces(buf)
+    return _finish(TerminalProbe(graphics=graphics, pixel_mouse=pixel, cell_px=cell,
+                                 leftover=_probe_leftover(buf, spans), shm=shm))
 
 
 # --------------------------------------------------------------------------
@@ -330,6 +458,7 @@ def encode_image(
     compress_level: int = 6,
     z_index: int = 0,
     quiet: int = 2,
+    transmit: str = "direct",
 ) -> bytes:
     """Encode an (H, W, 3|4) uint8 array as Kitty graphics-protocol bytes.
 
@@ -344,16 +473,29 @@ def encode_image(
     (roughly half the CPU of the default 6 for ~25% more bytes -- a fine
     trade for a local terminal); a resting still can afford the default for a
     smaller payload.
+
+    *transmit* selects how the pixels reach the terminal: ``"direct"`` (t=d)
+    inlines them as base64 escape-code chunks, which is the only option for a
+    terminal on the far side of a link; ``"shm"`` (t=s) copies them into a
+    POSIX shared-memory object and sends only its name, which is far cheaper
+    but requires a terminal on THIS machine (see shm_write). ``compress`` is
+    ignored in shm mode -- compressing a memcpy would be all cost, no benefit.
     """
+    if transmit not in ("direct", "shm"):
+        raise ValueError(f"unknown transmit {transmit!r} (expected 'direct' or 'shm')")
     if placement_id is None:
         placement_id = image_id
     arr = np.ascontiguousarray(pixels, dtype=np.uint8)
     h, w = arr.shape[0], arr.shape[1]
     fmt = 32 if arr.ndim == 3 and arr.shape[2] == 4 else 24
-    raw = arr.tobytes()
-    if compress:
-        raw = zlib.compress(raw, compress_level)
-    payload = base64.standard_b64encode(raw)
+    if transmit == "shm":
+        compress = False
+        payload = base64.standard_b64encode(shm_write(arr.tobytes()).encode())
+    else:
+        raw = arr.tobytes()
+        if compress:
+            raw = zlib.compress(raw, compress_level)
+        payload = base64.standard_b64encode(raw)
 
     ctrl = {
         "a": "T",          # transmit and display
@@ -366,6 +508,8 @@ def encode_image(
     }
     if compress:
         ctrl["o"] = "z"
+    if transmit == "shm":
+        ctrl["t"] = "s"
     if cols:
         ctrl["c"] = int(cols)
     if rows:
