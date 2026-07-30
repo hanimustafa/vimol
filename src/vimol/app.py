@@ -71,6 +71,8 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
                    help="rendering backend: numpy CPU raycaster, GPU (OpenGL), "
                         "or auto (GPU if a context can be created, else CPU)")
+    p.add_argument("--theme", default="auto", choices=["auto", "dark", "light"],
+                   help="chrome color theme; auto detects the terminal's own background")
     p.add_argument("--size", default="0x0", help="pixel size WxH for --render/--kitty (0=auto)")
     p.add_argument("--supersample", type=int, default=2, help="anti-aliasing factor for stills")
     p.add_argument("--rotate", nargs=2, type=float, metavar=("YAW", "PITCH"),
@@ -91,6 +93,23 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-formats", action="store_true")
     p.add_argument("--version", action="store_true")
     return p
+
+
+def _apply_theme_arg(args) -> None:
+    """--theme is the highest-precedence source in theme.resolve()'s ladder
+    (see docs/design/theme-and-aesthetics.md sec 2) -- implemented by setting
+    VIMOL_THEME before the Viewer is constructed, rather than adding a
+    parallel parameter to Viewer.__init__ for what VIMOL_THEME already
+    covers.
+
+    "auto" is the DEFAULT, i.e. "the user passed no --theme at all", so it
+    must leave VIMOL_THEME alone rather than clearing it -- clearing would
+    mean the env var only ever worked for direct Viewer() construction and
+    never for the CLI, silently deleting the ladder's second rung on every
+    plain `vimol file.xyz`.
+    """
+    if args.theme != "auto":
+        os.environ["VIMOL_THEME"] = args.theme
 
 
 def _print_info(mol: Molecule):
@@ -142,6 +161,7 @@ def _default_demo_path() -> Optional[str]:
 
 def main(argv: List[str] | None = None) -> int:
     args = make_parser().parse_args(argv)
+    _apply_theme_arg(args)
 
     if args.version:
         from . import __version__

@@ -121,6 +121,7 @@ def test_widget_highlight_maps_active_local_index_through_composite_offset():
     w = MoleculeWidget.__new__(MoleculeWidget)
     w.style = __import__("vimol.render", fromlist=["Style"]).Style()
     w.scene = Scene(sset, 100, 100, style=w.style, backend="cpu")
+    w.theme = "dark"
     w.hovered = 1          # active-local index 1 ("O" atom at x=2)
     w.selected = None
     w.measure_sel = []

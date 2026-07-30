@@ -29,6 +29,7 @@ from .scene import Scene
 from .structures import StructureSet
 from .input import MouseEvent, KeyEvent, Event
 from . import editor
+from . import elements
 
 REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
 
@@ -59,6 +60,7 @@ class MoleculeWidget:
         self.selected: Optional[int] = None     # last clicked atom
         # editing state -- inert unless the host opts in with editable=True
         self.editable = editable
+        self.theme = "dark"                     # "dark" | "light"; Viewer keeps this in sync
         self.append_mode = False                # 'a': click to build atoms
         self.delete_mode = False                # 'x': click to remove atoms
         self.measure_mode = False               # 'm': click to build a measurement pick list
@@ -688,9 +690,13 @@ class MoleculeWidget:
         # CPK for the first-drawn (active) entry, tint for the rest.
         composite = self.scene.structures.composite()
         self._base_colors = composite.base_colors
+        themed = elements.themed_base_colors(composite.molecule.symbols,
+                                             composite.base_colors, self.theme)
         hi = self.hovered if self.hovered is not None else self.selected
         if hi is None and not self.measure_sel:
-            self.style.color_override = None
+            # themed is a no-op passthrough for "dark", so this stays
+            # byte-identical to pre-theme rendering in the dark case.
+            self.style.color_override = themed if self.theme == "light" else None
             return
         # hovered/selected/measure_sel are ACTIVE-LOCAL indices (design §3);
         # map them through the composite's offset before writing into the
@@ -700,9 +706,9 @@ class MoleculeWidget:
             # The active structure isn't drawn at all (hidden -- design §4.3
             # allows this without advancing active_index), so there is no
             # composite slot to map hovered/selected/measure_sel into.
-            self.style.color_override = None
+            self.style.color_override = themed if self.theme == "light" else None
             return
-        cols = composite.base_colors.copy()
+        cols = themed.copy()
         yellow = np.array([1.0, 0.95, 0.3])
         # every picked atom in the live measurement selection gets the same
         # yellow tint as a hover -- hover (below) is applied on top, so it

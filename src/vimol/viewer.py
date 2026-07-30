@@ -26,6 +26,7 @@ from . import input as _input
 from . import elements
 from . import templates
 from . import periodic_table
+from . import theme
 
 # ANSI / terminal control -------------------------------------------------
 _ALT_SCREEN_ON = b"\x1b[?1049h"
@@ -62,18 +63,7 @@ _LEFT_WIDTH = 24
 _LIST_W_MIN = 18
 _LIST_W_MAX = 28
 
-# Structure-list strip colors (design §4.1).
-# Structure-strip palette (design §4.1). A dark, calm panel: the active row
-# is a full-width background rather than a leader glyph, and the cursor row a
-# subtler one so the two stay distinguishable when they differ.
-_LIST_HEADER_FG = (139, 146, 165)   # panel header and group (file) names
-_LIST_MUTED_FG = (110, 118, 135)    # row index, legend descriptions
-_LIST_LABEL_FG = (232, 236, 244)    # the active row's label; key-cap text
-_LIST_DIM_FG = (200, 206, 216)      # every other row's label
-_LIST_ACTIVE_BG = (37, 45, 64)      # active-row highlight, full panel width
-_LIST_CURSOR_BG = (28, 33, 46)      # cursor-row highlight (subtler)
-_LIST_RULE_FG = (60, 66, 84)        # the separator rule
-_LIST_CAP_BG = (42, 49, 66)         # legend "key cap" background
+# Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
 # separator plus footer lines below. _list_capacity() derives what fits from
 # these, and _draw_list lays the panel out to match.
@@ -108,6 +98,7 @@ _HELP_EDIT = [
 _HELP_TAIL = [
     "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
+    "  ctrl-t ............. light/dark theme",
     "  f / r / z .......... re-fit / reset    ? .................. toggle help",
     "  q / Esc ............ quit",
 ]
@@ -118,7 +109,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03",
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03", "\x14",
                       "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
@@ -172,16 +163,6 @@ def _timing_log_path() -> Optional[str]:
 # ~0.25 s after startup anyway.
 _STARTUP_SCALE = 0.3
 
-# Warm warning color for the status bar's "press c to cleanup" hint.
-_CLEANUP_HINT_FG = (255, 170, 60)
-
-# Periodic-table picker panel colors.
-_PT_BG = (18, 20, 26)
-_PT_BORDER_FG = (60, 200, 180)      # teal accent, matches the geometry pill
-_PT_TEXT_FG = (220, 220, 230)
-_PT_DIM_FG = (110, 114, 126)
-_PT_GAP_BG = (40, 42, 50)
-
 
 class Viewer:
     def __init__(self, molecule: Molecule, frames: Optional[List[Molecule]] = None,
@@ -193,6 +174,19 @@ class Viewer:
                  structures: Optional[StructureSet] = None):
         self.source_path = source_path
         self.editable = editable
+        # Frame 0 draws before the startup probe's OSC 11 reply can possibly
+        # be in hand (the probe itself runs after the first paint -- see
+        # _finish_startup), so this is a synchronous best guess: COLORFGBG, or
+        # else the last theme a real OSC 11 reply confirmed (most sessions
+        # run in the same terminal repeatedly, so this is usually right and
+        # is what keeps a light terminal from flickering dark-then-light on
+        # every startup), or else DARK. _finish_startup upgrades it once the
+        # probe replies.
+        self.theme = theme.resolve(os.environ.get("VIMOL_THEME"), None,
+                                   os.environ.get("COLORFGBG"), theme.read_cached())
+        # Set once the user presses ctrl-t: a manual choice outranks a probe
+        # reply that lands afterwards (see _apply_probe_theme).
+        self._theme_pinned = False
         if structures is not None:
             self.structures = structures
         else:
@@ -218,6 +212,7 @@ class Viewer:
         self.widget = MoleculeWidget(self.structures, 320, 240, style=self.style,
                                      supersample=1, picking=picking, backend=backend,
                                      editable=editable)
+        self.widget.theme = self.theme.name
         # Editing keys ('a' append, 's' save, 'u' undo, 'o' autospin) are only
         # bound when editing is enabled; otherwise 'a' keeps its classic meaning
         # (autospin) and 's' falls through to the widget (cycle representation).
@@ -392,6 +387,39 @@ class Viewer:
         kitty.write_bytes(_input.enable_mouse(pixel=pixel, hover=self.widget.picking),
                           self.fd_out)
 
+    def _apply_probe_theme(self, probe) -> None:
+        """Re-run the theme ladder now that the probe's OSC 11 answer is in.
+
+        Called from BOTH probe landing sites -- the quick window in
+        _finish_startup and the late watch in _late_probe_tick. The late one
+        matters most: a congested link is exactly where the quick window
+        misses, and skipping the upgrade there would leave those sessions
+        stuck on the frame-0 COLORFGBG/DARK guess forever, i.e. auto-detection
+        silently doing nothing on the links it was written for.
+
+        A manual ctrl-t always wins: once the user has stated a preference,
+        a probe reply landing afterwards must not yank it back.
+        """
+        resolved = theme.resolve(os.environ.get("VIMOL_THEME"), probe.bg_rgb,
+                                 os.environ.get("COLORFGBG"), theme.read_cached())
+        # Remember what a REAL OSC 11 answer said, for next run's frame-0
+        # guess (see __init__) -- but only that, not an explicit override or
+        # the COLORFGBG heuristic, which aren't the terminal telling us
+        # anything itself.
+        if probe.bg_rgb is not None and not os.environ.get("VIMOL_THEME"):
+            theme.write_cached(
+                (theme.LIGHT if theme.luminance(probe.bg_rgb) > 140 else theme.DARK).name)
+        if self._theme_pinned or resolved is self.theme:
+            return
+        self.theme = resolved
+        self.widget.theme = resolved.name
+        # Repaint rather than wait for the next settle: the chrome that DOES
+        # paint an opaque background (status bar, help, pickers) would
+        # otherwise sit in the wrong palette until something else happened to
+        # force a frame, which reads as a delayed colour flash.
+        kitty.write_bytes(_CLEAR, self.fd_out)
+        self._last_interact = time.time()
+
     def _finish_startup(self) -> None:
         """Probe the terminal and arm the mouse -- AFTER the first paint.
 
@@ -415,6 +443,7 @@ class Viewer:
         if probe is not None:
             if probe.cell_px is not None:
                 self._cell_px = probe.cell_px
+            self._apply_probe_theme(probe)
             self._enable_mouse(probe.pixel_mouse)
             # Seed the settle resolution from the measured link latency: a
             # clearly-local terminal starts crisp at full resolution; a
@@ -479,6 +508,7 @@ class Viewer:
             self._late_buf = b""
             if p.cell_px is not None:
                 self._cell_px = p.cell_px
+            self._apply_probe_theme(p)
             if p.pixel_mouse and not self.decoder.pixel:
                 self._enable_mouse(True)         # upgrade wire+decoder together
             self._paced = True
@@ -493,7 +523,7 @@ class Viewer:
         if time.monotonic() - self._late_t0 > 15.0:
             # never answered: release what the user typed, minus anything
             # that looks like a stray probe reply, and stay unpaced.
-            buf = kitty._RE_GFX_REPLY.sub(b"", self._late_buf)
+            buf = kitty.strip_probe_replies(self._late_buf)
             self._late_t0 = None
             self._late_buf = b""
             if buf:
@@ -693,16 +723,15 @@ class Viewer:
         parts.append("\x1b[0m")
         return "".join(parts)
 
-    @classmethod
-    def _list_cap(cls, key: str):
+    def _list_cap(self, key: str):
         """A legend "key cap": the key text padded one space either side on a
         lighter background."""
-        return (f" {key} ", cls._sgr_bg(_LIST_CAP_BG) + cls._sgr_fg(_LIST_LABEL_FG))
+        return (f" {key} ", self._sgr_bg(self.theme.list_cap_bg) + self._sgr_fg(self.theme.list_label_fg))
 
     def _list_legend(self):
         """The legend's rows, as segment lists (design §4.1). Sized to fit the
         narrowest strip (_LIST_W_MIN); wider strips just leave more air."""
-        muted = self._sgr_fg(_LIST_MUTED_FG)
+        muted = self._sgr_fg(self.theme.list_muted_fg)
         cap = self._list_cap
         return [
             [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
@@ -750,8 +779,8 @@ class Viewer:
         first = self._list_scroll
         visible = rows[first:first + cap]
 
-        muted = self._sgr_fg(_LIST_MUTED_FG)
-        head_fg = self._sgr_fg(_LIST_HEADER_FG)
+        muted = self._sgr_fg(self.theme.list_muted_fg)
+        head_fg = self._sgr_fg(self.theme.list_header_fg)
         marker = ("\u2191" if first > 0 else "") + ("\u2193" if first + cap < len(rows) else "")
         title = f" STRUCTURES {len(sset)}"
         gap = max(0, list_w - len(title) - len(marker))
@@ -775,18 +804,24 @@ class Viewer:
             active = i == sset.active_index
             # The active row IS its background (no leader glyph); the cursor
             # row gets a subtler one, so the two stay tellable apart when
-            # they differ (design §4.3). A row that is IN THE OVERLAY wears
-            # its own tint on the label -- with no leader glyph and no key
-            # binding for it, that tint is the only way to read the overlay
-            # set off the screen at all (membership is opt+click only).
-            bg = (_LIST_ACTIVE_BG if active
-                  else _LIST_CURSOR_BG if i == self._list_cursor else None)
+            # they differ (design §4.3). Every OTHER row stays background-
+            # less on purpose: the panel is transparent, so the terminal's
+            # own background shows through and the strip never paints a
+            # slab that fights it. Readability on a light terminal comes
+            # from the THEME'S FOREGROUNDS (list_dim_fg and friends flip
+            # dark on light), not from painting an opaque panel. A row that
+            # is IN THE OVERLAY wears its own tint on the label -- with no
+            # leader glyph and no key binding for it, that tint is the only
+            # way to read the overlay set off the screen at all (membership
+            # is opt+click only).
+            bg = (self.theme.list_active_bg if active
+                  else self.theme.list_cursor_bg if i == self._list_cursor else None)
             dim = "\x1b[2m" if not entry.visible else ""
             # The tint outranks the active row's near-white label:
             # opt+clicking the active row has to change something on screen,
             # and the background is already saying which row is active.
             label_fg = (self._sgr_fg(tint) if entry.marked
-                        else self._sgr_fg(_LIST_LABEL_FG if active else _LIST_DIM_FG))
+                        else self._sgr_fg(self.theme.list_label_fg if active else self.theme.list_dim_fg))
             segs = [
                 (" ", ""),
                 ("\u2588" if entry.visible else "\u2591", dim + self._sgr_fg(tint)),
@@ -803,7 +838,7 @@ class Viewer:
 
         row0 = _LIST_ROWS_ABOVE + drawn_rows
         rule = "\u2500" * max(0, list_w - 2)
-        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(_LIST_RULE_FG))], list_w))
+        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], list_w))
         for k, segs in enumerate(self._list_legend(), start=1):
             put(row0 + k, self._list_line(segs, list_w))
         # Status lines last: on a short panel they are the first thing to
@@ -1087,9 +1122,12 @@ class Viewer:
 
     def _draw_help(self):
         out = bytearray()
+        bg_r, bg_g, bg_b = self.theme.help_bg
+        fg_r, fg_g, fg_b = self.theme.help_fg
+        sgr = b"\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm" % (bg_r, bg_g, bg_b, fg_r, fg_g, fg_b)
         for k, line in enumerate(_help_lines(self.editable)):
             out += b"\x1b[%d;3H" % (2 + k)
-            out += b"\x1b[48;2;20;22;30m\x1b[38;2;220;220;230m"
+            out += sgr
             out += (" " + line.ljust(58)).encode()
             out += b"\x1b[0m"
         kitty.write_bytes(bytes(out), self.fd_out)
@@ -1131,13 +1169,12 @@ class Viewer:
             return None
         return periodic_table.GRID[r][c]
 
-    @staticmethod
-    def _pt_cell_text(cell, cursor: bool) -> str:
+    def _pt_cell_text(self, cell, cursor: bool) -> str:
         """The 4-char escaped label for one periodic-table cell."""
         if cell is None:
             return "    "
         if cell.symbol is None:
-            bg, fg = _PT_GAP_BG, _PT_DIM_FG
+            bg, fg = self.theme.pt_gap_bg, self.theme.pt_dim_fg
             label = f"{cell.text:^4}"
         else:
             rgb = elements.element_color(cell.symbol)
@@ -1153,10 +1190,10 @@ class Viewer:
     def _draw_periodic_table(self):
         top, left, width, height = self._pt_geometry()
         inner_w = width - 2
-        border = (f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-                  f"\x1b[38;2;{_PT_BORDER_FG[0]};{_PT_BORDER_FG[1]};{_PT_BORDER_FG[2]}m")
-        bg_only = f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-        text_fg = f"\x1b[38;2;{_PT_TEXT_FG[0]};{_PT_TEXT_FG[1]};{_PT_TEXT_FG[2]}m"
+        border = (f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+                  f"\x1b[38;2;{self.theme.pt_border_fg[0]};{self.theme.pt_border_fg[1]};{self.theme.pt_border_fg[2]}m")
+        bg_only = f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+        text_fg = f"\x1b[38;2;{self.theme.pt_text_fg[0]};{self.theme.pt_text_fg[1]};{self.theme.pt_text_fg[2]}m"
         out = bytearray()
 
         def put(row0: int, col0: int, s: str) -> None:
@@ -1254,10 +1291,10 @@ class Viewer:
     def _draw_geometry_picker(self):
         top, left, width, height = self._geom_geometry()
         inner_w = width - 2
-        border = (f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-                  f"\x1b[38;2;{_PT_BORDER_FG[0]};{_PT_BORDER_FG[1]};{_PT_BORDER_FG[2]}m")
-        bg_only = f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-        text_fg = f"\x1b[38;2;{_PT_TEXT_FG[0]};{_PT_TEXT_FG[1]};{_PT_TEXT_FG[2]}m"
+        border = (f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+                  f"\x1b[38;2;{self.theme.pt_border_fg[0]};{self.theme.pt_border_fg[1]};{self.theme.pt_border_fg[2]}m")
+        bg_only = f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+        text_fg = f"\x1b[38;2;{self.theme.pt_text_fg[0]};{self.theme.pt_text_fg[1]};{self.theme.pt_text_fg[2]}m"
         out = bytearray()
 
         def put(row0: int, col0: int, s: str) -> None:
@@ -1492,7 +1529,8 @@ class Viewer:
         geom_visible = f" {geom} "
         elem_btn = self._pill(elem, elements.element_color(elem))
         geom_btn = self._pill(geom, (0.17, 0.71, 0.63))       # teal accent
-        text = f"\x1b[38;2;150;155;170m{prefix}\x1b[0m{elem_btn} {geom_btn}"
+        r, g, b = self.theme.edit_prefix_fg
+        text = f"\x1b[38;2;{r};{g};{b}m{prefix}\x1b[0m{elem_btn} {geom_btn}"
         elem_start = len(prefix)
         elem_end = elem_start + len(elem_visible)
         geom_start = elem_end + 1                # +1 for the space between the pills
@@ -1522,14 +1560,20 @@ class Viewer:
         self._geom_button_span = None
         if self._mode == "save_input":
             body = f" Save to: {self._input_buf}█   Enter save · Esc cancel "
-            return f"\x1b[48;2;44;40;30m\x1b[38;2;240;236;220m{body}\x1b[0m"
+            bg_r, bg_g, bg_b = self.theme.input_bg
+            fg_r, fg_g, fg_b = self.theme.input_fg
+            return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         if self._mode == "save_confirm":
             name = os.path.basename(self._input_buf.strip())
             body = f" {name} exists — replace? (y/n) "
-            return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
+            bg_r, bg_g, bg_b = self.theme.warn_bg
+            fg_r, fg_g, fg_b = self.theme.warn_fg
+            return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         if self._mode == "quit_confirm":
             body = " unsaved changes — save before quitting? (y/n/Esc) "
-            return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
+            bg_r, bg_g, bg_b = self.theme.warn_bg
+            fg_r, fg_g, fg_b = self.theme.warn_fg
+            return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         mol = self.widget.molecule
         hov = self.widget.atom_info(self.widget.hovered)
         # a live measurement readout (2+ picks in measure mode) outranks the
@@ -1537,18 +1581,20 @@ class Viewer:
         # left-segment behavior applies.
         measure = (editor.measurement(mol, self.widget.measure_sel)
                    if self.widget.measure_mode else "")
-        # The molecule "name" is the xyz file's comment line (parsers/xyz.py
-        # keeps it at 60 chars, which stays the real ceiling here). It gets
-        # no cap of its own: the left field's width below is what bounds it,
-        # so a wide terminal actually shows the comment instead of clipping
-        # it to a stub while the middle of the bar sits empty.
+        # The molecule "name" is the xyz file's comment line, kept in full
+        # (parsers/xyz.py no longer truncates it). It gets no cap of its own:
+        # the left field's width below is what bounds it, so a wide terminal
+        # actually shows the comment instead of clipping it to a stub while
+        # the middle of the bar sits empty.
         raw_left = measure or self.widget.pick_refusal or hov or (self._msg or
             f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
         rep = self.style.representation
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
         backend = "gpu" if self.widget.scene.backend == "gl" else "cpu"
-        base = "\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m"
+        pr, pg, pb = self.theme.panel_bg
+        pfr, pfg, pfb = self.theme.panel_fg
+        base = f"\x1b[48;2;{pr};{pg};{pb}m\x1b[38;2;{pfr};{pfg};{pfb}m"
         mod = " [MODIFIED]" if (self.editable and self.widget.dirty) else ""
         hint = "  s save  q quit" if self.editable else "  q quit"
         show_buttons = self.editable and self.widget.append_mode
@@ -1577,7 +1623,7 @@ class Viewer:
         if self.editable:
             clash, stretched = editor.cleanup_targets(mol)
             if clash or stretched:
-                r, g, b = _CLEANUP_HINT_FG
+                r, g, b = self.theme.cleanup_hint_fg
                 cleanup_hint = f"  \x1b[38;2;{r};{g};{b}m\x1b[1m⚠ c cleanup\x1b[22m{base}"
         cleanup_hint_len = len("  ⚠ c cleanup") if cleanup_hint else 0
         pieces.append((cleanup_hint, cleanup_hint_len))
@@ -1850,6 +1896,13 @@ class Viewer:
             self._last_interact = time.time()
         elif key == "t":
             self.style.transparent = not self.style.transparent
+            kitty.write_bytes(_CLEAR, self.fd_out)
+            self._last_interact = time.time()
+        elif key == "\x14":
+            self.theme = theme.LIGHT if self.theme is theme.DARK else theme.DARK
+            self.widget.theme = self.theme.name
+            self._theme_pinned = True        # beats a probe reply landing later
+            self._msg = f"{self.theme.name} theme"
             kitty.write_bytes(_CLEAR, self.fd_out)
             self._last_interact = time.time()
         elif key in ("n", "p", "alt+down", "alt+up") and len(self.frames) > 1:

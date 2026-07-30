@@ -92,6 +92,14 @@ _COLORS = {
 
 _DEFAULT_COLOR = (1.00, 0.41, 0.71)  # hot pink for unknown elements
 
+# Light-mode overrides for CPK entries that don't survive a light/white
+# terminal background -- only the near-white ones move; everything else in
+# _COLORS is saturated enough to read on either background.
+_LIGHT_OVERRIDES = {
+    "H": (0.55, 0.55, 0.58), "He": (0.45, 0.75, 0.78), "Ag": (0.45, 0.45, 0.45),
+    "Pt": (0.45, 0.45, 0.55), "Hg": (0.40, 0.40, 0.55),
+}
+
 
 def normalize_symbol(sym: str) -> str:
     """Normalize an element token to canonical capitalization (e.g. 'FE' -> 'Fe')."""
@@ -115,6 +123,21 @@ def vdw_radius(sym: str) -> float:
 
 def element_color(sym: str) -> tuple:
     return _COLORS.get(normalize_symbol(sym), _DEFAULT_COLOR)
+
+
+def themed_base_colors(symbols, base_colors, theme: str):
+    """*base_colors* (N,3), with _LIGHT_OVERRIDES entries substituted where
+    *symbols* names one and *theme* is "light". Returns *base_colors*
+    unchanged (same array, no copy) for "dark" -- callers rely on this to
+    stay byte-identical to pre-theme rendering when the theme is dark."""
+    if theme != "light":
+        return base_colors
+    out = base_colors.copy()
+    for i, sym in enumerate(symbols):
+        override = _LIGHT_OVERRIDES.get(normalize_symbol(sym))
+        if override is not None:
+            out[i] = override
+    return out
 
 
 def element_name(sym: str) -> str:
