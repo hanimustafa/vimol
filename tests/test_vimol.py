@@ -103,6 +103,49 @@ def test_theme_resolve_precedence():
     assert theme.resolve(None, None, "garbage") is theme.DARK
 
 
+def test_viewer_defaults_to_dark_theme(monkeypatch):
+    from vimol.viewer import Viewer, theme as viewer_theme
+    # Task 7 hardcodes theme.DARK, but Task 8 makes this env-dependent --
+    # clear both now so this test stays valid (not flaky under whatever the
+    # running shell happens to export) once that lands.
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    assert v.theme is viewer_theme.DARK
+
+
+def test_viewer_strip_rows_always_carry_an_explicit_background(tmp_path):
+    """Every structure-strip row -- not just active/cursor -- must paint a
+    background SGR, else its foreground (tuned for one theme) washes out
+    against whichever background the terminal itself has (the reported
+    bug). Structure #2 (index 1) is neither active (0) nor cursor-highlighted
+    here, so its row is exactly the "ordinary" case that used to fall
+    through to bg=None."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_w = 24
+        v._list_cursor = 0   # keep the cursor off row 1 too
+        data = v._draw_list().decode("utf-8", "replace")
+        parts = re.split(r"\x1b\[(\d+);1H", data)
+        rows = {int(parts[i]) - 1: parts[i + 1] for i in range(1, len(parts), 2)}
+        ordinary_row = rows[v._list_row_spans[1][0]]
+        r, g, b = v.theme.list_panel_bg
+        assert f"\x1b[48;2;{r};{g};{b}m" in ordinary_row
+    finally:
+        os.close(fd)
+
+
+def test_viewer_status_bar_uses_theme_panel_colors():
+    from vimol.viewer import Viewer
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    v._update_geometry()
+    bar = v._status_bar()
+    r, g, b = v.theme.panel_bg
+    assert f"\x1b[48;2;{r};{g};{b}m" in bar
+
+
 def test_xyz_roundtrip_and_bonds():
     mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     assert mol.n_atoms == 12

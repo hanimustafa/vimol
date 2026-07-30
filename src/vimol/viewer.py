@@ -26,6 +26,7 @@ from . import input as _input
 from . import elements
 from . import templates
 from . import periodic_table
+from . import theme
 
 # ANSI / terminal control -------------------------------------------------
 _ALT_SCREEN_ON = b"\x1b[?1049h"
@@ -62,18 +63,7 @@ _LEFT_WIDTH = 24
 _LIST_W_MIN = 18
 _LIST_W_MAX = 28
 
-# Structure-list strip colors (design §4.1).
-# Structure-strip palette (design §4.1). A dark, calm panel: the active row
-# is a full-width background rather than a leader glyph, and the cursor row a
-# subtler one so the two stay distinguishable when they differ.
-_LIST_HEADER_FG = (139, 146, 165)   # panel header and group (file) names
-_LIST_MUTED_FG = (110, 118, 135)    # row index, legend descriptions
-_LIST_LABEL_FG = (232, 236, 244)    # the active row's label; key-cap text
-_LIST_DIM_FG = (200, 206, 216)      # every other row's label
-_LIST_ACTIVE_BG = (37, 45, 64)      # active-row highlight, full panel width
-_LIST_CURSOR_BG = (28, 33, 46)      # cursor-row highlight (subtler)
-_LIST_RULE_FG = (60, 66, 84)        # the separator rule
-_LIST_CAP_BG = (42, 49, 66)         # legend "key cap" background
+# Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
 # separator plus footer lines below. _list_capacity() derives what fits from
 # these, and _draw_list lays the panel out to match.
@@ -172,16 +162,6 @@ def _timing_log_path() -> Optional[str]:
 # ~0.25 s after startup anyway.
 _STARTUP_SCALE = 0.3
 
-# Warm warning color for the status bar's "press c to cleanup" hint.
-_CLEANUP_HINT_FG = (255, 170, 60)
-
-# Periodic-table picker panel colors.
-_PT_BG = (18, 20, 26)
-_PT_BORDER_FG = (60, 200, 180)      # teal accent, matches the geometry pill
-_PT_TEXT_FG = (220, 220, 230)
-_PT_DIM_FG = (110, 114, 126)
-_PT_GAP_BG = (40, 42, 50)
-
 
 class Viewer:
     def __init__(self, molecule: Molecule, frames: Optional[List[Molecule]] = None,
@@ -193,6 +173,7 @@ class Viewer:
                  structures: Optional[StructureSet] = None):
         self.source_path = source_path
         self.editable = editable
+        self.theme = theme.DARK   # live detection lands in Task 8; ctrl-t overrides it
         if structures is not None:
             self.structures = structures
         else:
@@ -218,6 +199,7 @@ class Viewer:
         self.widget = MoleculeWidget(self.structures, 320, 240, style=self.style,
                                      supersample=1, picking=picking, backend=backend,
                                      editable=editable)
+        self.widget.theme = self.theme.name
         # Editing keys ('a' append, 's' save, 'u' undo, 'o' autospin) are only
         # bound when editing is enabled; otherwise 'a' keeps its classic meaning
         # (autospin) and 's' falls through to the widget (cycle representation).
@@ -693,16 +675,15 @@ class Viewer:
         parts.append("\x1b[0m")
         return "".join(parts)
 
-    @classmethod
-    def _list_cap(cls, key: str):
+    def _list_cap(self, key: str):
         """A legend "key cap": the key text padded one space either side on a
         lighter background."""
-        return (f" {key} ", cls._sgr_bg(_LIST_CAP_BG) + cls._sgr_fg(_LIST_LABEL_FG))
+        return (f" {key} ", self._sgr_bg(self.theme.list_cap_bg) + self._sgr_fg(self.theme.list_label_fg))
 
     def _list_legend(self):
         """The legend's rows, as segment lists (design §4.1). Sized to fit the
         narrowest strip (_LIST_W_MIN); wider strips just leave more air."""
-        muted = self._sgr_fg(_LIST_MUTED_FG)
+        muted = self._sgr_fg(self.theme.list_muted_fg)
         cap = self._list_cap
         return [
             [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
@@ -750,14 +731,14 @@ class Viewer:
         first = self._list_scroll
         visible = rows[first:first + cap]
 
-        muted = self._sgr_fg(_LIST_MUTED_FG)
-        head_fg = self._sgr_fg(_LIST_HEADER_FG)
+        muted = self._sgr_fg(self.theme.list_muted_fg)
+        head_fg = self._sgr_fg(self.theme.list_header_fg)
         marker = ("\u2191" if first > 0 else "") + ("\u2193" if first + cap < len(rows) else "")
         title = f" STRUCTURES {len(sset)}"
         gap = max(0, list_w - len(title) - len(marker))
         put(0, self._list_line([(title, head_fg), (" " * gap, ""),
-                                (marker, "\x1b[2m" + head_fg)], list_w))
-        put(1, self._list_line([], list_w))          # air under the header
+                                (marker, "\x1b[2m" + head_fg)], list_w, bg=self.theme.list_panel_bg))
+        put(1, self._list_line([], list_w, bg=self.theme.list_panel_bg))   # air under the header
 
         idx_w = max(2, len(str(len(sset))))
         label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
@@ -766,7 +747,8 @@ class Viewer:
             row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
                 name = self._truncate_middle(text, max(1, list_w - 1))
-                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], list_w)):
+                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], list_w,
+                                                 bg=self.theme.list_panel_bg)):
                     break
                 drawn_rows += 1
                 continue
@@ -775,18 +757,23 @@ class Viewer:
             active = i == sset.active_index
             # The active row IS its background (no leader glyph); the cursor
             # row gets a subtler one, so the two stay tellable apart when
-            # they differ (design §4.3). A row that is IN THE OVERLAY wears
+            # they differ (design §4.3). Every OTHER row now gets the
+            # theme's own panel background too (design bug fix, docs/design/
+            # theme-and-aesthetics.md §3): leaving it unset meant those rows
+            # sat on the terminal's own background with foreground colors
+            # tuned only for a dark one. A row that is IN THE OVERLAY wears
             # its own tint on the label -- with no leader glyph and no key
             # binding for it, that tint is the only way to read the overlay
             # set off the screen at all (membership is opt+click only).
-            bg = (_LIST_ACTIVE_BG if active
-                  else _LIST_CURSOR_BG if i == self._list_cursor else None)
+            bg = (self.theme.list_active_bg if active
+                  else self.theme.list_cursor_bg if i == self._list_cursor
+                  else self.theme.list_panel_bg)
             dim = "\x1b[2m" if not entry.visible else ""
             # The tint outranks the active row's near-white label:
             # opt+clicking the active row has to change something on screen,
             # and the background is already saying which row is active.
             label_fg = (self._sgr_fg(tint) if entry.marked
-                        else self._sgr_fg(_LIST_LABEL_FG if active else _LIST_DIM_FG))
+                        else self._sgr_fg(self.theme.list_label_fg if active else self.theme.list_dim_fg))
             segs = [
                 (" ", ""),
                 ("\u2588" if entry.visible else "\u2591", dim + self._sgr_fg(tint)),
@@ -803,9 +790,10 @@ class Viewer:
 
         row0 = _LIST_ROWS_ABOVE + drawn_rows
         rule = "\u2500" * max(0, list_w - 2)
-        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(_LIST_RULE_FG))], list_w))
+        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], list_w,
+                                  bg=self.theme.list_panel_bg))
         for k, segs in enumerate(self._list_legend(), start=1):
-            put(row0 + k, self._list_line(segs, list_w))
+            put(row0 + k, self._list_line(segs, list_w, bg=self.theme.list_panel_bg))
         # Status lines last: on a short panel they are the first thing to
         # fall off the bottom (put() simply refuses), the legend the last.
         row0 += 1 + len(self._list_legend())
@@ -814,9 +802,9 @@ class Viewer:
             membership = "+".join(str(i + 1) for i in drawn)
             aligned = any(not sset[i].transform.is_identity for i in drawn)
             status = f" overlay {membership}" + (" \u00b7 aligned" if aligned else "")
-            put(row0, self._list_line([(status, muted)], list_w))
+            put(row0, self._list_line([(status, muted)], list_w, bg=self.theme.list_panel_bg))
             row0 += 1
-        put(row0, self._list_line([(" camera shared", muted)], list_w))
+        put(row0, self._list_line([(" camera shared", muted)], list_w, bg=self.theme.list_panel_bg))
         return bytes(out)
 
     def _update_geometry(self) -> bool:
@@ -1087,9 +1075,12 @@ class Viewer:
 
     def _draw_help(self):
         out = bytearray()
+        bg_r, bg_g, bg_b = self.theme.help_bg
+        fg_r, fg_g, fg_b = self.theme.help_fg
+        sgr = b"\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm" % (bg_r, bg_g, bg_b, fg_r, fg_g, fg_b)
         for k, line in enumerate(_help_lines(self.editable)):
             out += b"\x1b[%d;3H" % (2 + k)
-            out += b"\x1b[48;2;20;22;30m\x1b[38;2;220;220;230m"
+            out += sgr
             out += (" " + line.ljust(58)).encode()
             out += b"\x1b[0m"
         kitty.write_bytes(bytes(out), self.fd_out)
@@ -1131,13 +1122,12 @@ class Viewer:
             return None
         return periodic_table.GRID[r][c]
 
-    @staticmethod
-    def _pt_cell_text(cell, cursor: bool) -> str:
+    def _pt_cell_text(self, cell, cursor: bool) -> str:
         """The 4-char escaped label for one periodic-table cell."""
         if cell is None:
             return "    "
         if cell.symbol is None:
-            bg, fg = _PT_GAP_BG, _PT_DIM_FG
+            bg, fg = self.theme.pt_gap_bg, self.theme.pt_dim_fg
             label = f"{cell.text:^4}"
         else:
             rgb = elements.element_color(cell.symbol)
@@ -1153,10 +1143,10 @@ class Viewer:
     def _draw_periodic_table(self):
         top, left, width, height = self._pt_geometry()
         inner_w = width - 2
-        border = (f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-                  f"\x1b[38;2;{_PT_BORDER_FG[0]};{_PT_BORDER_FG[1]};{_PT_BORDER_FG[2]}m")
-        bg_only = f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-        text_fg = f"\x1b[38;2;{_PT_TEXT_FG[0]};{_PT_TEXT_FG[1]};{_PT_TEXT_FG[2]}m"
+        border = (f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+                  f"\x1b[38;2;{self.theme.pt_border_fg[0]};{self.theme.pt_border_fg[1]};{self.theme.pt_border_fg[2]}m")
+        bg_only = f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+        text_fg = f"\x1b[38;2;{self.theme.pt_text_fg[0]};{self.theme.pt_text_fg[1]};{self.theme.pt_text_fg[2]}m"
         out = bytearray()
 
         def put(row0: int, col0: int, s: str) -> None:
@@ -1254,10 +1244,10 @@ class Viewer:
     def _draw_geometry_picker(self):
         top, left, width, height = self._geom_geometry()
         inner_w = width - 2
-        border = (f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-                  f"\x1b[38;2;{_PT_BORDER_FG[0]};{_PT_BORDER_FG[1]};{_PT_BORDER_FG[2]}m")
-        bg_only = f"\x1b[48;2;{_PT_BG[0]};{_PT_BG[1]};{_PT_BG[2]}m"
-        text_fg = f"\x1b[38;2;{_PT_TEXT_FG[0]};{_PT_TEXT_FG[1]};{_PT_TEXT_FG[2]}m"
+        border = (f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+                  f"\x1b[38;2;{self.theme.pt_border_fg[0]};{self.theme.pt_border_fg[1]};{self.theme.pt_border_fg[2]}m")
+        bg_only = f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+        text_fg = f"\x1b[38;2;{self.theme.pt_text_fg[0]};{self.theme.pt_text_fg[1]};{self.theme.pt_text_fg[2]}m"
         out = bytearray()
 
         def put(row0: int, col0: int, s: str) -> None:
@@ -1492,7 +1482,8 @@ class Viewer:
         geom_visible = f" {geom} "
         elem_btn = self._pill(elem, elements.element_color(elem))
         geom_btn = self._pill(geom, (0.17, 0.71, 0.63))       # teal accent
-        text = f"\x1b[38;2;150;155;170m{prefix}\x1b[0m{elem_btn} {geom_btn}"
+        r, g, b = self.theme.edit_prefix_fg
+        text = f"\x1b[38;2;{r};{g};{b}m{prefix}\x1b[0m{elem_btn} {geom_btn}"
         elem_start = len(prefix)
         elem_end = elem_start + len(elem_visible)
         geom_start = elem_end + 1                # +1 for the space between the pills
@@ -1522,14 +1513,20 @@ class Viewer:
         self._geom_button_span = None
         if self._mode == "save_input":
             body = f" Save to: {self._input_buf}█   Enter save · Esc cancel "
-            return f"\x1b[48;2;44;40;30m\x1b[38;2;240;236;220m{body}\x1b[0m"
+            bg_r, bg_g, bg_b = self.theme.input_bg
+            fg_r, fg_g, fg_b = self.theme.input_fg
+            return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         if self._mode == "save_confirm":
             name = os.path.basename(self._input_buf.strip())
             body = f" {name} exists — replace? (y/n) "
-            return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
+            bg_r, bg_g, bg_b = self.theme.warn_bg
+            fg_r, fg_g, fg_b = self.theme.warn_fg
+            return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         if self._mode == "quit_confirm":
             body = " unsaved changes — save before quitting? (y/n/Esc) "
-            return f"\x1b[48;2;60;30;30m\x1b[38;2;250;230;230m{body}\x1b[0m"
+            bg_r, bg_g, bg_b = self.theme.warn_bg
+            fg_r, fg_g, fg_b = self.theme.warn_fg
+            return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         mol = self.widget.molecule
         hov = self.widget.atom_info(self.widget.hovered)
         # a live measurement readout (2+ picks in measure mode) outranks the
@@ -1548,7 +1545,9 @@ class Viewer:
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
         backend = "gpu" if self.widget.scene.backend == "gl" else "cpu"
-        base = "\x1b[48;2;30;33;44m\x1b[38;2;230;232;240m"
+        pr, pg, pb = self.theme.panel_bg
+        pfr, pfg, pfb = self.theme.panel_fg
+        base = f"\x1b[48;2;{pr};{pg};{pb}m\x1b[38;2;{pfr};{pfg};{pfb}m"
         mod = " [MODIFIED]" if (self.editable and self.widget.dirty) else ""
         hint = "  s save  q quit" if self.editable else "  q quit"
         show_buttons = self.editable and self.widget.append_mode
@@ -1577,7 +1576,7 @@ class Viewer:
         if self.editable:
             clash, stretched = editor.cleanup_targets(mol)
             if clash or stretched:
-                r, g, b = _CLEANUP_HINT_FG
+                r, g, b = self.theme.cleanup_hint_fg
                 cleanup_hint = f"  \x1b[38;2;{r};{g};{b}m\x1b[1m⚠ c cleanup\x1b[22m{base}"
         cleanup_hint_len = len("  ⚠ c cleanup") if cleanup_hint else 0
         pieces.append((cleanup_hint, cleanup_hint_len))
