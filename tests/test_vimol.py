@@ -630,6 +630,40 @@ def test_widget_hover_highlight_changes_render():
     assert not np.array_equal(plain, w.render())
 
 
+def test_widget_defaults_to_dark_theme_and_is_passthrough():
+    from vimol.widget import MoleculeWidget
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    w = MoleculeWidget(mol)
+    assert w.theme == "dark"
+    w.render()
+    assert w.style.color_override is None   # no hover/theme override active
+
+
+def test_widget_light_theme_sets_color_override_with_no_hover():
+    from vimol.widget import MoleculeWidget
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))   # C + 4 H
+    w = MoleculeWidget(mol)
+    w.theme = "light"
+    w.render()
+    assert w.style.color_override is not None
+    h_idx = mol.symbols.index("H")
+    assert not np.allclose(w.style.color_override[h_idx], [1.0, 1.0, 1.0])
+
+
+def test_widget_light_theme_hover_tint_applies_on_top_of_override():
+    from vimol.widget import MoleculeWidget
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    w = MoleculeWidget(mol)
+    w.theme = "light"
+    h_idx = mol.symbols.index("H")
+    w.hovered = h_idx
+    w.render()
+    cols = w.style.color_override
+    assert cols is not None
+    # hovered atom gets the yellow hover tint, not the plain light override
+    assert cols[h_idx][0] > 0.5 and cols[h_idx][1] > 0.5   # warm/bright, not the muted grey override
+
+
 def test_handle_event_reports_change():
     """handle_event must return whether the view changed -- the interactive
     loop gates redraws on this, so a wrong return means either no redraw on
