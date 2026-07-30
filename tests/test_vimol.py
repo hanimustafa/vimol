@@ -191,6 +191,58 @@ def test_kitty_shm_transmission_sends_a_name_not_the_pixels():
         shm.unlink()
 
 
+def test_probe_query_bytes_includes_osc11():
+    data = kitty.probe_query_bytes()
+    assert b"\x1b]11;?\x1b\\" in data
+
+
+def test_parse_probe_reply_extracts_osc11_background_st_terminated():
+    buf = (b"\x1b_Gi=31;OK\x1b\\"
+           b"\x1b[?1016;2$y"
+           b"\x1b]11;rgb:1e1e/2020/2828\x1b\\"
+           b"\x1b[6;18;9t"
+           b"\x1b[?62c")
+    probe = kitty.parse_probe_reply(buf)
+    assert probe is not None
+    assert probe.bg_rgb == (0x1e, 0x20, 0x28)
+
+
+def test_parse_probe_reply_extracts_osc11_background_bel_terminated_two_digit():
+    buf = (b"\x1b_Gi=31;OK\x1b\\"
+           b"\x1b]11;rgb:f0/f2/f5\x07"
+           b"\x1b[?62c")
+    probe = kitty.parse_probe_reply(buf)
+    assert probe is not None
+    assert probe.bg_rgb == (0xf0, 0xf2, 0xf5)
+
+
+def test_parse_probe_reply_bg_rgb_none_when_terminal_silent():
+    buf = b"\x1b[?62c"   # only the DA1 fence answered
+    probe = kitty.parse_probe_reply(buf)
+    assert probe is not None
+    assert probe.bg_rgb is None
+
+
+def test_parse_probe_reply_bg_rgb_none_before_da1_fence():
+    # no DA1 yet -> whole probe is None, not a premature verdict
+    buf = b"\x1b]11;rgb:1e1e/2020/2828\x1b\\"
+    assert kitty.parse_probe_reply(buf) is None
+
+
+def test_osc52_copy_encodes_base64_clipboard_sequence():
+    seq = kitty.osc52_copy("hello")
+    assert seq == b"\x1b]52;c;" + base64.standard_b64encode(b"hello") + b"\x1b\\"
+
+
+def test_osc52_copy_handles_unicode_and_padding_edge_cases():
+    for text in ("d(#1-#2) = 1.523 Å", "a", "ab", "abc", ""):
+        seq = kitty.osc52_copy(text)
+        assert seq.startswith(b"\x1b]52;c;")
+        assert seq.endswith(b"\x1b\\")
+        payload = seq[len(b"\x1b]52;c;"):-len(b"\x1b\\")]
+        assert base64.standard_b64decode(payload) == text.encode("utf-8")
+
+
 def test_png_roundtrip_header():
     img = np.zeros((16, 16, 3), np.uint8)
     png = kitty.png_bytes(img)

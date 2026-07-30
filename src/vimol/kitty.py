@@ -266,6 +266,10 @@ class TerminalProbe:
     # runs on this machine and supports the protocol's local-client path;
     # False when it refused or ignored it; None when we never asked.
     shm: Optional[bool] = None
+    # The terminal's own background color from an OSC 11 query, downsampled
+    # to 8 bits/channel; None if it didn't answer (theme.resolve() then
+    # falls back to COLORFGBG/default -- see theme.py).
+    bg_rgb: Optional[Tuple[int, int, int]] = None
 
 
 # The probe's graphics query ids. With a=q the terminal only *answers* -- no
@@ -284,21 +288,34 @@ _RE_SHM_REPLY = re.compile(rb"\x1b_Gi=%d;([^\x1b]*)\x1b\\" % _PROBE_SHM_ID)
 _RE_DECRQM_1016 = re.compile(rb"\x1b\[\?1016;(\d+)\$y")
 _RE_CELL_SIZE = re.compile(rb"\x1b\[6;(\d+);(\d+)t")
 _RE_DA1 = re.compile(rb"\x1b\[\?[0-9;]*c")
+_OSC11_QUERY = b"\x1b]11;?\x1b\\"
+_RE_OSC11_REPLY = re.compile(
+    rb"\x1b\]11;rgb:([0-9a-fA-F]{2,4})/([0-9a-fA-F]{2,4})/([0-9a-fA-F]{2,4})(?:\x1b\\|\x07)")
+
+
+def _osc11_channel(hexstr: bytes) -> int:
+    """A 2- or 4-hex-digit OSC 11 channel, downsampled to 8 bits: terminals
+    disagree on whether they reply with 8 or 16 bits/channel, and for a
+    16-bit channel the high byte is what every other tool in the wild uses
+    as the 8-bit approximation."""
+    return int(hexstr[:2], 16)
 
 
 def probe_query_bytes(shm_name: Optional[str] = None) -> bytes:
     """The combined capability query, sent as ONE write (one SSH round trip).
 
-    Four questions back to back: (1) a Kitty graphics *query* (``a=q`` with a
+    Five questions back to back: (1) a Kitty graphics *query* (``a=q`` with a
     1x1 dummy pixel -- validated and answered, never displayed or stored);
     (2) DECRQM for SGR-Pixels mouse (1016); (3) ``CSI 16 t`` for the exact
-    cell size; (4) DA1 (``CSI c``) as a universally-answered fence. Terminals
-    ignore the queries they don't recognize (the graphics APC included), so
-    this is safe to fire at anything that calls itself a terminal. Requires
-    the tty to be in raw mode to read the replies.
+    cell size; (4) an OSC 11 query for the terminal's own background color
+    (theme auto-detection, see theme.py); (5) DA1 (``CSI c``) as a
+    universally-answered fence. Terminals ignore the queries they don't
+    recognize (the graphics APC included), so this is safe to fire at
+    anything that calls itself a terminal. Requires the tty to be in raw
+    mode to read the replies.
 
     Pass *shm_name* (a shared-memory object holding one 24-bit pixel, from
-    :func:`shm_write`) to add a fifth question: a ``t=s`` query. Answering it
+    :func:`shm_write`) to add a sixth question: a ``t=s`` query. Answering it
     OK requires the terminal to actually open that object, so the reply
     proves both "supports the local-client path" and "runs on this machine"
     -- no env-var guessing about SSH. The terminal unlinks the object when it
@@ -309,17 +326,19 @@ def probe_query_bytes(shm_name: Optional[str] = None) -> bytes:
     if shm_name is not None:
         gfx += (b"\x1b_Gi=%d,s=1,v=1,a=q,t=s,f=24;" % _PROBE_SHM_ID
                 + base64.standard_b64encode(shm_name.encode()) + b"\x1b\\")
-    return gfx + b"\x1b[?1016$p" + b"\x1b[16t" + b"\x1b[c"
+    return gfx + b"\x1b[?1016$p" + b"\x1b[16t" + _OSC11_QUERY + b"\x1b[c"
 
 
 def _parse_probe_pieces(buf: bytes):
-    """Extract (graphics, pixel_mouse, cell_px, shm, spans) from reply bytes.
+    """Extract (graphics, pixel_mouse, cell_px, shm, bg_rgb, spans) from
+    reply bytes.
 
     graphics is None when no graphics reply is present at all -- only the
     caller knows whether that silence is meaningful (it is once the DA1
     fence has arrived). shm, by contrast, is False on silence: an unanswered
     t=s query is a "no" the same way an error reply is, and callers that
-    never asked overwrite it with None.
+    never asked overwrite it with None. bg_rgb is simply None on silence --
+    there is no "asked and refused" state for OSC 11, only answered/silent.
     """
     spans = []
     graphics = None
@@ -346,7 +365,13 @@ def _parse_probe_pieces(buf: bytes):
         if cw > 0 and ch > 0:
             cell = (float(cw), float(ch))
         spans.append(m.span())
-    return graphics, pixel, cell, shm, spans
+    bg_rgb = None
+    m = _RE_OSC11_REPLY.search(buf)
+    if m:
+        bg_rgb = (_osc11_channel(m.group(1)), _osc11_channel(m.group(2)),
+                  _osc11_channel(m.group(3)))
+        spans.append(m.span())
+    return graphics, pixel, cell, shm, bg_rgb, spans
 
 
 def _probe_leftover(buf: bytes, spans) -> bytes:
@@ -367,15 +392,17 @@ def parse_probe_reply(buf: bytes) -> Optional[TerminalProbe]:
     graphics support" (the terminal processed our queries in order and
     answered the later one), so ``graphics`` is always True/False here. The
     same in-order reasoning makes a missing t=s reply a definitive "no
-    shared memory".
+    shared memory". A missing OSC 11 reply, by contrast, stays None --
+    plenty of terminals just don't implement it, and that's not a verdict
+    the way "no graphics" is.
     """
     m_da1 = _RE_DA1.search(buf)
     if m_da1 is None:
         return None
-    graphics, pixel, cell, shm, spans = _parse_probe_pieces(buf)
+    graphics, pixel, cell, shm, bg_rgb, spans = _parse_probe_pieces(buf)
     spans.append(m_da1.span())
     return TerminalProbe(graphics=bool(graphics), pixel_mouse=pixel, cell_px=cell,
-                         leftover=_probe_leftover(buf, spans), shm=shm)
+                         leftover=_probe_leftover(buf, spans), shm=shm, bg_rgb=bg_rgb)
 
 
 def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0,
@@ -434,9 +461,9 @@ def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0,
         if probe is not None:
             probe.rtt = _time.monotonic() - t0
             return _finish(probe)
-    graphics, pixel, cell, shm, spans = _parse_probe_pieces(buf)
+    graphics, pixel, cell, shm, bg_rgb, spans = _parse_probe_pieces(buf)
     return _finish(TerminalProbe(graphics=graphics, pixel_mouse=pixel, cell_px=cell,
-                                 leftover=_probe_leftover(buf, spans), shm=shm))
+                                 leftover=_probe_leftover(buf, spans), shm=shm, bg_rgb=bg_rgb))
 
 
 # --------------------------------------------------------------------------
