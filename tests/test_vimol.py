@@ -35,6 +35,32 @@ def test_element_data():
     assert len(elements.element_color("O")) == 3
 
 
+def test_themed_base_colors_dark_is_passthrough():
+    from vimol import elements as els
+    base = np.array([[1.0, 1.0, 1.0], [0.35, 0.35, 0.38]])
+    out = els.themed_base_colors(["H", "C"], base, "dark")
+    assert out is base   # no copy -- byte-identical to today
+
+
+def test_themed_base_colors_light_overrides_unreadable_entries():
+    from vimol import elements as els
+    base = np.array([[1.0, 1.0, 1.0], [0.35, 0.35, 0.38]])   # H, C
+    out = els.themed_base_colors(["H", "C"], base, "light")
+    assert not np.allclose(out[0], [1.0, 1.0, 1.0])   # H moved off pure white
+    assert np.allclose(out[1], [0.35, 0.35, 0.38])    # C untouched
+    assert base[0].tolist() == [1.0, 1.0, 1.0]         # original array untouched
+
+
+def test_themed_base_colors_light_covers_all_override_entries():
+    from vimol import elements as els
+    syms = ["H", "He", "Ag", "Pt", "Hg", "C"]
+    base = np.array([els.element_color(s) for s in syms])
+    out = els.themed_base_colors(syms, base, "light")
+    for i, sym in enumerate(syms[:-1]):   # every override entry changed
+        assert not np.allclose(out[i], base[i]), sym
+    assert np.allclose(out[-1], base[-1])  # carbon, not in the override table
+
+
 def test_theme_dark_matches_original_constants():
     from vimol import theme
     assert theme.DARK.panel_bg == (30, 33, 44)
