@@ -12,3 +12,4 @@ moderngl>=5.6
 
 # Optional extras (not installed by this file):
 #   test suite          pip install "vimol[test]"  ->  pytest>=7
+#   fast CPU raycaster  pip install "vimol[fast]"  ->  numba>=0.59
