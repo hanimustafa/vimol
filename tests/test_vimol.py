@@ -146,6 +146,70 @@ def test_viewer_status_bar_uses_theme_panel_colors():
     assert f"\x1b[48;2;{r};{g};{b}m" in bar
 
 
+def test_viewer_ctrl_t_toggles_theme(monkeypatch):
+    from vimol import theme as vimol_theme
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    v._update_geometry()
+    assert v.theme is vimol_theme.DARK
+    assert v.widget.theme == "dark"
+    assert v._dispatch([KeyEvent("\x14")]) is True
+    assert v.theme is vimol_theme.LIGHT
+    assert v.widget.theme == "light"
+    assert v._dispatch([KeyEvent("\x14")]) is True
+    assert v.theme is vimol_theme.DARK
+    assert v.widget.theme == "dark"
+
+
+def test_viewer_ctrl_t_available_read_only(monkeypatch):
+    """Like d/g/t/n/p/m, ctrl-t is a base driver key -- available whether
+    or not editing is enabled."""
+    from vimol import theme as vimol_theme
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY), editable=False)
+    assert v.theme is vimol_theme.DARK
+    assert v._dispatch([KeyEvent("\x14")]) is True
+    assert v.theme is vimol_theme.LIGHT
+
+
+def test_viewer_frame0_theme_guess_uses_colorfgbg_before_probe(monkeypatch):
+    from vimol import theme as vimol_theme
+    from vimol.viewer import Viewer
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)   # explicit would outrank COLORFGBG
+    monkeypatch.setenv("COLORFGBG", "0;15")
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    assert v.theme is vimol_theme.LIGHT   # guessed synchronously, no probe run yet
+
+
+def test_viewer_finish_startup_upgrades_theme_from_osc11(monkeypatch):
+    from vimol import theme as vimol_theme, kitty as vimol_kitty
+    from vimol.viewer import Viewer
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    probe = vimol_kitty.TerminalProbe(graphics=True, pixel_mouse=False, cell_px=(9.0, 18.0),
+                                      rtt=0.001, bg_rgb=(245, 245, 245))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY), probe=probe)
+    assert v.theme is vimol_theme.DARK   # frame-0 guess: no COLORFGBG, default dark
+    v._old_termios = object()            # _finish_startup's "probe already available" path
+    v._finish_startup()
+    assert v.theme is vimol_theme.LIGHT  # OSC 11 corrected it
+    assert v.widget.theme == "light"
+
+
 def test_xyz_roundtrip_and_bonds():
     mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     assert mol.n_atoms == 12

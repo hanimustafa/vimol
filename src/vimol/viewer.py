@@ -98,6 +98,7 @@ _HELP_EDIT = [
 _HELP_TAIL = [
     "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
+    "  ctrl-t ............. light/dark theme  y .................. yank status text",
     "  f / r / z .......... re-fit / reset    ? .................. toggle help",
     "  q / Esc ............ quit",
 ]
@@ -108,7 +109,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03",
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "y", "\x03", "\x14",
                       "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
@@ -173,7 +174,12 @@ class Viewer:
                  structures: Optional[StructureSet] = None):
         self.source_path = source_path
         self.editable = editable
-        self.theme = theme.DARK   # live detection lands in Task 8; ctrl-t overrides it
+        # Frame 0 draws before the startup probe's OSC 11 reply can possibly
+        # be in hand (the probe itself runs after the first paint -- see
+        # _finish_startup), so this is a synchronous best guess: COLORFGBG or
+        # DARK. _finish_startup upgrades it once the probe replies.
+        self.theme = theme.resolve(os.environ.get("VIMOL_THEME"), None,
+                                   os.environ.get("COLORFGBG"))
         if structures is not None:
             self.structures = structures
         else:
@@ -397,6 +403,11 @@ class Viewer:
         if probe is not None:
             if probe.cell_px is not None:
                 self._cell_px = probe.cell_px
+            resolved = theme.resolve(os.environ.get("VIMOL_THEME"), probe.bg_rgb,
+                                     os.environ.get("COLORFGBG"))
+            if resolved is not self.theme:
+                self.theme = resolved
+                self.widget.theme = resolved.name
             self._enable_mouse(probe.pixel_mouse)
             # Seed the settle resolution from the measured link latency: a
             # clearly-local terminal starts crisp at full resolution; a
@@ -1849,6 +1860,11 @@ class Viewer:
             self._last_interact = time.time()
         elif key == "t":
             self.style.transparent = not self.style.transparent
+            kitty.write_bytes(_CLEAR, self.fd_out)
+            self._last_interact = time.time()
+        elif key == "\x14":
+            self.theme = theme.LIGHT if self.theme is theme.DARK else theme.DARK
+            self.widget.theme = self.theme.name
             kitty.write_bytes(_CLEAR, self.fd_out)
             self._last_interact = time.time()
         elif key in ("n", "p", "alt+down", "alt+up") and len(self.frames) > 1:
