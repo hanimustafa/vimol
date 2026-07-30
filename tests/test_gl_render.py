@@ -387,5 +387,72 @@ def test_scene_render_overlay_first_entry_cpk_rest_flat_tinted_gl(gl_available):
     assert not (active_pixels == active_pixels[0]).all()
 
 
+# -- persistent instance VBOs (streamed per frame, never recreated) ----------
+
+def test_gl_persistent_vbos_stream_across_batch_sizes(gl_available):
+    """One renderer, batches that grow then shrink (1 -> 5 -> 25 -> 3): each
+    frame must show exactly its own batch. A shrinking batch is the sharp
+    case -- stale instances from the previous, larger stream would show up
+    as extra spheres, which a shape-only check would never notice. Radii
+    shrink with n so adjacent spheres stay several pixels apart (blob
+    counting needs clean gaps, not antialiased merges)."""
+    r = GLRenderer(400, 80)
+    bg = np.array(ShadingParams().background) * 255
+    for n in (1, 5, 25, 3):
+        # spheres spread along x so each is individually resolvable
+        xs = (np.arange(n, dtype=np.float32) - (n - 1) / 2.0) * (18.0 / max(n, 1))
+        centers = np.zeros((n, 3), np.float32)
+        centers[:, 0] = xs
+        img = r.render(SphereBatch(centers=centers,
+                                   radii=np.full(n, min(1.2, 5.0 / max(n, 1)), np.float32),
+                                   colors=np.full((n, 3), 0.8, np.float32)),
+                       CylinderBatch.empty(), _proj(w=400, h=80, extent=12.0),
+                       ShadingParams())
+        assert img.shape == (80, 400, 3)
+        drawn = np.abs(img.astype(float) - bg).sum(axis=-1) > 30
+        # count distinct blobs along x: runs of drawn columns
+        cols = drawn.any(axis=0)
+        blobs = int(np.count_nonzero(np.diff(cols.astype(int)) == 1) + (1 if cols[0] else 0))
+        assert blobs == n, f"streamed batch of {n} drew {blobs} blobs"
+
+
+def test_gl_re_render_same_batch_is_deterministic(gl_available):
+    """Streaming the same batch twice into the persistent VBOs must produce
+    byte-identical frames -- catches orphan/write mistakes (partial writes,
+    stale tails) that a single-frame check can't."""
+    r = GLRenderer(200, 200)
+    def frame():
+        return r.render(SphereBatch(centers=np.array([[0.0, 0.0, 0.0]], np.float32),
+                                    radii=np.array([2.0], np.float32),
+                                    colors=np.array([[0.4, 0.4, 0.4]], np.float32)),
+                        CylinderBatch.empty(), _proj(), ShadingParams(depth_cue=0.0))
+    a = np.array(frame())   # copy: render() returns a view of its readback
+    b = np.array(frame())
+    assert np.array_equal(a, b)
+
+
+@pytest.mark.xfail(reason="VIM-21: standalone GL contexts are never re-made "
+                          "current, so rendering on any renderer that is not "
+                          "the most-recently-created one yields garbage. "
+                          "Pre-existing bug, documented here; strict=False "
+                          "because the corruption is nondeterministic.",
+                   strict=False)
+def test_gl_render_on_older_context_after_newer_created(gl_available):
+    """Render on A, create B (its context becomes current), render B, then
+    render A again: A's second frame should equal its first."""
+    def batch():
+        return SphereBatch(centers=np.array([[0.0, 0.0, 0.0]], np.float32),
+                           radii=np.array([2.0], np.float32),
+                           colors=np.array([[0.4, 0.4, 0.4]], np.float32))
+    a = GLRenderer(200, 200)
+    first = np.array(a.render(batch(), CylinderBatch.empty(), _proj(),
+                              ShadingParams(depth_cue=0.0)))
+    b = GLRenderer(120, 120)
+    b.render(batch(), CylinderBatch.empty(), _proj(w=120, h=120), ShadingParams())
+    second = np.array(a.render(batch(), CylinderBatch.empty(), _proj(),
+                               ShadingParams(depth_cue=0.0)))
+    assert np.array_equal(first, second)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

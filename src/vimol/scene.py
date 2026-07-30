@@ -256,6 +256,14 @@ class Scene:
         return replace(self.style, color_override=color_override, flat_mask=flat_mask)
 
     def render(self) -> np.ndarray:
+        """Render the composite to a display-size uint8 array: (H, W, 3),
+        or (H, W, 4) straight-alpha when ``style.transparent``.
+
+        Backend caveat: the GL backend returns a READ-ONLY zero-copy view
+        of its readback (see ``gl_render.GLRenderer.render``); the CPU
+        backend returns a fresh writable array. Callers that mutate frames
+        in place must copy first to stay backend-agnostic.
+        """
         composite = self.structures.composite()
         mol = composite.molecule
         style = self._effective_style(composite)

@@ -20,12 +20,22 @@ from .gl_render import SphereBatch, CylinderBatch, ConeBatch, ShadingParams
 def _build_projection(zoom: float, pan: np.ndarray, width: int, height: int, extent: float) -> np.ndarray:
     """Orthographic projection matching ``Camera``'s pixel-space screen
     mapping (``sx = W/2 + pan.x + vx*zoom``, ``sy = H/2 - pan.y - vy*zoom``,
-    Y-down pixel space), reworked into a clip-space (Y-up) 4x4 matrix.
+    Y-down pixel space), reworked into a clip-space 4x4 matrix.
 
     Returned in the usual mathematical convention (row-major indexing,
     ``[nx,ny,nz,1] = M @ [vx,vy,vz,1]``) — ``GLRenderer.render`` transposes
     internally for GLSL's column-major upload, and also reads ``M[2,2]``/
     ``M[2,3]`` directly to reproject each fragment's own analytic depth.
+
+    The Y row is NEGATED versus a textbook Y-up clip transform, on purpose:
+    ``glReadPixels`` returns rows starting at the NDC -y side of the
+    framebuffer, so with the flip the readback's row 0 IS the scene's +y
+    (up) side — already top-down in vimol's screen convention. That lets
+    ``GLRenderer.render`` return the raw readback with no flip and no copy:
+    the old tail (``np.flipud`` + the RGBA->RGB slicing copy through
+    ``np.ascontiguousarray``, the slice being the dominant cost) measured
+    ~23 ms per frame at 2560x1440 — more than the draw and the readback
+    combined.
 
     The Z mapping ``nz = -vz / (4*extent)`` needs no separate near/far
     values: view-space ``+z`` is toward the viewer (``Camera``'s
@@ -38,8 +48,8 @@ def _build_projection(zoom: float, pan: np.ndarray, width: int, height: int, ext
     m = np.zeros((4, 4), dtype=np.float64)
     m[0, 0] = 2.0 * zoom / width
     m[0, 3] = 2.0 * pan[0] / width
-    m[1, 1] = 2.0 * zoom / height
-    m[1, 3] = 2.0 * pan[1] / height
+    m[1, 1] = -2.0 * zoom / height
+    m[1, 3] = -2.0 * pan[1] / height
     m[2, 2] = -1.0 / (4.0 * ext)
     m[3, 3] = 1.0
     return m
