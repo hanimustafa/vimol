@@ -37,14 +37,14 @@ classifiers = [
 # moderngl is a hard dependency (~120 KB of wheels): the GL backend is always
 # available, and `backend="auto"` still falls back to the CPU raycaster at
 # runtime wherever no OpenGL context can be created (headless boxes, clusters).
-dependencies = ["numpy>=1.20", "moderngl>=5.6"]
+# numba compiles that CPU raycaster's inner loop (_render_fast) to machine
+# code: ~10-25x faster CPU rendering, bit-identical output. render.py still
+# tolerates numba being uninstalled/uncompilable (falls back to the pure-numpy
+# path) since it's a best-effort JIT, not because it's meant to be omitted.
+dependencies = ["numpy>=1.20", "moderngl>=5.6", "numba>=0.59"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
-# numba compiles the CPU raycaster's inner loop (_render_fast) to machine
-# code: ~10-25x faster CPU rendering, bit-identical output. Entirely
-# optional -- without it the pure-numpy path runs unchanged.
-fast = ["numba>=0.59"]
 
 [project.scripts]
 vimol = "vimol.app:main"

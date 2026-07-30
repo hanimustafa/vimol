@@ -105,8 +105,9 @@ class Renderer:
         self._ys = None                # (H,) float32
         self._xi = None                # (W,) int64 (the cone path computes in float64)
         self._yi = None                # (H,) int64
-        # Kick the optional numba kernel's JIT compile (no-op when numba is
-        # missing): frames render via numpy until _fast.ready() flips.
+        # Kick off the numba kernel's JIT compile in the background (no-op
+        # on the rare platform where numba is missing/uncompilable): frames
+        # render via numpy until _fast.ready() flips.
         _fast.warm_async()
 
     def resize(self, width: int, height: int) -> None:

@@ -30,7 +30,7 @@ if _fast.available():
     _fast._warm()                      # synchronous JIT compile
     print(f"numba compile: {time.perf_counter() - t0:.1f} s, ready={_fast.ready()}")
 else:
-    print("numba not installed -- numpy column only (pip install vimol[fast])")
+    print("numba not installed -- numpy column only (pip install -e . should pull it in)")
 HAVE_FAST = _fast.ready()
 _real_ready = _fast.ready
 

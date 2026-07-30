@@ -1,4 +1,4 @@
-"""Optional numba-compiled inner loop for the CPU raycaster.
+"""Numba-compiled inner loop for the CPU raycaster.
 
 The numpy renderer (``render.py``) vectorizes per primitive over its
 screen-space bounding box: every sphere/cylinder costs ~40 full-box array
@@ -8,9 +8,10 @@ per-call overheads per frame. That is a structural ceiling -- measured
 
 This module compiles the same impostor math to machine code (per-pixel loops
 with early z-rejection *before* shading, the way PyMOL's C++ ray tracer and
-every other compiled rasterizer do it), which measures 10-25x faster. It is
-strictly optional: numba missing/uncompilable -> ``ready()`` stays False and
-``render.py``'s numpy path runs unchanged.
+every other compiled rasterizer do it), which measures 10-25x faster. numba
+is a hard dependency (see pyproject.toml), but this module still degrades
+gracefully if it's ever missing or fails to compile on some platform:
+``ready()`` stays False and ``render.py``'s numpy path runs unchanged.
 
 BIT-PARITY CONTRACT: the kernels below mirror render.py's numpy operations
 one-for-one -- same dtypes (float32 per-pixel math, float64 screen setup),
@@ -40,7 +41,7 @@ os.environ.setdefault(
 try:
     from numba import njit, prange
     _HAVE_NUMBA = True
-except Exception:                     # numba is an optional dependency
+except Exception:                     # hard dependency, but degrade gracefully
     _HAVE_NUMBA = False
 
     def njit(*args, **kwargs):        # stub so module import never fails
