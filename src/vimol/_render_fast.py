@@ -53,9 +53,17 @@ except Exception:                     # hard dependency, but degrade gracefully
         return range(*args)
 
 
-# 0 = cold, 1 = compiling in background, 2 = ready, 3 = unavailable/failed
+# 0 = cold, 1 = compiling, 2 = ready, 3 = unavailable/failed
 _state = 0
 _lock = threading.Lock()
+# Set once the one compile attempt (by whichever caller -- warm_async's
+# thread or a direct warm_sync() caller -- got there first) finishes, success
+# or failure. Callers that lost the race to start it wait on this instead of
+# calling the compile routine themselves: numba's dispatcher is not safe to
+# enter from two threads at once for the same not-yet-compiled function --
+# observed reliably (SIGABRT/SIGSEGV) when a second, unsynchronized caller
+# invoked the compile while warm_async's background thread was mid-compile.
+_done = threading.Event()
 
 
 def available() -> bool:
@@ -75,17 +83,45 @@ def warm_async() -> None:
     where the package dir is writable). Frames rendered while this runs use
     the numpy path; the renderer switches over the moment ready() flips.
     """
-    global _state
     if not _HAVE_NUMBA:
         return
+    if not _claim():
+        return
+    threading.Thread(target=_run_once, daemon=True).start()
+
+
+def warm_sync(timeout: float | None = None) -> bool:
+    """Force the kernel to be ready (or known unavailable) before returning.
+
+    If nobody has started the compile yet, this thread does it (blocking).
+    If warm_async's background thread already claimed it, this waits for
+    that thread to finish instead of compiling again -- see the note on
+    ``_done`` above for why a second concurrent attempt is unsafe. Returns
+    ``ready()``. Used by callers (tests, the benchmark scripts) that need a
+    definite answer and can't rely on warm_async's fire-and-forget timing.
+    """
+    if not _HAVE_NUMBA:
+        return False
+    if _claim():
+        _run_once()
+    else:
+        _done.wait(timeout)
+    return ready()
+
+
+def _claim() -> bool:
+    """Atomically move state 0 -> 1. True for the one caller that must
+    actually run the compile; False for everyone else (already compiling,
+    ready, or failed)."""
+    global _state
     with _lock:
         if _state != 0:
-            return
+            return False
         _state = 1
-    threading.Thread(target=_warm, daemon=True).start()
+        return True
 
 
-def _warm() -> None:
+def _run_once() -> None:
     global _state
     try:
         # (8, 8, 4) rgba: (H, W, 3) and (H, W, 4) C-contiguous buffers share
@@ -113,6 +149,8 @@ def _warm() -> None:
         _state = 2
     except Exception:
         _state = 3
+    finally:
+        _done.set()
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +409,7 @@ def render_frame(color, zbuf, alpha_on, bands,
                  zoom, ox_s, oy_s,
                  l0, l1, l2, f0, f1, f2, hv0, hv1, hv2,
                  ambient, fill_w, spec_w, depth_cue, zmin, zspan, n_squares):
-    """Thin wrapper so _warm and render.py share one call signature."""
+    """Thin wrapper so _run_once and render.py share one call signature."""
     _render_kernel(color, zbuf, alpha_on, bands,
                    sx, sy, sz, radii, acol, aflat, order,
                    barr, bcol, bflat,

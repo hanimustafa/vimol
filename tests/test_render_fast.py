@@ -31,11 +31,15 @@ needs_numba = pytest.mark.skipif(not _fast.available(),
 
 @pytest.fixture(scope="module")
 def kernel_ready():
-    """Compile the kernel synchronously once for the whole module."""
+    """Force the kernel to be compiled (or definitively failed) before the
+    module's tests run. Goes through warm_sync(), never a direct _run_once()
+    call -- an earlier test's Renderer() may already have kicked off
+    warm_async()'s background compile, and calling numba's compile machinery
+    a second time concurrently is what actually caused the crash this test
+    module exists to guard against (see test_kernel_ready_is_race_safe)."""
     if not _fast.available():
         pytest.skip("numba not installed")
-    _fast._warm()
-    assert _fast.ready(), "numba present but kernel failed to compile"
+    assert _fast.warm_sync(), "numba present but kernel failed to compile"
 
 
 def _c60():
@@ -147,6 +151,44 @@ def test_renderer_reuse_across_style_switches():
     want = [Renderer(320, 240).render(mol, cam, s) for s in (st_t, st_o, st_t)]
     for g, w in zip(got, want):
         assert np.array_equal(g, w)
+
+
+def test_kernel_ready_is_race_safe(tmp_path):
+    """A second, unsynchronized caller forcing readiness while warm_async's
+    background thread is already mid-compile must not crash the process.
+
+    This is a regression test for a real crash: numba's dispatcher compile
+    is not safe to enter from two threads at once for the same
+    not-yet-compiled function. It reproduced reliably (SIGABRT/SIGSEGV, ~75%
+    of runs) with a cold cache when something called the old private
+    ``_warm()`` directly (as this test module's own ``kernel_ready`` fixture
+    used to) while warm_async's thread -- started by an earlier test's
+    Renderer() -- was still compiling. warm_sync() fixes it by waiting for
+    whoever claimed the compile first instead of re-entering it.
+
+    Needs a fresh NUMBA_CACHE_DIR per attempt: a warm cache compiles too
+    fast to open the race window at all, which is why every fixture/bench
+    caller elsewhere in this repo deletes it before measuring compile time.
+    """
+    if not _fast.available():
+        pytest.skip("numba not installed")
+    src = os.path.join(os.path.dirname(__file__), "..", "src")
+    script = (
+        "import sys, time\n"
+        "from vimol import _render_fast as _fast\n"
+        "_fast.warm_async()\n"
+        "time.sleep(0.05)\n"           # give the background thread a head start
+        "ok = _fast.warm_sync(timeout=30)\n"
+        "assert ok, 'warm_sync reported the kernel not ready'\n"
+    )
+    for i in range(3):
+        env = dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path / f"cache{i}"))
+        out = subprocess.run([sys.executable, "-c", script],
+                             env=env, cwd=src, capture_output=True, text=True,
+                             timeout=60)
+        assert out.returncode == 0, (
+            f"attempt {i}: exit {out.returncode} (signal "
+            f"{-out.returncode if out.returncode < 0 else 'n/a'})\n{out.stderr}")
 
 
 def test_numba_cache_dir_kept_out_of_source_tree():

@@ -27,7 +27,7 @@ print(f"molecule: {mol.n_atoms} atoms, {len(mol.bonds)} bonds")
 
 if _fast.available():
     t0 = time.perf_counter()
-    _fast._warm()                      # synchronous JIT compile
+    _fast.warm_sync()                  # synchronous JIT compile
     print(f"numba compile: {time.perf_counter() - t0:.1f} s, ready={_fast.ready()}")
 else:
     print("numba not installed -- numpy column only (pip install -e . should pull it in)")
