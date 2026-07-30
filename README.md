@@ -33,7 +33,6 @@ every binding.
 
 ```bash
 vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling
-vimol protein.pdb --render out.png        # batch still to PNG (works headless)
 ```
 
 ## Library usage

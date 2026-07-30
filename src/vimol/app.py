@@ -3,9 +3,6 @@
     vimol                           # opens the bundled C60 demo (checkout only)
     vimol file.pdb                 # interactive viewer (opens editable: a=append)
     vimol file.xyz --spin          # autospinning
-    vimol file.mol --render out.png --size 800x800
-    vimol file.pdb --kitty         # emit one frame to stdout (for pipes/embeds)
-    vimol file.xyz --info          # print structure info and exit
 """
 from __future__ import annotations
 
@@ -17,17 +14,7 @@ from typing import List, Optional
 from .parsers import load_all, SUPPORTED_EXTENSIONS
 from .bonds import ensure_bonds
 from .render import Style
-from .scene import Scene
 from . import kitty
-from .molecule import Molecule
-
-
-def _parse_size(s: str):
-    if "x" in s.lower():
-        w, h = s.lower().split("x")
-        return int(w), int(h)
-    v = int(s)
-    return v, v
 
 
 def build_style(args) -> Style:
@@ -73,20 +60,15 @@ def make_parser() -> argparse.ArgumentParser:
                         "or auto (GPU if a context can be created, else CPU)")
     p.add_argument("--theme", default="auto", choices=["auto", "dark", "light"],
                    help="chrome color theme; auto detects the terminal's own background")
-    p.add_argument("--size", default="0x0", help="pixel size WxH for --render/--kitty (0=auto)")
-    p.add_argument("--supersample", type=int, default=2, help="anti-aliasing factor for stills")
     p.add_argument("--rotate", nargs=2, type=float, metavar=("YAW", "PITCH"),
                    default=(20.0, -15.0), help="initial rotation in degrees")
     p.add_argument("--spin", action="store_true", help="autospin in interactive mode")
-    p.add_argument("--render", metavar="PNG", help="render a still image to a PNG file and exit")
-    p.add_argument("--kitty", action="store_true", help="emit one frame to stdout as Kitty graphics and exit")
-    p.add_argument("--info", action="store_true", help="print structure info and exit")
     p.add_argument("--frame", type=int, default=0, help="frame/model index for multi-model files")
     p.add_argument("--atom-scale", type=float, default=None)
     p.add_argument("--bond-radius", type=float, default=None)
     p.add_argument("--background", type=str, default=None, help="hex or r,g,b background color (implies --opaque)")
     p.add_argument("--transparent", action="store_true", help="transparent background (RGBA cutout)")
-    p.add_argument("--opaque", action="store_true", help="solid background (default for --render)")
+    p.add_argument("--opaque", action="store_true", help="solid background")
     p.add_argument("--no-depth-cue", action="store_true")
     p.add_argument("--no-bonds", action="store_true", help="do not auto-perceive bonds")
     p.add_argument("--bond-tolerance", type=float, default=0.45)
@@ -110,18 +92,6 @@ def _apply_theme_arg(args) -> None:
     """
     if args.theme != "auto":
         os.environ["VIMOL_THEME"] = args.theme
-
-
-def _print_info(mol: Molecule):
-    print(f"name:    {mol.name}")
-    print(f"formula: {mol.formula()}")
-    print(f"atoms:   {mol.n_atoms}")
-    print(f"bonds:   {len(mol.bonds)}")
-    ext = mol.radius_of_gyration_extent()
-    print(f"extent:  {ext:.2f} A (max atom-centroid distance)")
-    from collections import Counter
-    comp = Counter(mol.symbols)
-    print("composition: " + ", ".join(f"{k}:{v}" for k, v in sorted(comp.items())))
 
 
 def _probe_terminal_raw() -> Optional["kitty.TerminalProbe"]:
@@ -195,46 +165,11 @@ def main(argv: List[str] | None = None) -> int:
     idx = max(0, min(args.frame, len(mols) - 1))
     mol = mols[idx]
 
-    if args.info:
-        _print_info(mol)
-        if len(mols) > 1:
-            print(f"models:  {len(mols)}")
-        return 0
-
     style = build_style(args)
-    w, h = _parse_size(args.size)
-
-    # -- still render to PNG ---------------------------------------------
-    if args.render:
-        if not w:
-            w, h = 900, 700
-        scene = Scene(mol, w, h, style=style, supersample=max(1, args.supersample),
-                     backend=args.backend)
-        scene.camera.orbit(args.rotate[0], args.rotate[1])
-        scene.to_png(args.render)
-        print(f"wrote {args.render} ({w}x{h})")
-        return 0
-
-    # -- single kitty frame to stdout ------------------------------------
-    if args.kitty:
-        if not w:
-            cols, rows, xpx, ypx = kitty.terminal_size_px(1)
-            cw, ch = kitty.cell_size_px(1)
-            w = int(min(cols, 60) * cw)
-            h = int(min(rows - 2, 30) * ch)
-            w, h = max(w, 200), max(h, 200)
-        scene = Scene(mol, w, h, style=style, supersample=max(1, args.supersample),
-                     backend=args.backend)
-        scene.camera.orbit(args.rotate[0], args.rotate[1])
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        os.write(1, scene.to_kitty(move_cursor=True))
-        sys.stdout.write("\n")
-        return 0
 
     # -- interactive viewer ----------------------------------------------
     if not sys.stdout.isatty():
-        print("error: interactive mode needs a terminal (use --render or --kitty)", file=sys.stderr)
+        print("error: interactive mode needs a terminal", file=sys.stderr)
         return 4
     probe = None
     if not kitty.supports_kitty():
@@ -245,8 +180,7 @@ def main(argv: List[str] | None = None) -> int:
         if probe is None or probe.graphics is not True:
             print("warning: this terminal does not appear to support the Kitty "
                   "graphics protocol.", file=sys.stderr)
-            print("         Set VIMOL_FORCE_KITTY=1 to try anyway, or use --render out.png.",
-                  file=sys.stderr)
+            print("         Set VIMOL_FORCE_KITTY=1 to try anyway.", file=sys.stderr)
             return 5
 
     # interactive defaults to a terminal-matching transparent background
