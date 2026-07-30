@@ -33,7 +33,7 @@ from . import elements
 from . import templates
 from . import editor
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "Molecule", "VectorField", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
