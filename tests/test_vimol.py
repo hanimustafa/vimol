@@ -1498,20 +1498,23 @@ def _visible(s):
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)
 
 
-# -- measurement table (design 2026-07-30, VIM-6) ---------------------------
+# -- measurement table (design 2026-07-30 rev. 2, VIM-6) --------------------
 
 def _measure_mol(dx=0.0):
     from vimol.molecule import Molecule
-    return Molecule(symbols=["C", "N", "O", "F"], positions=np.array([
+    # 5 distinct elements: the 5th (Cl) is only used to click "one atom past
+    # a completed dihedral" and trigger the widget's own 5th-click reset.
+    return Molecule(symbols=["C", "N", "O", "F", "Cl"], positions=np.array([
         [0.0, 0.0, 0.0],
         [1.0 + dx, 0.0, 0.0],
         [1.0, 1.0, 0.0],
         [0.0, 1.0, 1.0],
+        [2.0, 2.0, 2.0],
     ]))
 
 
 def _measure_viewer(tmp_path, fd_name="measure.bin"):
-    """Two same-topology structures (a.xyz, b.xyz -- so a committed column
+    """Two same-topology structures (a.xyz, b.xyz -- so a frozen column
     resolves for both) plus a third with different elements (c.xyz, the
     degrade case)."""
     from vimol.molecule import Molecule
@@ -1530,49 +1533,156 @@ def _measure_viewer(tmp_path, fd_name="measure.bin"):
     return v, fd
 
 
-def test_measure_enter_commits_column_and_clears_pick_list(tmp_path):
+def _atom_px_in_viewer(v, idx):
+    """Screen-pixel location of ACTIVE-LOCAL atom *idx*, using the same
+    analytic projection as pick() -- offset by the viewer's own image
+    origin so it can be dispatched through v._dispatch (which subtracts
+    that origin back out before it ever reaches the widget)."""
+    w = v.widget
+    mol = w.molecule
+    cam = w.scene.camera
+    ss = w.scene.supersample
+    Wr, Hr = w.scene.render_size
+    vp = cam.view_positions(mol.positions[idx:idx + 1])[0]
+    ox_s = Wr * 0.5 + cam.pan[0]
+    oy_s = Hr * 0.5 - cam.pan[1]
+    sx = ox_s + vp[0] * cam.zoom
+    sy = oy_s - vp[1] * cam.zoom
+    return sx / ss + v._img_origin_px[0], sy / ss + v._img_origin_px[1]
+
+
+def _click_atom(v, idx):
+    from vimol.input import MouseEvent
+    x, y = _atom_px_in_viewer(v, idx)
+    v._dispatch([MouseEvent("down", x, y, button=0, pixel=True)])
+    return v._dispatch([MouseEvent("up", x, y, button=0, pixel=True)])
+
+
+def _click_empty(v, local_x=500.0, local_y=30.0):
+    """A widget-local pixel with no atom under it -- near the TOP of the
+    image (not the bottom): a low local_y keeps the terminal row well clear
+    of _in_status_zone's margin, which would otherwise swallow the click
+    before it ever reaches the widget."""
+    from vimol.input import MouseEvent
+    x, y = local_x + v._img_origin_px[0], local_y + v._img_origin_px[1]
+    v._dispatch([MouseEvent("down", x, y, button=0, pixel=True)])
+    return v._dispatch([MouseEvent("up", x, y, button=0, pixel=True)])
+
+
+def test_measure_live_column_appears_at_two_picks_and_updates_in_place(tmp_path):
+    """No commit key: the live pick renders as soon as it holds 2 atoms, and
+    extending it to 3/4 updates the SAME column (still exactly one), not a
+    second one -- distance -> angle -> dihedral of the SAME atoms."""
     from vimol.input import KeyEvent
 
     v, fd = _measure_viewer(tmp_path)
     try:
         v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0, 1]                # as if two atoms were clicked
-        assert v._dispatch([KeyEvent("enter")]) is True
+        assert v._measure_layout(v._list_w) == []      # 0-1 picks: nothing yet
+
+        v.widget.measure_sel = [0, 1]                  # as if two atoms were clicked
+        layout = v._measure_layout(v._list_w)
+        assert len(layout) == 1
+        header_cell, _w, _cells, removable = layout[0]
+        assert header_cell == "C0-N1"                  # no × -- nothing to remove yet
+        assert removable is False
+
+        v.widget.measure_sel = [0, 1, 2]                # extends -> same column, now an angle
+        layout = v._measure_layout(v._list_w)
+        assert len(layout) == 1
+        assert layout[0][0] == "∠C0-N1-O2"
+
+        v.widget.measure_sel = [0, 1, 2, 3]             # extends again -> a dihedral
+        layout = v._measure_layout(v._list_w)
+        assert len(layout) == 1
+        assert layout[0][0] == "φC0-N1-O2-F3"
+    finally:
+        os.close(fd)
+
+
+def test_measure_new_atom_click_after_completed_dihedral_freezes_old_and_starts_fresh(tmp_path):
+    """A fresh atom click once the pick already holds 4 is the widget's own
+    reset (not a continuation): the finished dihedral freezes, and the
+    clicked atom starts a brand new (as yet sub-2, so invisible) pick."""
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v.widget.set_measure_mode(True)
+        for idx in (0, 1, 2, 3):
+            assert _click_atom(v, idx)
+        assert v.widget.measure_sel == [0, 1, 2, 3]
+        assert v._measure_columns == []                 # not frozen yet -- still live
+
+        assert _click_atom(v, 4)                         # 5th distinct atom: widget resets
+        assert v.widget.measure_sel == [4]
         assert len(v._measure_columns) == 1
         header, indices = v._measure_columns[0]
-        assert header == "C0-N1"
-        assert indices == (0, 1)
-        assert v.widget.measure_sel == []
+        assert indices == (0, 1, 2, 3)
+        assert header == "φC0-N1-O2-F3"
+        # the frozen column still renders; the new 1-atom pick has nothing
+        # live to show ON TOP OF it yet (needs 2+ to appear)
+        layout = v._measure_layout(v._list_w)
+        assert len(layout) == 1
+        assert layout[0][0] == "φC0-N1-O2-F3 ×"
+        assert layout[0][3] is True                       # removable: it's frozen
     finally:
         os.close(fd)
 
 
-def test_measure_enter_recommitting_same_indices_is_not_duplicated(tmp_path):
-    from vimol.input import KeyEvent
-
+def test_measure_empty_space_click_freezes_pending_selection(tmp_path):
     v, fd = _measure_viewer(tmp_path)
     try:
-        v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0, 1]
-        v._dispatch([KeyEvent("enter")])
-        v.widget.measure_sel = [0, 1]
-        v._dispatch([KeyEvent("enter")])
+        v.widget.set_measure_mode(True)
+        assert _click_atom(v, 0)
+        assert _click_atom(v, 1)
+        assert v.widget.measure_sel == [0, 1]
+
+        assert _click_empty(v)                           # empty corner: clears
+        assert v.widget.measure_sel == []
+        assert len(v._measure_columns) == 1
+        assert v._measure_columns[0][1] == (0, 1)
+    finally:
+        os.close(fd)
+
+
+def test_measure_recommitting_same_indices_is_not_duplicated(tmp_path):
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._freeze_measure_sel((0, 1))
+        v._freeze_measure_sel((0, 1))
         assert len(v._measure_columns) == 1
     finally:
         os.close(fd)
 
 
-def test_measure_enter_outside_measure_mode_or_with_one_pick_is_noop(tmp_path):
+def test_measure_mode_off_freezes_the_live_pick(tmp_path):
     from vimol.input import KeyEvent
 
     v, fd = _measure_viewer(tmp_path)
     try:
-        assert v._dispatch([KeyEvent("enter")]) is False
-        assert v._measure_columns == []
         v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0]
-        assert v._dispatch([KeyEvent("enter")]) is False
-        assert v._measure_columns == []
+        v.widget.measure_sel = [0, 1]                   # as if two atoms were clicked
+        assert v._dispatch([KeyEvent("m")]) is True      # toggling off freezes it first
+        assert v.widget.measure_mode is False
+        assert len(v._measure_columns) == 1
+        assert v._measure_columns[0][1] == (0, 1)
+    finally:
+        os.close(fd)
+
+
+def test_measure_switching_active_structure_freezes_the_live_pick(tmp_path):
+    """The whole point of the table is comparing across frames -- switching
+    frames mid-measurement must freeze the pick, not silently drop it."""
+    from vimol.input import KeyEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]
+        assert v._dispatch([KeyEvent("n")]) is True
+        assert v.frame_index == 1
+        assert v.widget.measure_sel == []                # cleared for the new active structure
+        assert len(v._measure_columns) == 1
+        assert v._measure_columns[0][1] == (0, 1)
     finally:
         os.close(fd)
 
@@ -1588,13 +1698,9 @@ def test_measure_header_glyphs_for_distance_angle_and_dihedral(tmp_path):
 
 
 def test_measure_table_renders_values_and_degrades_for_mismatched_topology(tmp_path):
-    from vimol.input import KeyEvent
-
     v, fd = _measure_viewer(tmp_path)
     try:
-        v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0, 1]
-        v._dispatch([KeyEvent("enter")])
+        v._freeze_measure_sel((0, 1))
         text = v._draw_list().decode("utf-8", "replace")
         assert "C0-N1 ×" in text
         # active (a.xyz) and b.xyz share topology -> real numbers;
@@ -1606,14 +1712,12 @@ def test_measure_table_renders_values_and_degrades_for_mismatched_topology(tmp_p
         os.close(fd)
 
 
-def test_measure_click_header_x_removes_column(tmp_path):
-    from vimol.input import KeyEvent, MouseEvent
+def test_measure_click_header_x_removes_frozen_column(tmp_path):
+    from vimol.input import MouseEvent
 
     v, fd = _measure_viewer(tmp_path)
     try:
-        v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0, 1]
-        v._dispatch([KeyEvent("enter")])
+        v._freeze_measure_sel((0, 1))
         v._draw_list()
         assert len(v._measure_header_spans) == 1
         row0, col_start, _c1, col_idx = v._measure_header_spans[0]
@@ -1625,14 +1729,25 @@ def test_measure_click_header_x_removes_column(tmp_path):
         os.close(fd)
 
 
+def test_measure_live_column_has_no_removal_span(tmp_path):
+    """The live column has no × -- there is nothing to remove yet, it
+    resolves on its own once the pick moves on."""
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v.widget.set_measure_mode(True)
+        v.widget.measure_sel = [0, 1]
+        v._draw_list()
+        assert v._measure_header_spans == []
+    finally:
+        os.close(fd)
+
+
 def test_measure_row_click_under_value_column_still_activates_structure(tmp_path):
-    from vimol.input import KeyEvent, MouseEvent
+    from vimol.input import MouseEvent
 
     v, fd = _measure_viewer(tmp_path)
     try:
-        v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0, 1]
-        v._dispatch([KeyEvent("enter")])
+        v._freeze_measure_sel((0, 1))
         v._draw_list()
         row0, _c0, c1 = v._list_row_spans[1]     # b.xyz's row
         click_col = c1 - 1                       # inside the measurement portion
@@ -1646,17 +1761,13 @@ def test_measure_row_click_under_value_column_still_activates_structure(tmp_path
 
 def test_measure_columns_interleave_two_background_tints(tmp_path):
     from vimol import theme as _theme
-    from vimol.input import KeyEvent
 
     v, fd = _measure_viewer(tmp_path)
     try:
         v.theme = _theme.DARK
         v._cols = 200   # ample room: two columns must not overflow-truncate here
-        v._dispatch([KeyEvent("m")])
-        v.widget.measure_sel = [0, 1]
-        v._dispatch([KeyEvent("enter")])
-        v.widget.measure_sel = [0, 1, 2]
-        v._dispatch([KeyEvent("enter")])
+        v._freeze_measure_sel((0, 1))
+        v._freeze_measure_sel((0, 1, 2))
         text = v._draw_list().decode("utf-8", "replace")
         assert _sgr_bg(_theme.DARK.measure_col_bg_a) in text
         assert _sgr_bg(_theme.DARK.measure_col_bg_b) in text
@@ -1665,7 +1776,6 @@ def test_measure_columns_interleave_two_background_tints(tmp_path):
 
 
 def test_measure_columns_committed_but_not_rendered_with_a_single_structure():
-    from vimol.input import KeyEvent
     from vimol.molecule import Molecule
     from vimol.viewer import Viewer
 
@@ -1673,10 +1783,8 @@ def test_measure_columns_committed_but_not_rendered_with_a_single_structure():
     v = Viewer(mol, backend="cpu")
     v.widget.set_pixel_size(200, 200)
     v._cols, v._rows = 100, 30
-    v._dispatch([KeyEvent("m")])
-    v.widget.measure_sel = [0, 1]
-    v._dispatch([KeyEvent("enter")])
-    assert len(v._measure_columns) == 1              # commit itself isn't gated
+    v._freeze_measure_sel((0, 1))
+    assert len(v._measure_columns) == 1              # freezing itself isn't gated
     assert v._measure_layout(v._list_w) == []         # nothing to compare against, so no table
     assert v._measure_width(v._list_w) == 0
 
@@ -1690,17 +1798,14 @@ def test_measure_columns_overflow_are_dropped_not_corrupting_the_viewport(tmp_pa
     every call, so a plain ``v._cols = N`` doesn't stick across a second
     call -- the terminal width has to be faked at the source."""
     from vimol import kitty as _kitty
-    from vimol.input import KeyEvent
     from vimol.viewer import _MEASURE_MIN_VIEWPORT_COLS
 
     v, fd = _measure_viewer(tmp_path)
     try:
         monkeypatch.setattr(_kitty, "terminal_size_px", lambda fd: (60, 24, 0, 0))
-        v._dispatch([KeyEvent("m")])
-        for sel in ([0, 1], [0, 1, 2], [0, 1, 2, 3]):
-            v.widget.measure_sel = sel
-            v._dispatch([KeyEvent("enter")])
-        assert len(v._measure_columns) == 3          # all three committed...
+        for sel in ((0, 1), (0, 1, 2), (0, 1, 2, 3)):
+            v._freeze_measure_sel(sel)
+        assert len(v._measure_columns) == 3          # all three frozen...
         v._update_geometry()
         assert v._cols == 60
         assert v._img_cols > 0
@@ -1709,6 +1814,75 @@ def test_measure_columns_overflow_are_dropped_not_corrupting_the_viewport(tmp_pa
         assert len(layout) < 3                       # ...but not all three fit
         for row_text in _strip_rows(v).values():
             assert len(_visible(row_text)) <= v._cols
+    finally:
+        os.close(fd)
+
+
+def test_measure_geometry_updates_immediately_after_a_column_appears(tmp_path):
+    """Regression test: _refresh_measure_w syncing _measure_w immediately
+    (for an in-burst hit test) must not stop _update_geometry from noticing
+    the width actually changed -- otherwise _img_cols/_img_origin_px go
+    stale and the mouse-to-image mapping drifts out from under a redraw
+    that already shows the new column (design 2026-07-30)."""
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        img_cols0, origin0 = v._img_cols, v._img_origin_px
+        v._freeze_measure_sel((0, 1))
+        assert v._geometry_dirty is True
+        assert v._update_geometry() is True          # must still report a change
+        assert v._img_cols < img_cols0                # viewport shrank to make room
+        assert v._img_origin_px[0] > origin0[0]        # image moved right with it
+        assert v._geometry_dirty is False
+    finally:
+        os.close(fd)
+
+
+def test_measure_columns_align_across_rows_with_differing_label_lengths(tmp_path):
+    """Regression test: the label cell must be padded to label_w, not just
+    truncated -- otherwise rows whose label text is shorter than label_w
+    (nearly all of them) shift their measurement columns left of the
+    header, and rows disagree with each other whenever their label
+    lengths differ (design 2026-07-30)."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    for i in range(11):
+        # labels of differing length ("frame 1" vs "frame 10") are the
+        # whole point: a plain truncate (no pad) drifts between them.
+        sset.append(_measure_mol(0.01 * i), label=f"frame {i + 1}")
+    fd = os.open(str(tmp_path / "align.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+    v._update_geometry()
+    v._list_w = 40
+    try:
+        v._freeze_measure_sel((0, 1))
+        layout = v._measure_layout(v._list_w)
+        _header_cell, width, cells, _removable = layout[0]
+        rows = _strip_rows(v)
+        col0 = v._list_w + 1                      # +1: measure_segs' leading pad space
+        for (row0, _c0, _c1), entry_i in zip(v._list_row_spans, v._list_row_struct):
+            expected = cells[entry_i].rjust(width)
+            actual = _visible(rows[row0])[col0:col0 + width]
+            assert actual == expected, (row0, entry_i, actual, expected)
+    finally:
+        os.close(fd)
+
+
+def test_measure_live_column_suppressed_when_it_matches_a_frozen_one(tmp_path):
+    """Re-picking the same atom pair after it's already frozen (e.g. on a
+    new active structure while trajectory-browsing) must not show a
+    duplicate header alongside the frozen one until the live pick moves
+    on (design 2026-07-30)."""
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._freeze_measure_sel((0, 1))
+        v.widget.set_measure_mode(True)
+        v.widget.measure_sel = [0, 1]
+        layout = v._measure_layout(v._list_w)
+        assert len(layout) == 1
+        assert layout[0][0] == "C0-N1 ×"
+        assert layout[0][3] is True
     finally:
         os.close(fd)
 
