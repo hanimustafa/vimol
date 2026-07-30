@@ -221,7 +221,7 @@ def _build_structure_set(paths: List[str], no_bonds: bool, tolerance: float) -> 
 
         if dupe_counts[base] > 1:
             seen[base] += 1
-            stem = f"{base}~{seen[base]}"
+            stem = base if seen[base] == 1 else f"{base}~{seen[base]}"
         else:
             stem = base
         multi = len(mols) > 1

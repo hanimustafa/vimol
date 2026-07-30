@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import List, Optional
+from collections import Counter
+from typing import List, Optional, Tuple
 
 from .parsers import load_all, SUPPORTED_EXTENSIONS
 from .bonds import ensure_bonds
 from .render import Style
+from .structures import StructureSet
 from . import kitty
 
 
@@ -127,6 +129,48 @@ def _default_demo_path() -> Optional[str]:
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     path = os.path.join(root, "examples", "c60.xyz")
     return path if os.path.exists(path) else None
+
+
+def _build_structure_set(paths: List[str], no_bonds: bool, tolerance: float) -> StructureSet:
+    """Load 2+ files into one StructureSet, in load order (VIM-1). A file
+    that's missing, fails to parse, or parses to zero molecules is skipped
+    with a warning instead of aborting the whole session. Sets ``overlay =
+    True`` and marks each file's first model, so the caller gets a
+    ready-to-render auto-overlaid set with no further setup -- see
+    docs/superpowers/specs/2026-07-30-multi-file-cli-design.md.
+    """
+    sset = StructureSet()
+    basenames = [os.path.basename(p) for p in paths]
+    dupe_counts = Counter(basenames)
+    seen: Counter = Counter()
+    for path, base in zip(paths, basenames):
+        if not os.path.exists(path):
+            print(f"warning: skipping {path}: no such file", file=sys.stderr)
+            continue
+        try:
+            mols = load_all(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: skipping {path}: {e}", file=sys.stderr)
+            continue
+        if not mols:
+            print(f"warning: skipping {path}: no molecules parsed", file=sys.stderr)
+            continue
+
+        if dupe_counts[base] > 1:
+            seen[base] += 1
+            stem = base if seen[base] == 1 else f"{base}~{seen[base]}"
+        else:
+            stem = base
+        multi = len(mols) > 1
+        for i, m in enumerate(mols):
+            if not no_bonds:
+                ensure_bonds(m, tolerance=tolerance)
+            label = f"{stem}#{i + 1}" if multi else stem
+            entry = sset.append(m, label=label, path=path)
+            if i == 0:
+                entry.marked = True
+    sset.overlay = True
+    return sset
 
 
 def main(argv: List[str] | None = None) -> int:

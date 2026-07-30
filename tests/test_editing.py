@@ -3068,3 +3068,111 @@ def test_cli_with_no_file_uses_demo_default_not_help(capsys):
     rc = vimol_app.main([])
     assert rc == 4
     assert "usage:" not in capsys.readouterr().out
+
+
+# -- CLI: multi-file loading (VIM-1) -----------------------------------
+def test_build_structure_set_loads_each_file_in_order(tmp_path):
+    a = tmp_path / "a.xyz"
+    a.write_text("2\nh2\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
+    b = tmp_path / "b.xyz"
+    b.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(a), str(b)], no_bonds=False, tolerance=0.45)
+    assert sset.labels == ["a.xyz", "b.xyz"]
+    assert [e.path for e in sset] == [str(a), str(b)]
+
+
+def test_build_structure_set_sets_overlay_true(tmp_path):
+    a = tmp_path / "a.xyz"
+    a.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    b = tmp_path / "b.xyz"
+    b.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(a), str(b)], no_bonds=False, tolerance=0.45)
+    assert sset.overlay is True
+
+
+def test_build_structure_set_labels_multi_model_file_with_hash_suffix(tmp_path):
+    traj = tmp_path / "traj.xyz"
+    traj.write_text(
+        "1\nf1\nH 0.0 0.0 0.0\n"
+        "1\nf2\nH 0.0 0.0 1.0\n"
+        "1\nf3\nH 0.0 0.0 2.0\n"
+    )
+    single = tmp_path / "single.xyz"
+    single.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(traj), str(single)], no_bonds=False, tolerance=0.45)
+    assert sset.labels == ["traj.xyz#1", "traj.xyz#2", "traj.xyz#3", "single.xyz"]
+
+
+def test_build_structure_set_marks_only_first_model_of_each_file(tmp_path):
+    traj = tmp_path / "traj.xyz"
+    traj.write_text("1\nf1\nH 0.0 0.0 0.0\n1\nf2\nH 0.0 0.0 1.0\n")
+    single = tmp_path / "single.xyz"
+    single.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(traj), str(single)], no_bonds=False, tolerance=0.45)
+    assert [e.marked for e in sset] == [True, False, True]
+
+
+def test_build_structure_set_disambiguates_duplicate_basenames(tmp_path):
+    d1 = tmp_path / "d1"
+    d1.mkdir()
+    d2 = tmp_path / "d2"
+    d2.mkdir()
+    p1 = d1 / "mol.xyz"
+    p1.write_text("1\na\nH 0.0 0.0 0.0\n")
+    p2 = d2 / "mol.xyz"
+    p2.write_text("1\nb\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(p1), str(p2)], no_bonds=False, tolerance=0.45)
+    assert sset.labels == ["mol.xyz", "mol.xyz~2"]
+
+
+def test_build_structure_set_skips_missing_file_with_warning(tmp_path, capsys):
+    missing = tmp_path / "nope.xyz"
+    ok = tmp_path / "ok.xyz"
+    ok.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(missing), str(ok)], no_bonds=False, tolerance=0.45)
+    assert sset.labels == ["ok.xyz"]
+    err = capsys.readouterr().err
+    assert f"warning: skipping {missing}: no such file" in err
+
+
+def test_build_structure_set_skips_unparseable_file_with_warning(tmp_path, capsys):
+    bad = tmp_path / "bad.foo"
+    bad.write_text("nonsense")
+    ok = tmp_path / "ok.xyz"
+    ok.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(bad), str(ok)], no_bonds=False, tolerance=0.45)
+    assert sset.labels == ["ok.xyz"]
+    err = capsys.readouterr().err
+    assert f"warning: skipping {bad}:" in err
+
+
+def test_build_structure_set_skips_file_with_zero_molecules(tmp_path, capsys):
+    empty = tmp_path / "empty.xyz"
+    empty.write_text("   \n\n")
+    ok = tmp_path / "ok.xyz"
+    ok.write_text("1\nhe\nHe 0.0 0.0 0.0\n")
+    sset = vimol_app._build_structure_set([str(empty), str(ok)], no_bonds=False, tolerance=0.45)
+    assert sset.labels == ["ok.xyz"]
+    err = capsys.readouterr().err
+    assert f"warning: skipping {empty}: no molecules parsed" in err
+
+
+def test_build_structure_set_all_files_fail_returns_empty_set(tmp_path):
+    m1 = tmp_path / "m1.xyz"
+    m2 = tmp_path / "m2.xyz"
+    sset = vimol_app._build_structure_set([str(m1), str(m2)], no_bonds=False, tolerance=0.45)
+    assert len(sset) == 0
+
+
+def test_build_structure_set_respects_no_bonds(tmp_path):
+    a = tmp_path / "a.xyz"
+    a.write_text("2\nh2\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
+    sset = vimol_app._build_structure_set([str(a)], no_bonds=True, tolerance=0.45)
+    assert len(sset[0].molecule.bonds) == 0
+
+
+def test_build_structure_set_perceives_bonds_by_default(tmp_path):
+    a = tmp_path / "a.xyz"
+    a.write_text("2\nh2\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
+    sset = vimol_app._build_structure_set([str(a)], no_bonds=False, tolerance=0.45)
+    assert len(sset[0].molecule.bonds) == 1
