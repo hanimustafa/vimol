@@ -371,3 +371,51 @@ def test_composite_concatenates_and_rotates_vector_fields():
     assert vf.vectors.shape == (4, 3)
     assert np.allclose(vf.vectors[0:2], [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
     assert np.allclose(vf.vectors[2:4], 0.0)
+
+
+# -- cross-structure measurement (VIM-6) ------------------------------------
+
+def _mol_dist(d):
+    return Molecule(symbols=["C", "C"], positions=np.array([[0.0, 0.0, 0.0], [d, 0.0, 0.0]]))
+
+
+def test_measure_matching_topology_returns_computed_distance_per_entry():
+    sset = StructureSet()
+    sset.append(_mol_dist(1.0), label="a")
+    sset.append(_mol_dist(2.5), label="b")
+    result = sset.measure([0, 1])
+    assert result == [("a", pytest.approx(1.0)), ("b", pytest.approx(2.5))]
+
+
+def test_measure_guards_index_past_current_atom_count():
+    """A pinned index that has outlived an entry's atom count (e.g. the UI
+    committed it, then editing shrank the active structure) must degrade to
+    None, not raise -- the symbols check alone can't catch this since an
+    entry always matches itself trivially by identity."""
+    sset = StructureSet()
+    sset.append(_mol_dist(1.0), label="a")   # 2 atoms: index 5 is out of range
+    assert sset.measure([0, 5]) == [("a", None)]
+
+
+def test_measure_mismatched_symbols_yields_none():
+    sset = StructureSet()
+    sset.append(_mol_dist(1.0), label="a")
+    sset.append(Molecule(symbols=["C", "N"], positions=np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])),
+                label="b")
+    result = sset.measure([0, 1])
+    assert result[0] == ("a", pytest.approx(1.0))
+    assert result[1] == ("b", None)
+
+
+def test_measure_active_entry_is_always_included():
+    sset = StructureSet()
+    sset.append(_mol_dist(1.0), label="a")
+    sset.append(_mol_dist(2.5), label="b")
+    sset.set_active(1)
+    result = sset.measure([0, 1])
+    assert result[1] == ("b", pytest.approx(2.5))
+
+
+def test_measure_empty_set_returns_empty_list():
+    sset = StructureSet()
+    assert sset.measure([0, 1]) == []

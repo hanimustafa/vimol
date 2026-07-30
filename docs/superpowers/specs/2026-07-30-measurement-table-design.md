@@ -51,13 +51,18 @@ it doesn't retroactively change if a later active structure disagrees.
   recorded per-column during draw (mirroring `_list_row_spans`); a mouse-down
   hit inside one deletes that column, checked before the existing
   `_list_index_at_row` row-click handling.
-- Columns are cleared when `widget.set_molecule()` replaces the whole set
-  (existing "reload discards everything" precedent). They are **not** cleared
-  by `undo()` — indices can go stale if editing changes atom count, which is
-  accepted as an out-of-scope edge case: VIM-6's acceptance criteria targets
-  read-only comparison, not editing interaction. A stale column is only ever
-  wrong for the structure(s) actually edited afterward, and remains
-  removable by hand.
+- Columns are **not** cleared by `undo()`, nor by anything else: indices can
+  go stale if editing changes an entry's atom count (deleting atoms shifts
+  or removes what a pinned index pointed at), which is accepted as an
+  out-of-scope edge case -- VIM-6's acceptance criteria targets read-only
+  comparison, not editing interaction. `StructureSet.measure` guards the
+  crash this could otherwise cause (an index past an entry's current atom
+  count reports `None`, same as any other degrade case) but does not try to
+  detect or repair staleness; a column left wrong by an edit is only ever
+  wrong for the structure(s) actually edited, and remains removable by hand.
+  (`widget.set_molecule()`, which wholesale-replaces the structure set, is
+  not currently called anywhere in the interactive `Viewer` -- there is no
+  reload action to hook -- so this spec makes no claim about it.)
 
 ## Header & value conventions
 
@@ -103,9 +108,11 @@ scroll (same rows, just wider).
   the full row width including measurement columns — clicking a structure's
   measurement cells activates it exactly like clicking its label; there is
   no separate interaction on a value cell.
-- Not in scope for this pass: horizontal overflow when columns don't fit the
-  terminal width. Columns beyond the available width are simply not drawn
-  (matches how the strip already degrades on a short/narrow terminal).
+- **Overflow**: columns are dropped (from the end) once they would leave
+  fewer than a fixed minimum of viewport columns for the 3D image itself —
+  a silent truncation, not an error. Reordering or scrolling the table
+  itself is out of scope for this pass; a user who pins more measurements
+  than fit removes one to see the next.
 
 ## Testing
 
@@ -114,10 +121,14 @@ scroll (same rows, just wider).
   `measurement()`'s existing exact-string tests must keep passing unchanged.
 - `StructureSet.measure`: matching-topology entries get computed values
   (including the active entry itself); an entry with different symbols
-  anywhere gets `None`; empty set returns `[]`.
+  anywhere gets `None`; empty set returns `[]`; an index past an entry's
+  current atom count (a pinned column outlived an edit that shrank it)
+  degrades to `None` instead of raising.
 - Viewer: `enter` commits a column and clears the pick list; committing the
   same indices twice doesn't duplicate; `enter` outside measure mode or with
   <2 picks is a no-op; clicking a header's `×` removes that column and
   reflows the rest; a row click under a measurement column still activates
   the structure; the table draws only when `len(structures) > 1`; degrade
-  cell renders `—` for a mismatched structure.
+  cell renders `—` for a mismatched structure; enough pinned columns to
+  exceed the terminal width drop the excess rather than driving `_img_cols`
+  to zero/negative or widening any row past the terminal.

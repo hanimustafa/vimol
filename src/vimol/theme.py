@@ -34,6 +34,8 @@ class Theme:
     list_cursor_bg: RGB
     list_rule_fg: RGB
     list_cap_bg: RGB
+    measure_col_bg_a: RGB
+    measure_col_bg_b: RGB
     cleanup_hint_fg: RGB
     pt_bg: RGB
     pt_border_fg: RGB
@@ -51,6 +53,7 @@ DARK = Theme(
     list_label_fg=(232, 236, 244), list_dim_fg=(200, 206, 216),
     list_active_bg=(37, 45, 64), list_cursor_bg=(28, 33, 46),
     list_rule_fg=(60, 66, 84), list_cap_bg=(42, 49, 66),
+    measure_col_bg_a=(36, 40, 52), measure_col_bg_b=(30, 34, 45),
     cleanup_hint_fg=(255, 170, 60),
     pt_bg=(18, 20, 26), pt_border_fg=(60, 200, 180),
     pt_text_fg=(220, 220, 230), pt_dim_fg=(110, 114, 126), pt_gap_bg=(40, 42, 50),
@@ -65,6 +68,7 @@ LIGHT = Theme(
     list_label_fg=(20, 22, 28), list_dim_fg=(55, 60, 72),
     list_active_bg=(202, 210, 230), list_cursor_bg=(216, 220, 230),
     list_rule_fg=(190, 195, 206), list_cap_bg=(206, 211, 222),
+    measure_col_bg_a=(214, 218, 228), measure_col_bg_b=(224, 227, 234),
     cleanup_hint_fg=(170, 90, 0),
     pt_bg=(238, 240, 244), pt_border_fg=(0, 140, 125),
     pt_text_fg=(30, 32, 38), pt_dim_fg=(120, 125, 138), pt_gap_bg=(220, 223, 230),

@@ -5,11 +5,12 @@ index. See ``docs/design/multi-structure.md`` for the full design.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .molecule import Molecule
+from . import editor
 
 
 @dataclass
@@ -231,6 +232,35 @@ class StructureSet:
             for e, v in zip(self.entries, self._solo_restore):
                 e.visible = v
             self._solo_restore = None
+
+    # -- cross-structure measurement (VIM-6, design §8) ---------------------
+    def measure(self, indices: Sequence[int]) -> List[Tuple[str, Optional[float]]]:
+        """Evaluate a distance/angle/dihedral pick list against every entry.
+
+        ``indices`` are atom indices into the ACTIVE structure. An entry is
+        evaluated iff its full element list matches the active structure's,
+        element-by-element (not just length) -- a length-only check would
+        report confident garbage for a same-size but different molecule.
+        Non-matching entries report ``None``, the "degrade gracefully" case.
+        Measures source coordinates, so the result is transform-invariant.
+
+        Also guards a stale ``indices`` tuple that has outlived an entry's
+        atom count (e.g. a UI committed it, then editing shrank the active
+        structure below one of those indices): the symbols check alone
+        cannot catch this, since an entry always trivially matches itself
+        by identity, so an out-of-range index would otherwise raise deep
+        inside the distance/angle/dihedral math instead of degrading.
+        """
+        active_symbols = list(self.active.molecule.symbols) if self.entries else []
+        out = []
+        for e in self.entries:
+            symbols = list(e.molecule.symbols)
+            stale = bool(indices) and max(indices) >= len(symbols)
+            if stale or symbols != active_symbols:
+                out.append((e.label, None))
+            else:
+                out.append((e.label, editor.measure_value(e.molecule, indices)))
+        return out
 
     # -- what the composite draws -------------------------------------------
     def drawn_indices(self) -> List[int]:

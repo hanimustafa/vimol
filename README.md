@@ -21,10 +21,13 @@ available. MIT licensed.
 ![C60 spinning in the terminal, rendered by vimol](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/spin.gif)
 
 `vimol` with no file opens this bundled C60 demo. Drag to rotate, scroll to
-zoom, hover an atom to identify it, `m` to measure distances/angles/dihedrals.
-Editing is on by default: `a` to append (grow fragments, swap elements — the
-status-bar pills pick the element and geometry), option-drag to draw bonds,
-`x` to delete, `c` to relax clashes, `u` to undo, `s` to save. `?` lists
+zoom, hover an atom to identify it, `m` to measure distances/angles/dihedrals
+— `enter` pins the current measurement as a column in a comparison table next
+to the structure list, evaluated for every loaded structure at once (click a
+column's `×` to remove it). Editing is on by default: `a` to append (grow
+fragments, swap elements — the status-bar pills pick the element and
+geometry), option-drag to draw bonds, `x` to delete, `c` to relax clashes,
+`u` to undo, `s` to save. `?` lists
 every binding.
 
 ```bash

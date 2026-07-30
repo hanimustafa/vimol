@@ -1498,6 +1498,221 @@ def _visible(s):
     return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)
 
 
+# -- measurement table (design 2026-07-30, VIM-6) ---------------------------
+
+def _measure_mol(dx=0.0):
+    from vimol.molecule import Molecule
+    return Molecule(symbols=["C", "N", "O", "F"], positions=np.array([
+        [0.0, 0.0, 0.0],
+        [1.0 + dx, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 1.0],
+    ]))
+
+
+def _measure_viewer(tmp_path, fd_name="measure.bin"):
+    """Two same-topology structures (a.xyz, b.xyz -- so a committed column
+    resolves for both) plus a third with different elements (c.xyz, the
+    degrade case)."""
+    from vimol.molecule import Molecule
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    sset.append(_measure_mol(0.0), label="a.xyz")
+    sset.append(_measure_mol(0.5), label="b.xyz")
+    sset.append(Molecule(symbols=["O", "H"], positions=np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0]])),
+                label="c.xyz")
+    fd = os.open(str(tmp_path / fd_name), os.O_WRONLY | os.O_CREAT, 0o644)
+    v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+    v._update_geometry()
+    v._list_w = 40
+    return v, fd
+
+
+def test_measure_enter_commits_column_and_clears_pick_list(tmp_path):
+    from vimol.input import KeyEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]                # as if two atoms were clicked
+        assert v._dispatch([KeyEvent("enter")]) is True
+        assert len(v._measure_columns) == 1
+        header, indices = v._measure_columns[0]
+        assert header == "C0-N1"
+        assert indices == (0, 1)
+        assert v.widget.measure_sel == []
+    finally:
+        os.close(fd)
+
+
+def test_measure_enter_recommitting_same_indices_is_not_duplicated(tmp_path):
+    from vimol.input import KeyEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]
+        v._dispatch([KeyEvent("enter")])
+        v.widget.measure_sel = [0, 1]
+        v._dispatch([KeyEvent("enter")])
+        assert len(v._measure_columns) == 1
+    finally:
+        os.close(fd)
+
+
+def test_measure_enter_outside_measure_mode_or_with_one_pick_is_noop(tmp_path):
+    from vimol.input import KeyEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        assert v._dispatch([KeyEvent("enter")]) is False
+        assert v._measure_columns == []
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0]
+        assert v._dispatch([KeyEvent("enter")]) is False
+        assert v._measure_columns == []
+    finally:
+        os.close(fd)
+
+
+def test_measure_header_glyphs_for_distance_angle_and_dihedral(tmp_path):
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        assert v._measure_header_text((0, 1)) == "C0-N1"
+        assert v._measure_header_text((0, 1, 2)) == "∠C0-N1-O2"
+        assert v._measure_header_text((0, 1, 2, 3)) == "φC0-N1-O2-F3"
+    finally:
+        os.close(fd)
+
+
+def test_measure_table_renders_values_and_degrades_for_mismatched_topology(tmp_path):
+    from vimol.input import KeyEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]
+        v._dispatch([KeyEvent("enter")])
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "C0-N1 ×" in text
+        # active (a.xyz) and b.xyz share topology -> real numbers;
+        # c.xyz (O/H) does not -> degrades to the em-dash
+        assert "1.000" in text     # a.xyz: |C-N| == 1.0
+        assert "1.500" in text     # b.xyz: dx=0.5 -> |C-N| == 1.5
+        assert "—" in text
+    finally:
+        os.close(fd)
+
+
+def test_measure_click_header_x_removes_column(tmp_path):
+    from vimol.input import KeyEvent, MouseEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]
+        v._dispatch([KeyEvent("enter")])
+        v._draw_list()
+        assert len(v._measure_header_spans) == 1
+        row0, col_start, _c1, col_idx = v._measure_header_spans[0]
+        assert col_idx == 0
+        assert v._dispatch([MouseEvent("down", float(col_start), float(row0),
+                                       button=0)]) is True
+        assert v._measure_columns == []
+    finally:
+        os.close(fd)
+
+
+def test_measure_row_click_under_value_column_still_activates_structure(tmp_path):
+    from vimol.input import KeyEvent, MouseEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]
+        v._dispatch([KeyEvent("enter")])
+        v._draw_list()
+        row0, _c0, c1 = v._list_row_spans[1]     # b.xyz's row
+        click_col = c1 - 1                       # inside the measurement portion
+        assert click_col >= v._list_w            # sanity: really past the strip
+        assert v._dispatch([MouseEvent("down", float(click_col), float(row0),
+                                       button=0)]) is True
+        assert v.frame_index == 1
+    finally:
+        os.close(fd)
+
+
+def test_measure_columns_interleave_two_background_tints(tmp_path):
+    from vimol import theme as _theme
+    from vimol.input import KeyEvent
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v.theme = _theme.DARK
+        v._cols = 200   # ample room: two columns must not overflow-truncate here
+        v._dispatch([KeyEvent("m")])
+        v.widget.measure_sel = [0, 1]
+        v._dispatch([KeyEvent("enter")])
+        v.widget.measure_sel = [0, 1, 2]
+        v._dispatch([KeyEvent("enter")])
+        text = v._draw_list().decode("utf-8", "replace")
+        assert _sgr_bg(_theme.DARK.measure_col_bg_a) in text
+        assert _sgr_bg(_theme.DARK.measure_col_bg_b) in text
+    finally:
+        os.close(fd)
+
+
+def test_measure_columns_committed_but_not_rendered_with_a_single_structure():
+    from vimol.input import KeyEvent
+    from vimol.molecule import Molecule
+    from vimol.viewer import Viewer
+
+    mol = Molecule(symbols=["C", "N"], positions=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+    v = Viewer(mol, backend="cpu")
+    v.widget.set_pixel_size(200, 200)
+    v._cols, v._rows = 100, 30
+    v._dispatch([KeyEvent("m")])
+    v.widget.measure_sel = [0, 1]
+    v._dispatch([KeyEvent("enter")])
+    assert len(v._measure_columns) == 1              # commit itself isn't gated
+    assert v._measure_layout(v._list_w) == []         # nothing to compare against, so no table
+    assert v._measure_width(v._list_w) == 0
+
+
+def test_measure_columns_overflow_are_dropped_not_corrupting_the_viewport(tmp_path, monkeypatch):
+    """Enough pinned columns to exceed the terminal width must not drive
+    _img_cols to zero/negative or widen rows past the terminal (design
+    2026-07-30) -- excess columns are silently dropped instead.
+
+    _update_geometry re-queries the fd's actual (ioctl-fallback) size on
+    every call, so a plain ``v._cols = N`` doesn't stick across a second
+    call -- the terminal width has to be faked at the source."""
+    from vimol import kitty as _kitty
+    from vimol.input import KeyEvent
+    from vimol.viewer import _MEASURE_MIN_VIEWPORT_COLS
+
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        monkeypatch.setattr(_kitty, "terminal_size_px", lambda fd: (60, 24, 0, 0))
+        v._dispatch([KeyEvent("m")])
+        for sel in ([0, 1], [0, 1, 2], [0, 1, 2, 3]):
+            v.widget.measure_sel = sel
+            v._dispatch([KeyEvent("enter")])
+        assert len(v._measure_columns) == 3          # all three committed...
+        v._update_geometry()
+        assert v._cols == 60
+        assert v._img_cols > 0
+        assert v._list_w + v._measure_w + _MEASURE_MIN_VIEWPORT_COLS <= v._cols
+        layout = v._measure_layout(v._list_w)
+        assert len(layout) < 3                       # ...but not all three fit
+        for row_text in _strip_rows(v).values():
+            assert len(_visible(row_text)) <= v._cols
+    finally:
+        os.close(fd)
+
+
 def _sgr_bg(rgb):
     return "\x1b[48;2;%d;%d;%dm" % rgb
 

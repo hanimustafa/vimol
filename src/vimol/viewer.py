@@ -63,6 +63,12 @@ _LEFT_WIDTH = 24
 _LIST_W_MIN = 18
 _LIST_W_MAX = 28
 
+# Measurement table (design 2026-07-30, VIM-6): the 3D image always keeps at
+# least this many columns, however many measurements are pinned -- columns
+# beyond that are silently dropped (_measure_layout) rather than shrinking
+# the viewport to nothing or negative.
+_MEASURE_MIN_VIEWPORT_COLS = 20
+
 # Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
 # separator plus footer lines below. _list_capacity() derives what fits from
@@ -83,6 +89,7 @@ _HELP_HEAD = [
 _HELP_VIEW = [
     "  s .................. cycle style       a .................. autospin",
     "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
+    "     enter -> pin as a table column next to the structure list, click × to remove",
 ]
 # Shown only when editing is enabled (Viewer(editable=True), the vimol CLI default).
 _HELP_EDIT = [
@@ -94,6 +101,7 @@ _HELP_EDIT = [
     "     option-drag atom -> atom ... draw a bond (kept beyond auto range)",
     "  c .................. cleanup clashes / long bonds",
     "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
+    "     enter -> pin as a table column next to the structure list, click × to remove",
 ]
 _HELP_TAIL = [
     "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
@@ -109,7 +117,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03", "\x14",
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "enter", "\x03", "\x14",
                       "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
@@ -338,6 +346,13 @@ class Viewer:
         # up -- mirrors _status_zone_press so a drag started on the strip
         # never reaches the viewport.
         self._list_zone_press = False
+        # measurement table (design 2026-07-30, VIM-6): committed columns as
+        # (header cell text, active-local atom indices); _measure_w is the
+        # extra width they currently reserve next to the strip, and
+        # _measure_header_spans is the click hit-test for each column's ×.
+        self._measure_columns: List[Tuple[str, Tuple[int, ...]]] = []
+        self._measure_w = 0
+        self._measure_header_spans: List[Tuple[int, int, int, int]] = []
         # True while WE own a pushed OSC-22 pointer shape (delete's crosshair,
         # measure's cell). Pushes and pops must pair exactly: an unbalanced pop
         # would clobber a shape pushed by something outside vimol (tmux, the
@@ -576,9 +591,17 @@ class Viewer:
         return min(_LIST_W_MAX, max(_LIST_W_MIN, self._cols // 5))
 
     def _in_list_zone(self, col: int) -> bool:
-        """True for any column inside the structure-list strip -- the
-        horizontal twin of _in_status_zone (design §4.2)."""
-        return self._list_w > 0 and col < self._list_w
+        """True for any column inside the structure-list strip OR the
+        measurement table beside it (design §4.2, extended 2026-07-30) --
+        the horizontal twin of _in_status_zone.
+
+        Reads the cached ``_measure_w`` rather than recomputing: a full
+        recompute runs ``StructureSet.measure`` per column, too costly to
+        redo on every mouse move at hundreds of structures. ``_update_geometry``
+        refreshes it once a tick, and ``_refresh_measure_w`` refreshes it
+        immediately on commit/removal, so it is never more than one
+        dispatch-call stale."""
+        return self._list_w > 0 and col < self._list_w + self._measure_w
 
     def _list_index_at_row(self, row: int) -> Optional[int]:
         """The structure index whose row was drawn at screen *row*, else None.
@@ -761,13 +784,18 @@ class Viewer:
         a blank row, the scrolled window of display rows, an inset rule, the
         key legend, and the overlay/camera status lines if they still fit.
         Every row goes through _list_line, so all of them measure exactly
-        list_w visible columns however narrow the strip gets.
+        list_w visible columns however narrow the strip gets -- widened by
+        the measurement table's own columns when any are pinned (design
+        2026-07-30).
         """
         out = bytearray()
         list_w = self._list_w
         sset = self.structures
         self._list_row_spans = []
         self._list_row_struct = []
+        self._measure_header_spans = []
+        layout = self._measure_layout(list_w)
+        total_w = list_w + self._layout_width(layout)
         max_row = max(self._rows - 1, 0)   # never draw over the status bar
 
         def put(row0: int, s: str) -> bool:
@@ -793,12 +821,43 @@ class Viewer:
 
         muted = self._sgr_fg(self.theme.list_muted_fg)
         head_fg = self._sgr_fg(self.theme.list_header_fg)
+        dim_fg = self._sgr_fg(self.theme.list_dim_fg)
+
+        def measure_segs(row0: int, raw_cells: List[str], align: str) -> list:
+            """Tinted measurement-column segments for one row (design
+            2026-07-30). *raw_cells[k]* is column k's unpadded content for
+            this row -- the header cell (ending in ' ×') when align is
+            'left', a formatted value (or '—') when 'right'. Interleaves
+            the two theme background shades by column position, independent
+            of the row's own active/cursor background. Header cells also
+            register their '×' click span at row0."""
+            segs = []
+            col_offset = list_w
+            for k, (_header, width, _values) in enumerate(layout):
+                bg = (self.theme.measure_col_bg_a if k % 2 == 0
+                      else self.theme.measure_col_bg_b)
+                raw = raw_cells[k]
+                padded = raw.ljust(width) if align == "left" else raw.rjust(width)
+                cell_text = f" {padded} "
+                fg = head_fg if align == "left" else (muted if raw == "—" else dim_fg)
+                segs.append((cell_text, self._sgr_bg(bg) + fg))
+                if align == "left":
+                    x_col = col_offset + len(raw)   # raw ends in ' ×': × is its last char
+                    self._measure_header_spans.append((row0, x_col, x_col + 1, k))
+                col_offset += len(cell_text)
+                if k != len(layout) - 1:
+                    segs.append((" ", ""))          # untinted gap between columns
+                    col_offset += 1
+            return segs
+
         marker = ("\u2191" if first > 0 else "") + ("\u2193" if first + cap < len(rows) else "")
         title = f" STRUCTURES {len(sset)}"
         gap = max(0, list_w - len(title) - len(marker))
-        put(0, self._list_line([(title, head_fg), (" " * gap, ""),
-                                (marker, "\x1b[2m" + head_fg)], list_w))
-        put(1, self._list_line([], list_w))          # air under the header
+        header_segs = [(title, head_fg), (" " * gap, ""), (marker, "\x1b[2m" + head_fg)]
+        if layout:
+            header_segs += measure_segs(0, [h for h, _w, _v in layout], "left")
+        put(0, self._list_line(header_segs, total_w))
+        put(1, self._list_line([], total_w))          # air under the header
 
         idx_w = max(2, len(str(len(sset))))
         label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
@@ -807,7 +866,7 @@ class Viewer:
             row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
                 name = self._truncate_middle(text, max(1, list_w - 1))
-                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], list_w)):
+                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], total_w)):
                     break
                 drawn_rows += 1
                 continue
@@ -842,17 +901,22 @@ class Viewer:
                 (" ", ""),
                 (self._truncate_middle(text, label_w), dim + label_fg),
             ]
-            if not put(row0, self._list_line(segs, list_w, bg=bg)):
+            if layout:
+                segs += measure_segs(row0, [vals[i] for _h, _w, vals in layout], "right")
+            if not put(row0, self._list_line(segs, total_w, bg=bg)):
                 break
             drawn_rows += 1
-            self._list_row_spans.append((row0, 0, list_w))
+            # Row click hit-testing extends across the measurement columns
+            # too (design 2026-07-30): clicking a structure's values
+            # activates it exactly like clicking its label.
+            self._list_row_spans.append((row0, 0, total_w))
             self._list_row_struct.append(i)
 
         row0 = _LIST_ROWS_ABOVE + drawn_rows
         rule = "\u2500" * max(0, list_w - 2)
-        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], list_w))
+        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], total_w))
         for k, segs in enumerate(self._list_legend(), start=1):
-            put(row0 + k, self._list_line(segs, list_w))
+            put(row0 + k, self._list_line(segs, total_w))
         # Status lines last: on a short panel they are the first thing to
         # fall off the bottom (put() simply refuses), the legend the last.
         row0 += 1 + len(self._list_legend())
@@ -861,9 +925,9 @@ class Viewer:
             membership = "+".join(str(i + 1) for i in drawn)
             aligned = any(not sset[i].transform.is_identity for i in drawn)
             status = f" overlay {membership}" + (" \u00b7 aligned" if aligned else "")
-            put(row0, self._list_line([(status, muted)], list_w))
+            put(row0, self._list_line([(status, muted)], total_w))
             row0 += 1
-        put(row0, self._list_line([(" camera shared", muted)], list_w))
+        put(row0, self._list_line([(" camera shared", muted)], total_w))
         return bytes(out)
 
     def _update_geometry(self) -> bool:
@@ -871,15 +935,27 @@ class Viewer:
         # Prefer the terminal's authoritative cell size (queried once at enter);
         # fall back to the window-px/cell-count estimate if it didn't answer.
         cw, ch = self._cell_px or kitty.cell_size_px(self.fd_out)
-        changed = (cols, rows) != (self._cols, self._rows)
+        prev_cols, prev_rows = self._cols, self._rows
+        # _cols/_rows update BEFORE _list_width(): it reads self._cols, and
+        # computing it first would size the strip off the terminal's
+        # PREVIOUS width for one extra tick on every real resize.
         self._cols, self._rows = cols, rows
         self.widget.set_cell_metrics(cw, ch)
+        list_w = self._list_width()
+        # Recomputed every tick (cheap): unlike the strip's own width, the
+        # measurement table can change with no terminal resize at all --
+        # committing/removing a column mid-session -- so its width can't
+        # rely solely on the (cols, rows) size check below (design 2026-07-30).
+        measure_w = self._measure_width(list_w)
+        changed = ((cols, rows) != (prev_cols, prev_rows)
+                   or list_w != self._list_w or measure_w != self._measure_w)
         if changed:
-            list_w = self._list_width()
             self._list_w = list_w
+            self._measure_w = measure_w
+            total_w = list_w + measure_w
             self._img_rows = max(rows - 1, 1)   # reserve one row for status
-            self._img_cols = cols - list_w
-            self._img_origin_px = (list_w * cw, 0)
+            self._img_cols = cols - total_w
+            self._img_origin_px = (total_w * cw, 0)
             w = int(self._img_cols * cw)
             h = int(self._img_rows * ch)
             # The widget was built at a 320x240 placeholder (the real terminal
@@ -1090,10 +1166,11 @@ class Viewer:
                                   transmit=self._transmit)
         t_encode = time.perf_counter()
         out = bytearray()
-        # The image is placed at the strip's right edge (col list_w+1, row 1)
-        # instead of the home position -- with no strip (_list_w == 0) this
-        # is exactly _HOME, so single-structure placement is unchanged.
-        out += b"\x1b[1;%dH" % (self._list_w + 1)
+        # The image is placed past the strip AND any measurement columns
+        # (col list_w+measure_w+1, row 1) instead of the home position --
+        # with neither (_list_w == 0) this is exactly _HOME, so single-
+        # structure placement is unchanged.
+        out += b"\x1b[1;%dH" % (self._list_w + self._measure_w + 1)
         out += data
         if self._list_w:
             out += self._draw_list()
@@ -1802,6 +1879,16 @@ class Viewer:
                     # strip click must never be swallowed by that guard.
                     if self._in_list_zone(col):
                         self._list_zone_press = True
+                        # A measurement column's × removes it (design
+                        # 2026-07-30) and must win over the row click below --
+                        # the header row owns no structure, so it would
+                        # otherwise just be swallowed as a no-op.
+                        removed = self._measure_header_hit(col, row)
+                        if removed is not None:
+                            del self._measure_columns[removed]
+                            self._refresh_measure_w()
+                            changed = True
+                            continue
                         i = self._list_index_at_row(row)
                         if i is not None:
                             self._list_click(i, opt=ev.alt)
@@ -1880,6 +1967,14 @@ class Viewer:
                 self._push_pointer("cell")               # precision plus-cross
             else:
                 self._pop_pointer()
+        elif key == "enter":
+            # Pin the live measure-mode pick list as a persistent table
+            # column (design 2026-07-30); a no-op outside measure mode or
+            # with fewer than 2 picks, same as today's plain Enter.
+            if self.widget.measure_mode and len(self.widget.measure_sel) >= 2:
+                self._commit_measure_column(tuple(self.widget.measure_sel))
+            else:
+                return False
         elif key == "x" and self.editable:
             self.widget.set_delete_mode(not self.widget.delete_mode)
             self._msg = ""
@@ -1922,6 +2017,97 @@ class Viewer:
         else:
             return False
         return True
+
+    def _measure_header_text(self, sel: Tuple[int, ...]) -> str:
+        """Column header for a freshly committed measurement (design
+        2026-07-30): element+index labels (the same raw-index convention as
+        the hover/status-bar ``#idx`` text, just without the ``#``), joined
+        with the same ∠/φ glyphs the live status-bar readout uses. Computed
+        once from the active structure at commit time and fixed from then
+        on -- it does not change if a different structure later becomes
+        active."""
+        symbols = self.structures.active.molecule.symbols
+        joined = "-".join(f"{symbols[i]}{i}" for i in sel)
+        if len(sel) == 2:
+            return joined
+        if len(sel) == 3:
+            return f"∠{joined}"
+        return f"φ{joined}"
+
+    def _commit_measure_column(self, sel: Tuple[int, ...]) -> None:
+        """Pin the current measure-mode pick list as a persistent table
+        column (design 2026-07-30) and clear the pick list, ready for the
+        next measurement. Re-committing the same indices is a no-op rather
+        than a duplicate column."""
+        if not any(sel == indices for _header, indices in self._measure_columns):
+            self._measure_columns.append((self._measure_header_text(sel), sel))
+        self.widget.measure_sel = []
+        self._refresh_measure_w()
+
+    def _refresh_measure_w(self) -> None:
+        """Recompute the cached ``_measure_w`` right after ``_measure_columns``
+        changes (design 2026-07-30). ``_in_list_zone`` reads the cache rather
+        than recomputing on every mouse move -- a full recompute calls
+        ``StructureSet.measure`` per column, too costly to run on every
+        pointer event at hundreds of structures -- so a commit/removal must
+        refresh it immediately, or a hit test later in the SAME input burst
+        (e.g. this test suite's commit-then-click-× tests) would still see
+        last tick's width instead of what was just drawn."""
+        self._measure_w = self._measure_width(self._list_w)
+
+    def _measure_header_hit(self, col: int, row: int) -> Optional[int]:
+        """Column index whose header ``×`` control was clicked at (col,
+        row), else None -- checked before the general list click so a
+        header click never falls through as a (no-op) row click."""
+        for r0, c0, c1, col_idx in self._measure_header_spans:
+            if r0 == row and c0 <= col < c1:
+                return col_idx
+        return None
+
+    def _measure_layout(self, list_w: int) -> List[Tuple[str, int, List[str]]]:
+        """Per-column ``(header cell incl. the × control, width, formatted
+        value cells)`` for the measurement table (design 2026-07-30). Value
+        cells are aligned to ``self.structures.entries`` order. Empty with
+        no committed columns, or when the structure strip itself is hidden
+        -- the table only ever exists beside it (single-structure viewers
+        have nothing to compare against).
+
+        Columns are dropped from the end once they would leave fewer than
+        ``_MEASURE_MIN_VIEWPORT_COLS`` for the 3D image itself -- a silent
+        truncation (design 2026-07-30), not an error: without it, enough
+        pinned columns drive ``_img_cols`` to zero or negative and corrupt
+        every row's layout, not just the table's.
+        """
+        if not self._measure_columns or len(self.structures) <= 1:
+            return []
+        available = max(0, self._cols - list_w - _MEASURE_MIN_VIEWPORT_COLS)
+        out: List[Tuple[str, int, List[str]]] = []
+        used = 0
+        for header, indices in self._measure_columns:
+            kind = len(indices)
+            values = [v for _, v in self.structures.measure(indices)]
+            cells = ["—" if v is None else (f"{v:.3f}" if kind == 2 else f"{v:.1f}")
+                     for v in values]
+            header_cell = f"{header} ×"
+            width = max(len(header_cell), max((len(c) for c in cells), default=1))
+            cost = width + 2 + (1 if out else 0)   # padding, plus the gap before it
+            if used + cost > available:
+                break
+            used += cost
+            out.append((header_cell, width, cells))
+        return out
+
+    @staticmethod
+    def _layout_width(layout: List[Tuple[str, int, List[str]]]) -> int:
+        """Total columns *layout* (as returned by ``_measure_layout``) needs:
+        each column's padded width plus a single untinted gap between
+        columns (design 2026-07-30)."""
+        if not layout:
+            return 0
+        return sum(w + 2 for _, w, _ in layout) + (len(layout) - 1)
+
+    def _measure_width(self, list_w: int) -> int:
+        return self._layout_width(self._measure_layout(list_w))
 
     def _cycle_frame(self, step: int) -> None:
         """Advance the active structure by *step* (wrapping); redraw it.
