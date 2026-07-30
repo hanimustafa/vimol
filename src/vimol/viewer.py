@@ -98,7 +98,7 @@ _HELP_EDIT = [
 _HELP_TAIL = [
     "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
-    "  ctrl-t ............. light/dark theme  y .................. yank status text",
+    "  ctrl-t ............. light/dark theme",
     "  f / r / z .......... re-fit / reset    ? .................. toggle help",
     "  q / Esc ............ quit",
 ]
@@ -109,7 +109,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "y", "\x03", "\x14",
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03", "\x14",
                       "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
@@ -748,8 +748,8 @@ class Viewer:
         title = f" STRUCTURES {len(sset)}"
         gap = max(0, list_w - len(title) - len(marker))
         put(0, self._list_line([(title, head_fg), (" " * gap, ""),
-                                (marker, "\x1b[2m" + head_fg)], list_w, bg=self.theme.list_panel_bg))
-        put(1, self._list_line([], list_w, bg=self.theme.list_panel_bg))   # air under the header
+                                (marker, "\x1b[2m" + head_fg)], list_w))
+        put(1, self._list_line([], list_w))          # air under the header
 
         idx_w = max(2, len(str(len(sset))))
         label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
@@ -758,8 +758,7 @@ class Viewer:
             row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
                 name = self._truncate_middle(text, max(1, list_w - 1))
-                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], list_w,
-                                                 bg=self.theme.list_panel_bg)):
+                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], list_w)):
                     break
                 drawn_rows += 1
                 continue
@@ -768,17 +767,18 @@ class Viewer:
             active = i == sset.active_index
             # The active row IS its background (no leader glyph); the cursor
             # row gets a subtler one, so the two stay tellable apart when
-            # they differ (design §4.3). Every OTHER row now gets the
-            # theme's own panel background too (design bug fix, docs/design/
-            # theme-and-aesthetics.md §3): leaving it unset meant those rows
-            # sat on the terminal's own background with foreground colors
-            # tuned only for a dark one. A row that is IN THE OVERLAY wears
-            # its own tint on the label -- with no leader glyph and no key
-            # binding for it, that tint is the only way to read the overlay
-            # set off the screen at all (membership is opt+click only).
+            # they differ (design §4.3). Every OTHER row stays background-
+            # less on purpose: the panel is transparent, so the terminal's
+            # own background shows through and the strip never paints a
+            # slab that fights it. Readability on a light terminal comes
+            # from the THEME'S FOREGROUNDS (list_dim_fg and friends flip
+            # dark on light), not from painting an opaque panel. A row that
+            # is IN THE OVERLAY wears its own tint on the label -- with no
+            # leader glyph and no key binding for it, that tint is the only
+            # way to read the overlay set off the screen at all (membership
+            # is opt+click only).
             bg = (self.theme.list_active_bg if active
-                  else self.theme.list_cursor_bg if i == self._list_cursor
-                  else self.theme.list_panel_bg)
+                  else self.theme.list_cursor_bg if i == self._list_cursor else None)
             dim = "\x1b[2m" if not entry.visible else ""
             # The tint outranks the active row's near-white label:
             # opt+clicking the active row has to change something on screen,
@@ -801,10 +801,9 @@ class Viewer:
 
         row0 = _LIST_ROWS_ABOVE + drawn_rows
         rule = "\u2500" * max(0, list_w - 2)
-        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], list_w,
-                                  bg=self.theme.list_panel_bg))
+        put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], list_w))
         for k, segs in enumerate(self._list_legend(), start=1):
-            put(row0 + k, self._list_line(segs, list_w, bg=self.theme.list_panel_bg))
+            put(row0 + k, self._list_line(segs, list_w))
         # Status lines last: on a short panel they are the first thing to
         # fall off the bottom (put() simply refuses), the legend the last.
         row0 += 1 + len(self._list_legend())
@@ -813,9 +812,9 @@ class Viewer:
             membership = "+".join(str(i + 1) for i in drawn)
             aligned = any(not sset[i].transform.is_identity for i in drawn)
             status = f" overlay {membership}" + (" \u00b7 aligned" if aligned else "")
-            put(row0, self._list_line([(status, muted)], list_w, bg=self.theme.list_panel_bg))
+            put(row0, self._list_line([(status, muted)], list_w))
             row0 += 1
-        put(row0, self._list_line([(" camera shared", muted)], list_w, bg=self.theme.list_panel_bg))
+        put(row0, self._list_line([(" camera shared", muted)], list_w))
         return bytes(out)
 
     def _update_geometry(self) -> bool:
@@ -1519,26 +1518,6 @@ class Viewer:
             total += vis_len
         return "".join(parts), total, offsets
 
-    def _left_field_text(self) -> str:
-        """The status bar's left-field text: live measurement readout, a
-        pick refusal, hover atom info, a transient message, or the
-        molecule's name/formula/atom-count summary -- whichever applies,
-        highest-priority first. This is the exact (untruncated) string 'y'
-        yanks and _status_bar (below) clips/pads for display."""
-        mol = self.widget.molecule
-        hov = self.widget.atom_info(self.widget.hovered)
-        # a live measurement readout (2+ picks in measure mode) outranks the
-        # hover text; with 0-1 picks measurement() is "" and the normal
-        # left-segment behavior applies.
-        measure = (editor.measurement(mol, self.widget.measure_sel)
-                   if self.widget.measure_mode else "")
-        # The molecule "name" is the xyz file's comment line, kept in full
-        # (parsers/xyz.py no longer truncates it -- see VIM-15). It gets no
-        # cap of its own here: the left field's DISPLAY width is what bounds
-        # what's drawn, but 'y' yanks this untruncated string regardless.
-        return measure or self.widget.pick_refusal or hov or (self._msg or
-            f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
-
     def _status_bar(self) -> str:
         self._elem_button_span = None
         self._geom_button_span = None
@@ -1559,7 +1538,19 @@ class Viewer:
             fg_r, fg_g, fg_b = self.theme.warn_fg
             return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         mol = self.widget.molecule
-        raw_left = self._left_field_text()
+        hov = self.widget.atom_info(self.widget.hovered)
+        # a live measurement readout (2+ picks in measure mode) outranks the
+        # hover text; with 0-1 picks measurement() is "" and the normal
+        # left-segment behavior applies.
+        measure = (editor.measurement(mol, self.widget.measure_sel)
+                   if self.widget.measure_mode else "")
+        # The molecule "name" is the xyz file's comment line, kept in full
+        # (parsers/xyz.py no longer truncates it). It gets no cap of its own:
+        # the left field's width below is what bounds it, so a wide terminal
+        # actually shows the comment instead of clipping it to a stub while
+        # the middle of the bar sits empty.
+        raw_left = measure or self.widget.pick_refusal or hov or (self._msg or
+            f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
         rep = self.style.representation
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
@@ -1840,9 +1831,6 @@ class Viewer:
                 self._push_pointer("cell")               # precision plus-cross
             else:
                 self._pop_pointer()
-        elif key == "y":
-            kitty.write_bytes(kitty.osc52_copy(self._left_field_text()), self.fd_out)
-            self._msg = "copied"
         elif key == "x" and self.editable:
             self.widget.set_delete_mode(not self.widget.delete_mode)
             self._msg = ""

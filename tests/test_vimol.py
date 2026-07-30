@@ -115,13 +115,11 @@ def test_viewer_defaults_to_dark_theme(monkeypatch):
     assert v.theme is viewer_theme.DARK
 
 
-def test_viewer_strip_rows_always_carry_an_explicit_background(tmp_path):
-    """Every structure-strip row -- not just active/cursor -- must paint a
-    background SGR, else its foreground (tuned for one theme) washes out
-    against whichever background the terminal itself has (the reported
-    bug). Structure #2 (index 1) is neither active (0) nor cursor-highlighted
-    here, so its row is exactly the "ordinary" case that used to fall
-    through to bg=None."""
+def test_viewer_strip_ordinary_rows_stay_transparent(tmp_path):
+    """The strip panel is transparent: only the active and cursor rows paint
+    a background, so the terminal's own shows through everywhere else.
+    Structure #2 (index 1) is neither here, so its row is the "ordinary"
+    case and must carry no background SGR at all."""
     v, fd = _multi_viewer(tmp_path)
     try:
         v._list_w = 24
@@ -130,8 +128,31 @@ def test_viewer_strip_rows_always_carry_an_explicit_background(tmp_path):
         parts = re.split(r"\x1b\[(\d+);1H", data)
         rows = {int(parts[i]) - 1: parts[i + 1] for i in range(1, len(parts), 2)}
         ordinary_row = rows[v._list_row_spans[1][0]]
-        r, g, b = v.theme.list_panel_bg
-        assert f"\x1b[48;2;{r};{g};{b}m" in ordinary_row
+        assert "\x1b[48;2;" not in ordinary_row
+    finally:
+        os.close(fd)
+
+
+def test_viewer_strip_foregrounds_flip_with_the_theme(tmp_path):
+    """Light-terminal readability comes from the FOREGROUND palette, not
+    from painting an opaque panel: the dark theme's near-white row labels
+    would wash out on a light terminal, so the light theme's must be dark
+    enough to read against it (the originally reported bug)."""
+    from vimol import theme as vimol_theme
+
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._list_w = 24
+        dark_rows = v._draw_list().decode("utf-8", "replace")
+        assert _sgr_fg(vimol_theme.DARK.list_dim_fg) in dark_rows
+
+        v.theme = vimol_theme.LIGHT
+        light_rows = v._draw_list().decode("utf-8", "replace")
+        assert _sgr_fg(vimol_theme.LIGHT.list_dim_fg) in light_rows
+        # and the light palette is genuinely dark ink, not the dark theme's
+        # near-white text reused
+        assert vimol_theme.luminance(vimol_theme.LIGHT.list_dim_fg) < 140
+        assert vimol_theme.luminance(vimol_theme.DARK.list_dim_fg) > 140
     finally:
         os.close(fd)
 
@@ -210,55 +231,17 @@ def test_viewer_finish_startup_upgrades_theme_from_osc11(monkeypatch):
     assert v.widget.theme == "light"
 
 
-def test_viewer_left_field_text_matches_status_bar_computation():
+def test_viewer_status_bar_shows_full_untruncated_comment_when_room_allows():
+    """The xyz comment is no longer capped at 60 chars on parse, so a wide
+    terminal shows the whole energy line instead of a clipped stub."""
     from vimol.viewer import Viewer
-    mol = vimol.load(os.path.join(EX, "methane.xyz"))
-    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
-    v._update_geometry()
-    assert v._left_field_text() == f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"
 
-
-def test_viewer_y_key_copies_left_field_via_osc52(tmp_path):
-    from vimol.viewer import Viewer
-    from vimol.input import KeyEvent
-
-    mol = vimol.load(os.path.join(EX, "methane.xyz"))
-    mol.name = "SCF Energy = -40.5183 Hartree"
-    out = tmp_path / "out.bin"
-    fd = os.open(str(out), os.O_WRONLY | os.O_CREAT, 0o644)
-    try:
-        v = Viewer(mol, fd_out=fd)
-        v._update_geometry()
-        expected_text = v._left_field_text()   # snapshot before 'y' sets self._msg
-        assert v._dispatch([KeyEvent("y")]) is True
-    finally:
-        os.close(fd)
-    data = out.read_bytes()
-    expected_payload = base64.standard_b64encode(expected_text.encode("utf-8"))
-    assert (b"\x1b]52;c;" + expected_payload + b"\x1b\\") in data
-    assert v._msg == "copied"
-
-
-def test_viewer_y_key_copies_full_untruncated_comment_not_display_clipped(tmp_path):
-    """The status bar's visible field is width-clipped; yank must copy the
-    real underlying string regardless of terminal width."""
-    from vimol.viewer import Viewer
-    from vimol.input import KeyEvent
-
-    long_comment = "SCF Energy = -76.123456789012 Hartree, converged in 42 cycles, RMS grad 1e-9"
+    long_comment = "SCF Energy = -76.123456789012 Hartree, converged in 42 cycles"
     mol = vimol.load(os.path.join(EX, "methane.xyz"))
     mol.name = long_comment
-    out = tmp_path / "out.bin"
-    fd = os.open(str(out), os.O_WRONLY | os.O_CREAT, 0o644)
-    try:
-        v = Viewer(mol, fd_out=fd)
-        v._cols, v._rows = 40, 24   # narrow enough that the display field clips
-        assert v._dispatch([KeyEvent("y")]) is True
-    finally:
-        os.close(fd)
-    data = out.read_bytes()
-    expected_payload = base64.standard_b64encode(f"{long_comment}  {mol.formula()}  {mol.n_atoms} atoms".encode("utf-8"))
-    assert (b"\x1b]52;c;" + expected_payload + b"\x1b\\") in data
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    v._cols, v._rows = 200, 24   # wide enough that the left field isn't clipped
+    assert long_comment in v._status_bar()
 
 
 def test_xyz_roundtrip_and_bonds():
@@ -423,20 +406,6 @@ def test_parse_probe_reply_bg_rgb_none_before_da1_fence():
     # no DA1 yet -> whole probe is None, not a premature verdict
     buf = b"\x1b]11;rgb:1e1e/2020/2828\x1b\\"
     assert kitty.parse_probe_reply(buf) is None
-
-
-def test_osc52_copy_encodes_base64_clipboard_sequence():
-    seq = kitty.osc52_copy("hello")
-    assert seq == b"\x1b]52;c;" + base64.standard_b64encode(b"hello") + b"\x1b\\"
-
-
-def test_osc52_copy_handles_unicode_and_padding_edge_cases():
-    for text in ("d(#1-#2) = 1.523 Å", "a", "ab", "abc", ""):
-        seq = kitty.osc52_copy(text)
-        assert seq.startswith(b"\x1b]52;c;")
-        assert seq.endswith(b"\x1b\\")
-        payload = seq[len(b"\x1b]52;c;"):-len(b"\x1b\\")]
-        assert base64.standard_b64decode(payload) == text.encode("utf-8")
 
 
 def test_png_roundtrip_header():

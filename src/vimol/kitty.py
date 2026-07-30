@@ -467,22 +467,6 @@ def probe_terminal(fd_in: int = 0, fd_out: int = 1, timeout: float = 1.0,
 
 
 # --------------------------------------------------------------------------
-# Clipboard write (OSC 52)
-# --------------------------------------------------------------------------
-def osc52_copy(text: str) -> bytes:
-    """Bytes that write *text* to the system clipboard via OSC 52.
-
-    Supported by kitty, Ghostty, WezTerm, and iTerm2 directly, and passed
-    through by tmux with ``set-clipboard on`` -- the standard way a terminal
-    application writes the clipboard over SSH with no local clipboard
-    access of its own. ``c`` selects the system clipboard (as opposed to a
-    primary/X11 selection).
-    """
-    payload = base64.standard_b64encode(text.encode("utf-8"))
-    return b"\x1b]52;c;" + payload + b"\x1b\\"
-
-
-# --------------------------------------------------------------------------
 # Image encoding
 # --------------------------------------------------------------------------
 def _controls(d: dict) -> bytes:

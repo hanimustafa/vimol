@@ -48,7 +48,6 @@ class Theme:
     list_cursor_bg: Tuple[int, int, int]
     list_rule_fg: Tuple[int, int, int]
     list_cap_bg: Tuple[int, int, int]
-    list_panel_bg: Tuple[int, int, int]            # NEW FIELD, see §3
     cleanup_hint_fg: Tuple[int, int, int]
     pt_bg: Tuple[int, int, int]
     pt_border_fg: Tuple[int, int, int]
@@ -64,7 +63,7 @@ DARK = Theme(name="dark", panel_bg=(30, 33, 44), panel_fg=(230, 232, 240),
              list_label_fg=(232, 236, 244), list_dim_fg=(200, 206, 216),
              list_active_bg=(37, 45, 64), list_cursor_bg=(28, 33, 46),
              list_rule_fg=(60, 66, 84), list_cap_bg=(42, 49, 66),
-             list_panel_bg=(18, 20, 26), cleanup_hint_fg=(255, 170, 60),
+             cleanup_hint_fg=(255, 170, 60),
              pt_bg=(18, 20, 26), pt_border_fg=(60, 200, 180),
              pt_text_fg=(220, 220, 230), pt_dim_fg=(110, 114, 126), pt_gap_bg=(40, 42, 50))
 
@@ -76,7 +75,7 @@ LIGHT = Theme(name="light", panel_bg=(225, 227, 232), panel_fg=(30, 32, 38),
               list_label_fg=(20, 22, 28), list_dim_fg=(55, 60, 72),
               list_active_bg=(202, 210, 230), list_cursor_bg=(216, 220, 230),
               list_rule_fg=(190, 195, 206), list_cap_bg=(206, 211, 222),
-              list_panel_bg=(233, 235, 240), cleanup_hint_fg=(170, 90, 0),
+              cleanup_hint_fg=(170, 90, 0),
               pt_bg=(238, 240, 244), pt_border_fg=(0, 140, 125),
               pt_text_fg=(30, 32, 38), pt_dim_fg=(120, 125, 138), pt_gap_bg=(220, 223, 230))
 ```
@@ -182,10 +181,19 @@ whatever the terminal's own background is, while their foreground colors
 (`_LIST_HEADER_FG`, `_LIST_MUTED_FG`, `_LIST_DIM_FG`) are tuned only for a
 dark one. Only the active and cursor rows get an explicit background
 (`_LIST_ACTIVE_BG`/`_LIST_CURSOR_BG`) and so only those two read correctly
-today regardless of terminal background. Fix: pass the new
-`theme.list_panel_bg` field as every row's background, including ordinary
-ones — `_draw_list` calls `_list_line(..., bg=self.theme.list_panel_bg)`
-unconditionally instead of leaving it unset.
+today regardless of terminal background.
+
+**Fix: themed foregrounds, not an opaque panel.** The strip stays
+*transparent* — ordinary rows keep `bg=None` so the terminal's own
+background shows through and the panel never paints a slab that fights it.
+Readability comes from the theme's foreground palette instead: the light
+theme's `list_dim_fg`/`list_header_fg`/`list_muted_fg` are dark ink, so
+they read against a light terminal exactly as the dark theme's near-white
+ones read against a dark one. (An earlier revision of this spec painted
+every row with a `list_panel_bg` field; that field is gone. Painting the
+panel opaque also made the theme flip visible as a black-then-recolor flash
+while the OSC 11 probe was still in flight — a transparent panel has
+nothing to flash.)
 
 **Element colors.** `elements._COLORS` (CPK/Jmol palette) keeps its values
 and `element_color()`/`Molecule.element_colors()` keep their signatures
@@ -235,47 +243,25 @@ terminal background, so terminal theme doesn't apply):
 - The geometry pill's teal accent and `_pill()`'s self-computed text color
   (§1).
 
-## 4. Copyable status bar
+## 4. Full xyz comment
 
-**Why not just fix mouse handling.** vimol enables SGR mouse reporting for
-its own drag/click/scroll handling, which is exactly what prevents the
-terminal's native drag-to-select from reaching the status bar text. Rather
-than suspend mouse reporting conditionally (fragile, terminal-dependent,
-and the visible text is already truncated/padded to fit column width, so a
-raw selection wouldn't give you the full string anyway), a `y` key copies
-the *underlying* value directly.
+**Dropped from this design: the OSC 52 "yank" key.** An earlier revision
+added a `y` binding that copied the status bar's left-field text to the
+system clipboard, on the reasoning that vimol's own SGR mouse reporting
+intercepts the terminal's native drag-to-select. It was cut — a modal copy
+key is not the interaction people reach for, and kitty/Ghostty/WezTerm all
+already bypass mouse reporting on shift+drag, which gives native selection
+without vimol implementing anything. `kitty.osc52_copy` and the binding are
+both gone.
 
-**Binding.** `y`, added to `_BASE_DRIVER_KEYS` (available in both modes,
-like `m` measure). Copies whichever string is currently backing the status
-bar's left field — the same value `_status_bar` computes into `raw_left`
-(`viewer.py:1523`): live measurement text, `pick_refusal`, hover atom info,
-or `f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"` — as
-the **untruncated** string, not the display-clipped/padded version. On
-success, `self._msg = "copied"` flashes briefly in the same slot (existing
-`_msg` mechanism already used for e.g. "saved foo.xyz").
-
-**Mechanism: OSC 52.**
-
-```
-ESC ] 52 ; c ; <base64 of the text> ESC \
-```
-
-`c` targets the system clipboard. Supported by kitty, Ghostty, WezTerm,
-iTerm2, and passed through by tmux with `set-clipboard on` — the standard
-way a terminal app writes the clipboard over SSH without any local
-clipboard access. `kitty.py` gains `osc52_copy(text: str) -> bytes`,
-written straight to `fd_out` like every other control sequence in that
-module.
-
-**Full xyz comment.** `parsers/xyz.py:46` currently does
-`name=comment.strip()[:60]` at *parse* time — a long ORCA/Gaussian energy
-comment is already gone before a `y` press could copy it, and a save
-round-trip silently shortens it further. Fix: keep the full string on
-`Molecule.name`; the 60-char cap moves to display-only call sites that
-actually need a bounded width (the strip's structure labels, if any
-currently rely on the implicit cap — checked during implementation).
-`dumps()` (xyz.py:53) is unaffected either way since it already just writes
-`mol.name` verbatim.
+**What stays is the underlying data fix.** `parsers/xyz.py:46` did
+`name=comment.strip()[:60]` at *parse* time, so a long ORCA/Gaussian energy
+comment was truncated before anything could display or copy it, and a save
+round-trip silently shortened it further. The full string now lives on
+`Molecule.name`; the only bound on what's shown is the status bar's own
+display width, so a wide terminal renders the whole comment instead of a
+stub. `dumps()` (xyz.py:53) is unaffected — it already wrote `mol.name`
+verbatim.
 
 ## Testing
 
@@ -285,12 +271,12 @@ currently rely on the implicit cap — checked during implementation).
 - `kitty.parse_probe_reply` gains cases for an OSC 11 reply present/absent/
   malformed, both terminator styles, both channel widths, alongside the
   existing graphics/pixel-mouse/cell-size cases.
-- `osc52_copy` produces the exact expected byte sequence for a plain string
-  and one containing bytes needing base64 padding edge cases.
-- xyz parse/dump round-trip with a >60-char comment stays intact.
-- Existing structure-strip tests (`test_viewer_draw_multi_structure_writes_image_and_list_strip`)
-  keep passing with the new unconditional `bg=` — should be behavior-neutral
-  under `DARK` since `list_panel_bg` there equals the old "no background"
-  look closely enough on a typical dark terminal; if any test asserts on the
-  exact absence of a background SGR for a non-active row, it gets updated to
-  assert the new explicit one instead.
+- xyz parse/dump round-trip with a >60-char comment stays intact, and the
+  status bar shows it in full when the terminal is wide enough.
+- Strip rendering: ordinary (non-active, non-cursor) rows carry no
+  background SGR at all — the panel is transparent — and the row-label
+  foreground flips with the theme, light being genuinely dark ink rather
+  than the dark theme's near-white text reused.
+- Every existing structure-strip test keeps passing untouched: each asserts
+  a specific literal color tuple, and all of those literals are `DARK`'s
+  values, unchanged by this work.
