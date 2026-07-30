@@ -13,6 +13,16 @@ project. See ``gl_adapter.py`` for the vimol-specific glue that turns a
 
 Requires ``moderngl`` (installed with vimol; a GL context must be
 creatable at runtime, else Scene's auto backend falls back to the CPU).
+
+Readback orientation: ``render()`` returns the framebuffer in raw
+``glReadPixels`` order — row 0 is the NDC -y side of the image — as a
+zero-copy read-only view of the readback bytes. Projections built by
+``gl_adapter._build_projection`` have their Y row negated precisely so that
+this order is already top-down in vimol's screen convention; a textbook
+Y-up projection will come out vertically flipped. (The previous tail —
+flipud plus the RGBA->RGB slicing copy, the slice being the dominant
+cost — measured ~23 ms/frame at 2560x1440, more than the draw and the
+readback combined.)
 """
 from __future__ import annotations
 
@@ -538,6 +548,35 @@ class GLRenderer:
             vertex_shader=_DOWNSAMPLE_VERT, fragment_shader=_DOWNSAMPLE_FRAG)
         self._downsample_vao = self.ctx.vertex_array(
             self._downsample_program, [(self._quad_vbo, "2f", "in_corner")])
+        # Persistent instance VBOs and their VAOs: per frame the new batch is
+        # streamed into the SAME GL objects (orphan + write) instead of
+        # creating and destroying buffer/vertex-array objects per draw --
+        # keep GL object identity stable and let the driver recycle storage,
+        # the same reason PyMOL keeps geometry in long-lived VBOs.
+        self._atom_vbo = self.ctx.buffer(reserve=4)
+        self._atom_vao = self.ctx.vertex_array(
+            self._atom_program,
+            [
+                (self._quad_vbo, "2f", "in_corner"),
+                (self._atom_vbo, "3f 1f 3f 1f/i", "in_center", "in_radius", "in_color", "in_flat"),
+            ],
+        )
+        self._bond_vbo = self.ctx.buffer(reserve=4)
+        self._bond_vao = self.ctx.vertex_array(
+            self._bond_program,
+            [
+                (self._quad_vbo, "2f", "in_corner"),
+                (self._bond_vbo, "3f 3f 1f 3f 3f 1f/i", "in_a", "in_b", "in_radius", "in_color_a", "in_color_b", "in_flat"),
+            ],
+        )
+        self._cone_vbo = self.ctx.buffer(reserve=4)
+        self._cone_vao = self.ctx.vertex_array(
+            self._cone_program,
+            [
+                (self._quad_vbo, "2f", "in_corner"),
+                (self._cone_vbo, "3f 3f 1f 3f/i", "in_base", "in_apex", "in_radius", "in_color"),
+            ],
+        )
         self._fbo = None
         self._color_tex = None         # color attachment is a texture so the
         self._depth_rb = None          # downsample pass can sample it
@@ -595,6 +634,13 @@ class GLRenderer:
         CPU (~200ms at full screen). The returned image is therefore
         ``(height//downsample, width//downsample)``. The caller sizes this
         renderer to display-size*factor and passes the same factor here.
+
+        Returns a zero-copy, read-only ``uint8`` view of the readback bytes
+        (the underlying ``bytes`` object is kept alive via the array's
+        ``.base``), in raw ``glReadPixels`` row order -- see the module
+        docstring for the orientation contract. Opaque frames are (H, W, 3),
+        transparent ones (H, W, 4) with straight alpha (the downsample
+        shader un-premultiplies; the ds==1 path never premultiplies).
         """
         shading = shading or ShadingParams()
         cones = cones or ConeBatch.empty()
@@ -672,6 +718,7 @@ class GLRenderer:
         if len(cone_base):
             self._draw_cones(cone_base, cone_apex, radii_h, colors_h, proj_gl, common)
 
+        ch = 4 if shading.transparent else 3
         if downsample > 1:
             tw, th = W // downsample, H // downsample
             resolve = self._resolve_target(tw, th)
@@ -682,24 +729,30 @@ class GLRenderer:
             self._downsample_program["u_src"] = 0
             self._downsample_program["u_factor"] = downsample
             self._downsample_vao.render(moderngl.TRIANGLE_STRIP)
-            raw = resolve.read(components=4, dtype="f1")
-            arr = np.frombuffer(raw, dtype=np.uint8).reshape(th, tw, 4)
+            raw = resolve.read(components=ch, dtype="f1")
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(th, tw, ch)
         else:
-            raw = self._fbo.read(components=4, dtype="f1")
-            arr = np.frombuffer(raw, dtype=np.uint8).reshape(H, W, 4)
-        arr = np.flipud(arr)
-
-        # Edge pixels come back straight-alpha already (the downsample shader
-        # un-premultiplies; the ds==1 path never premultiplies).
-        if not shading.transparent:
-            return np.ascontiguousarray(arr[..., :3])
-        return np.ascontiguousarray(arr)
+            raw = self._fbo.read(components=ch, dtype="f1")
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(H, W, ch)
+        return arr
 
     # ------------------------------------------------------------------
     def _set_uniforms(self, program, proj_gl: np.ndarray, common: dict) -> None:
         program["u_proj"].write(proj_gl.tobytes())
         for name, value in common.items():
             program[name].value = value
+
+    def _stream(self, vbo, data: np.ndarray) -> None:
+        """Replace *vbo*'s contents with *data* (orphan + write).
+
+        ``orphan`` detaches the old storage (the driver recycles it once the
+        GPU is done with any in-flight draw that referenced it), so a fresh
+        upload never stalls on the previous frame's draw the way a plain
+        ``write`` into a mapped/in-use buffer can.
+        """
+        payload = data.tobytes()
+        vbo.orphan(len(payload))
+        vbo.write(payload)
 
     def _draw_atoms(self, centers, radii, colors, flat, proj_gl, common) -> None:
         n = centers.shape[0]
@@ -708,18 +761,9 @@ class GLRenderer:
         data[:, 3] = radii
         data[:, 4:7] = colors
         data[:, 7] = flat
-        inst_vbo = self.ctx.buffer(data.tobytes())
-        vao = self.ctx.vertex_array(
-            self._atom_program,
-            [
-                (self._quad_vbo, "2f", "in_corner"),
-                (inst_vbo, "3f 1f 3f 1f/i", "in_center", "in_radius", "in_color", "in_flat"),
-            ],
-        )
+        self._stream(self._atom_vbo, data)
         self._set_uniforms(self._atom_program, proj_gl, common)
-        vao.render(moderngl.TRIANGLE_STRIP, instances=n)
-        vao.release()
-        inst_vbo.release()
+        self._atom_vao.render(moderngl.TRIANGLE_STRIP, instances=n)
 
     def _draw_bonds(self, a, b, radii, colors_a, colors_b, flat, proj_gl, common) -> None:
         n = a.shape[0]
@@ -730,18 +774,9 @@ class GLRenderer:
         data[:, 7:10] = colors_a
         data[:, 10:13] = colors_b
         data[:, 13] = flat
-        inst_vbo = self.ctx.buffer(data.tobytes())
-        vao = self.ctx.vertex_array(
-            self._bond_program,
-            [
-                (self._quad_vbo, "2f", "in_corner"),
-                (inst_vbo, "3f 3f 1f 3f 3f 1f/i", "in_a", "in_b", "in_radius", "in_color_a", "in_color_b", "in_flat"),
-            ],
-        )
+        self._stream(self._bond_vbo, data)
         self._set_uniforms(self._bond_program, proj_gl, common)
-        vao.render(moderngl.TRIANGLE_STRIP, instances=n)
-        vao.release()
-        inst_vbo.release()
+        self._bond_vao.render(moderngl.TRIANGLE_STRIP, instances=n)
 
     def _draw_cones(self, base, apex, radii, colors, proj_gl, common) -> None:
         n = base.shape[0]
@@ -750,18 +785,9 @@ class GLRenderer:
         data[:, 3:6] = apex
         data[:, 6] = radii
         data[:, 7:10] = colors
-        inst_vbo = self.ctx.buffer(data.tobytes())
-        vao = self.ctx.vertex_array(
-            self._cone_program,
-            [
-                (self._quad_vbo, "2f", "in_corner"),
-                (inst_vbo, "3f 3f 1f 3f/i", "in_base", "in_apex", "in_radius", "in_color"),
-            ],
-        )
+        self._stream(self._cone_vbo, data)
         self._set_uniforms(self._cone_program, proj_gl, common)
-        vao.render(moderngl.TRIANGLE_STRIP, instances=n)
-        vao.release()
-        inst_vbo.release()
+        self._cone_vao.render(moderngl.TRIANGLE_STRIP, instances=n)
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:

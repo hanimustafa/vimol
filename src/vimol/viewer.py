@@ -252,7 +252,14 @@ class Viewer:
         self._last_interact = 0.0
         # dynamic-resolution factor while moving; starts conservative so the
         # very first frame (drawn before any timing data exists) stays fast.
-        self._interact_scale = _STARTUP_SCALE
+        # Exception: a GPU backend on a provably local terminal (the probe's
+        # shm handshake proves same-machine) renders a full-res frame in
+        # ~5 ms -- far inside the interactive budget -- so it starts at full
+        # resolution with no blurry ramp-up; the controller still steps the
+        # scale down if measured frames actually blow the budget.
+        self._interact_scale = (1.0 if (self.widget.scene.backend == "gl"
+                                        and probe is not None and probe.shm)
+                                else _STARTUP_SCALE)
         # resolution factor for the crisp settle frame; probe-seeded in
         # _finish_startup, then adapted by _next_idle_scale measurements.
         self._idle_scale = 1.0
@@ -463,6 +470,11 @@ class Viewer:
             # is bounded separately by kitty._SHM_KEEP, which only ever
             # recycles stale frames -- see the test for that invariant.
             self._transmit = "shm" if probe.shm else "direct"
+            if self._transmit == "shm" and self.widget.scene.backend == "gl":
+                # GPU + provably-local terminal (see __init__): interactive
+                # frames fit the budget at full resolution, so jump straight
+                # there instead of earning it back over ~10 measured frames.
+                self._interact_scale = 1.0
             if probe.rtt is not None:
                 # the terminal answers DA1: fence every frame and self-clock
                 # to the link (one frame in flight, no bufferbloat backlog).
