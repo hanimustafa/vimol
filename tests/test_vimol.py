@@ -469,6 +469,28 @@ def test_backend_invalid_name_raises():
         Scene(mol, 80, 80, backend="not-a-backend")
 
 
+def test_cli_theme_flag_sets_env_before_viewer_construction(monkeypatch):
+    from vimol import app
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    p = app.make_parser()
+    args = p.parse_args(["--theme", "light", os.path.join(EX, "methane.xyz")])
+    assert args.theme == "light"
+    app._apply_theme_arg(args)
+    assert os.environ["VIMOL_THEME"] == "light"
+
+
+def test_cli_theme_flag_auto_clears_env():
+    from vimol import app
+    os.environ["VIMOL_THEME"] = "light"
+    try:
+        p = app.make_parser()
+        args = p.parse_args(["--theme", "auto"])
+        app._apply_theme_arg(args)
+        assert "VIMOL_THEME" not in os.environ
+    finally:
+        os.environ.pop("VIMOL_THEME", None)
+
+
 def test_backend_gl_explicit_raises_if_unavailable(monkeypatch):
     """An explicit `backend="gl"` request must not silently downgrade to
     CPU -- force the GL import to fail regardless of whether moderngl is
