@@ -102,6 +102,29 @@ def test_theme_resolve_precedence():
     # default is dark
     assert theme.resolve(None, None, None) is theme.DARK
     assert theme.resolve(None, None, "garbage") is theme.DARK
+    # a cached last-detected theme is the fallback below COLORFGBG
+    assert theme.resolve(None, None, None, cached="light") is theme.LIGHT
+    assert theme.resolve(None, None, None, cached="dark") is theme.DARK
+    assert theme.resolve(None, None, None, cached="garbage") is theme.DARK
+    assert theme.resolve(None, None, "0;15", cached="dark") is theme.LIGHT  # colorfgbg still wins
+
+
+def test_theme_cache_roundtrip(tmp_path, monkeypatch):
+    from vimol import theme
+    monkeypatch.setattr(theme, "_CACHE_PATH", str(tmp_path / "cache"))
+    assert theme.read_cached() is None       # nothing written yet
+    theme.write_cached("light")
+    assert theme.read_cached() == "light"
+    theme.write_cached("dark")
+    assert theme.read_cached() == "dark"
+
+
+def test_theme_cache_ignores_garbage_file_contents(tmp_path, monkeypatch):
+    from vimol import theme
+    path = tmp_path / "cache"
+    path.write_text("not-a-theme")
+    monkeypatch.setattr(theme, "_CACHE_PATH", str(path))
+    assert theme.read_cached() is None
 
 
 def test_viewer_defaults_to_dark_theme(monkeypatch):
@@ -230,6 +253,61 @@ def test_viewer_finish_startup_upgrades_theme_from_osc11(monkeypatch):
     v._finish_startup()
     assert v.theme is vimol_theme.LIGHT  # OSC 11 corrected it
     assert v.widget.theme == "light"
+
+
+def test_viewer_frame0_uses_cached_theme_when_no_env_or_colorfgbg(monkeypatch):
+    """The flicker fix: on a light terminal with no COLORFGBG set, frame 0
+    used to always guess DARK and only correct to LIGHT once the OSC 11
+    reply landed in _finish_startup -- a visible dark-then-light flash on
+    every single startup. A cached last-detected theme lets frame 0 guess
+    right the first time for the common case of running in the same
+    terminal repeatedly."""
+    from vimol import theme as vimol_theme
+    from vimol.viewer import Viewer
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    monkeypatch.delenv("COLORFGBG", raising=False)
+    vimol_theme.write_cached("light")
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    assert v.theme is vimol_theme.LIGHT
+
+
+def test_viewer_probe_writes_cache_only_from_a_real_osc11_reply(monkeypatch, tmp_path):
+    """The cache must reflect what the TERMINAL said, not a COLORFGBG guess
+    or an explicit override -- either would poison next run's frame-0 guess
+    with something that was never actually detected."""
+    from vimol import theme as vimol_theme, kitty as vimol_kitty
+    from vimol.viewer import Viewer
+
+    monkeypatch.delenv("VIMOL_THEME", raising=False)
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+
+    # no bg_rgb (terminal never answered OSC 11) -> nothing cached
+    v._apply_probe_theme(vimol_kitty.TerminalProbe(graphics=True, pixel_mouse=False,
+                                                   cell_px=None, bg_rgb=None))
+    assert vimol_theme.read_cached() is None
+
+    # a real answer IS cached
+    v._apply_probe_theme(vimol_kitty.TerminalProbe(graphics=True, pixel_mouse=False,
+                                                   cell_px=None, bg_rgb=(245, 245, 245)))
+    assert vimol_theme.read_cached() == "light"
+
+
+def test_viewer_probe_does_not_cache_an_explicit_override(monkeypatch):
+    from vimol import theme as vimol_theme, kitty as vimol_kitty
+    from vimol.viewer import Viewer
+
+    monkeypatch.setenv("VIMOL_THEME", "dark")
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    # terminal genuinely answers "light", but the user forced dark -- that's
+    # not the terminal telling us anything, so it must not be cached
+    v._apply_probe_theme(vimol_kitty.TerminalProbe(graphics=True, pixel_mouse=False,
+                                                   cell_px=None, bg_rgb=(245, 245, 245)))
+    assert vimol_theme.read_cached() is None
+    assert v.theme is vimol_theme.DARK   # explicit still wins
 
 
 def test_viewer_late_probe_also_applies_the_osc11_theme(monkeypatch, tmp_path):

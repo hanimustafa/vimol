@@ -7,6 +7,7 @@ new content, tuned for a white/light terminal background.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -92,9 +93,37 @@ def from_colorfgbg(value: str) -> Optional[Theme]:
     return LIGHT if bg_code in (7, 15) else DARK
 
 
+# Where the last live-detected theme is remembered across runs, so frame 0
+# (drawn before this run's own OSC 11 reply can possibly be in hand) can
+# guess the terminal you're actually sitting in instead of always DARK --
+# the mismatch is what caused a startup flicker on a light terminal with no
+# COLORFGBG set. Same bare-dotfile convention as viewer.py's own
+# _TIMING_DEFAULT_LOG. Best-effort: any I/O failure just means no smoothing,
+# never a crash.
+_CACHE_PATH = os.path.expanduser("~/.vimol-theme")
+
+
+def read_cached() -> Optional[str]:
+    try:
+        with open(_CACHE_PATH) as fh:
+            val = fh.read().strip()
+    except OSError:
+        return None
+    return val if val in ("dark", "light") else None
+
+
+def write_cached(name: str) -> None:
+    try:
+        with open(_CACHE_PATH, "w") as fh:
+            fh.write(name)
+    except OSError:
+        pass
+
+
 def resolve(explicit: Optional[str], osc11_rgb: Optional[Tuple[int, int, int]],
-            colorfgbg: Optional[str]) -> Theme:
-    """explicit ("dark"/"light") -> OSC 11 background color -> COLORFGBG -> DARK."""
+            colorfgbg: Optional[str], cached: Optional[str] = None) -> Theme:
+    """explicit ("dark"/"light") -> OSC 11 background color -> COLORFGBG ->
+    last live-detected theme (see read_cached) -> DARK."""
     if explicit == "light":
         return LIGHT
     if explicit == "dark":
@@ -104,4 +133,6 @@ def resolve(explicit: Optional[str], osc11_rgb: Optional[Tuple[int, int, int]],
     guess = from_colorfgbg(colorfgbg) if colorfgbg else None
     if guess is not None:
         return guess
+    if cached == "light":
+        return LIGHT
     return DARK

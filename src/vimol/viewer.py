@@ -176,10 +176,14 @@ class Viewer:
         self.editable = editable
         # Frame 0 draws before the startup probe's OSC 11 reply can possibly
         # be in hand (the probe itself runs after the first paint -- see
-        # _finish_startup), so this is a synchronous best guess: COLORFGBG or
-        # DARK. _finish_startup upgrades it once the probe replies.
+        # _finish_startup), so this is a synchronous best guess: COLORFGBG, or
+        # else the last theme a real OSC 11 reply confirmed (most sessions
+        # run in the same terminal repeatedly, so this is usually right and
+        # is what keeps a light terminal from flickering dark-then-light on
+        # every startup), or else DARK. _finish_startup upgrades it once the
+        # probe replies.
         self.theme = theme.resolve(os.environ.get("VIMOL_THEME"), None,
-                                   os.environ.get("COLORFGBG"))
+                                   os.environ.get("COLORFGBG"), theme.read_cached())
         # Set once the user presses ctrl-t: a manual choice outranks a probe
         # reply that lands afterwards (see _apply_probe_theme).
         self._theme_pinned = False
@@ -396,11 +400,16 @@ class Viewer:
         A manual ctrl-t always wins: once the user has stated a preference,
         a probe reply landing afterwards must not yank it back.
         """
-        if self._theme_pinned:
-            return
         resolved = theme.resolve(os.environ.get("VIMOL_THEME"), probe.bg_rgb,
-                                 os.environ.get("COLORFGBG"))
-        if resolved is self.theme:
+                                 os.environ.get("COLORFGBG"), theme.read_cached())
+        # Remember what a REAL OSC 11 answer said, for next run's frame-0
+        # guess (see __init__) -- but only that, not an explicit override or
+        # the COLORFGBG heuristic, which aren't the terminal telling us
+        # anything itself.
+        if probe.bg_rgb is not None and not os.environ.get("VIMOL_THEME"):
+            theme.write_cached(
+                (theme.LIGHT if theme.luminance(probe.bg_rgb) > 140 else theme.DARK).name)
+        if self._theme_pinned or resolved is self.theme:
             return
         self.theme = resolved
         self.widget.theme = resolved.name
