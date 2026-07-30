@@ -16,10 +16,16 @@ without any extra keypresses. Each file may itself contain multiple models
 VIM-9); the overlay defaults to showing the *first* model of each file, with
 every other model still loaded and reachable.
 
-**Out of scope for this change:** `--render`, `--kitty`, and `--info` remain
-single-file only (explicit usage error if given 2+ files); a `--active LABEL`
-flag; anything from VIM-4 (alignment) or VIM-6 (cross-structure measurement)
-beyond what already exists.
+**Also in this change, but unrelated to multi-file loading:** `--render`,
+`--kitty`, and `--info` are removed from the CLI entirely (dead single-file
+batch/embed/inspection flags — see "Removing `--render`/`--kitty`/`--info`"
+below). This makes moot the design doc's §2 note about those flags
+compositing the overlay for 2+ files; there is no longer a flag for that to
+apply to.
+
+**Out of scope for this change:** a `--active LABEL` flag; anything from
+VIM-4 (alignment) or VIM-6 (cross-structure measurement) beyond what already
+exists.
 
 ## CLI surface
 
@@ -28,12 +34,29 @@ beyond what already exists.
 - **Zero files** → today's bundled-C60 fallback, unchanged.
 - **Exactly one file** → the existing code path runs completely unchanged:
   same error behavior (missing file: hard error, exit 2; unparseable file:
-  hard error, exit 3), same handling for `--render`/`--kitty`/`--info`/
-  `--frame`.
-- **2+ files with `--render`, `--kitty`, or `--info`** → immediate usage
-  error, exit 2, before any file is opened: `error: --render/--kitty/--info
-  support one file at a time`.
+  hard error, exit 3), same handling for `--frame`.
 - **2+ files, interactive mode** → the new path below.
+
+## Removing `--render` / `--kitty` / `--info`
+
+Requested independently of the multi-file work, in the same pass since it
+touches the same file. All three are single-file-only batch/inspection
+flags with no multi-file story of their own:
+
+- `--render PNG` (still image to a file) and `--kitty` (one frame to stdout)
+  are deleted, along with the `--size`/`--supersample` flags that existed
+  only to configure them, and the now-dead `_parse_size` helper.
+- `--info` (print structure info and exit) is deleted, along with
+  `_print_info`.
+- `--rotate` and `--frame` are unaffected — both are also used by the
+  interactive path (initial camera orbit, initial active index) and stay.
+- The `Scene.to_png()` / `Scene.to_kitty()` methods themselves, and the
+  `vimol.Scene` library API documented in README's "Library usage" section,
+  are untouched — this only removes the CLI flags, not the underlying
+  capability for library callers (e.g. `examples/embed_demo.py`).
+- README's `vimol protein.pdb --render out.png` example line is removed.
+- The terminal-capability warning's "use --render out.png" suggestion is
+  removed (`VIMOL_FORCE_KITTY=1` remains as the only suggested workaround).
 
 ## Loading 2+ files
 
@@ -93,9 +116,6 @@ A single file with multiple internal models, opened alone, is unaffected:
 
 ## Non-goals / explicit deferrals
 
-- `--render` / `--kitty` compositing the overlay for 2+ files (design §2
-  describes this; deferred to a follow-up).
-- `--info` printing a per-structure block for 2+ files (same).
 - `--active LABEL` (readable multi-file equivalent of `--frame`).
 - Any change to how a *single* multi-model file behaves when opened alone.
 
@@ -116,6 +136,7 @@ A single file with multiple internal models, opened alone, is unaffected:
   path (same non-tty exit-4 guard as above) rather than aborting with an
   error exit code.
 - All files missing/unparseable: exit 3, `error: no molecules parsed`.
-- 2+ files with `--render`/`--kitty`/`--info`: exit 2, clear stderr message,
-  nothing is opened or written.
+- `--render`/`--kitty`/`--info` are no longer recognized flags:
+  `make_parser().parse_args()` rejects them (argparse's own unrecognized-
+  argument error).
 - Single-file behavior (all existing tests) unchanged.
