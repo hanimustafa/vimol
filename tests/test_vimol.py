@@ -210,6 +210,57 @@ def test_viewer_finish_startup_upgrades_theme_from_osc11(monkeypatch):
     assert v.widget.theme == "light"
 
 
+def test_viewer_left_field_text_matches_status_bar_computation():
+    from vimol.viewer import Viewer
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    v = Viewer(mol, fd_out=os.open(os.devnull, os.O_WRONLY))
+    v._update_geometry()
+    assert v._left_field_text() == f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"
+
+
+def test_viewer_y_key_copies_left_field_via_osc52(tmp_path):
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    mol.name = "SCF Energy = -40.5183 Hartree"
+    out = tmp_path / "out.bin"
+    fd = os.open(str(out), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        v._update_geometry()
+        expected_text = v._left_field_text()   # snapshot before 'y' sets self._msg
+        assert v._dispatch([KeyEvent("y")]) is True
+    finally:
+        os.close(fd)
+    data = out.read_bytes()
+    expected_payload = base64.standard_b64encode(expected_text.encode("utf-8"))
+    assert (b"\x1b]52;c;" + expected_payload + b"\x1b\\") in data
+    assert v._msg == "copied"
+
+
+def test_viewer_y_key_copies_full_untruncated_comment_not_display_clipped(tmp_path):
+    """The status bar's visible field is width-clipped; yank must copy the
+    real underlying string regardless of terminal width."""
+    from vimol.viewer import Viewer
+    from vimol.input import KeyEvent
+
+    long_comment = "SCF Energy = -76.123456789012 Hartree, converged in 42 cycles, RMS grad 1e-9"
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    mol.name = long_comment
+    out = tmp_path / "out.bin"
+    fd = os.open(str(out), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, fd_out=fd)
+        v._cols, v._rows = 40, 24   # narrow enough that the display field clips
+        assert v._dispatch([KeyEvent("y")]) is True
+    finally:
+        os.close(fd)
+    data = out.read_bytes()
+    expected_payload = base64.standard_b64encode(f"{long_comment}  {mol.formula()}  {mol.n_atoms} atoms".encode("utf-8"))
+    assert (b"\x1b]52;c;" + expected_payload + b"\x1b\\") in data
+
+
 def test_xyz_roundtrip_and_bonds():
     mol = vimol.load(os.path.join(EX, "benzene.xyz"))
     assert mol.n_atoms == 12

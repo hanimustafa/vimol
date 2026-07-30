@@ -1519,6 +1519,26 @@ class Viewer:
             total += vis_len
         return "".join(parts), total, offsets
 
+    def _left_field_text(self) -> str:
+        """The status bar's left-field text: live measurement readout, a
+        pick refusal, hover atom info, a transient message, or the
+        molecule's name/formula/atom-count summary -- whichever applies,
+        highest-priority first. This is the exact (untruncated) string 'y'
+        yanks and _status_bar (below) clips/pads for display."""
+        mol = self.widget.molecule
+        hov = self.widget.atom_info(self.widget.hovered)
+        # a live measurement readout (2+ picks in measure mode) outranks the
+        # hover text; with 0-1 picks measurement() is "" and the normal
+        # left-segment behavior applies.
+        measure = (editor.measurement(mol, self.widget.measure_sel)
+                   if self.widget.measure_mode else "")
+        # The molecule "name" is the xyz file's comment line, kept in full
+        # (parsers/xyz.py no longer truncates it -- see VIM-15). It gets no
+        # cap of its own here: the left field's DISPLAY width is what bounds
+        # what's drawn, but 'y' yanks this untruncated string regardless.
+        return measure or self.widget.pick_refusal or hov or (self._msg or
+            f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
+
     def _status_bar(self) -> str:
         self._elem_button_span = None
         self._geom_button_span = None
@@ -1539,19 +1559,7 @@ class Viewer:
             fg_r, fg_g, fg_b = self.theme.warn_fg
             return f"\x1b[48;2;{bg_r};{bg_g};{bg_b}m\x1b[38;2;{fg_r};{fg_g};{fg_b}m{body}\x1b[0m"
         mol = self.widget.molecule
-        hov = self.widget.atom_info(self.widget.hovered)
-        # a live measurement readout (2+ picks in measure mode) outranks the
-        # hover text; with 0-1 picks measurement() is "" and the normal
-        # left-segment behavior applies.
-        measure = (editor.measurement(mol, self.widget.measure_sel)
-                   if self.widget.measure_mode else "")
-        # The molecule "name" is the xyz file's comment line (parsers/xyz.py
-        # keeps it at 60 chars, which stays the real ceiling here). It gets
-        # no cap of its own: the left field's width below is what bounds it,
-        # so a wide terminal actually shows the comment instead of clipping
-        # it to a stub while the middle of the bar sits empty.
-        raw_left = measure or self.widget.pick_refusal or hov or (self._msg or
-            f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
+        raw_left = self._left_field_text()
         rep = self.style.representation
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
@@ -1832,6 +1840,9 @@ class Viewer:
                 self._push_pointer("cell")               # precision plus-cross
             else:
                 self._pop_pointer()
+        elif key == "y":
+            kitty.write_bytes(kitty.osc52_copy(self._left_field_text()), self.fd_out)
+            self._msg = "copied"
         elif key == "x" and self.editable:
             self.widget.set_delete_mode(not self.widget.delete_mode)
             self._msg = ""
