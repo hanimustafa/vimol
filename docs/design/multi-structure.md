@@ -726,12 +726,23 @@ Both changes are additive and default to today's behaviour when `flat_mask` is
   - `("geometry", symbols, positions, bonds, manual_bonds, new_atoms)` — today's
     snapshot tuple
   - `("transform", old_transform, old_alignment)` — pushed by `align`
+
+  > **Not implemented yet.** `align`/`align_to_reference_subset` do push the
+  > `("transform", …)` entry onto `Structure.undo_stack`, but nothing reads that
+  > stack: `u` still runs `MoleculeWidget._undo`, which restores geometry on the
+  > active molecule only. An alignment currently cannot be undone.
 - `dirty` / `saved_sig` move onto `Structure`. The status bar shows
   `[MODIFIED]` for the active entry; the quit-confirm prompt fires if **any**
   entry is dirty and names them.
 - An edit after an alignment sets `entry.alignment.stale = True`. The transform
   stays valid (it is rigid); only the reported RMSD is out of date, and the
   status bar shows `RMSD 0.42 (stale)`.
+
+  > **Partly implemented.** `AlignmentResult.stale` still exists but no code
+  > path sets it, so `entry.alignment` itself carries no warning. The viewer's
+  > saved `⊂RMSD` columns *do* track it: each stores the reference's
+  > `revision` at pick time, renders `⊂RMSD #selectN*` once that revision
+  > moves, and disarms rather than recalculating on shifted atom indices.
 - **Save writes source coordinates**, not transformed ones — an alignment is a
   viewing aid, and round-tripping a file through vimol should not silently
   move it. `save(..., apply_transform=True)` bakes it in; the save prompt gains

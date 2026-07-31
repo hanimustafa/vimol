@@ -26,6 +26,27 @@ zoom, hover an atom to identify it, `m` to measure distances/angles/dihedrals
 comparison table next to the structure list, evaluated for every loaded
 structure at once; move on to a different measurement (or a different frame)
 and it locks in as its own column (click a column's `×` to remove it).
+With an overlay up, `r` rigidly aligns every tinted structure onto the
+untinted main one and reports each RMSD (`r` and `R` only align in overlay
+mode, and say so otherwise). To fit on part of a structure instead, press `R`
+and click atoms on the main structure (or option-click an atom to jump
+straight into picking without `R`), then `Enter` or `r`. vimol finds the
+matching element-compatible subset in each tinted molecule and aligns the
+whole molecule from that fit (`Esc` cancels). Picking works before an overlay
+exists too — select atoms, `opt+click` a row to overlay it, then `r`.
+The fit stays beside the structure list as a `⊂RMSD #select1` column: hover
+its header to see which atoms it uses, click it to arm that selection again
+(clicking a second time disarms it), and press `R` to recalculate the same
+column — `×` removes it. Editing the main frame marks a saved column `*` and
+disarms it, since its numbers no longer describe the geometry on screen.
+Below the structure list, click the highlighted `select` hint (or press
+`Shift+S`) for the **Backbone** and **Backbone + Cβ** presets, or **Manual**
+to keep clicking atoms yourself. Presets act on the untinted main frame only:
+PDB `ATOM` names are used directly, other formats fall back to a bond-graph
+`N–Cα–C(–O)` motif detector. Two PDB structures that share residue/atom
+identity skip the search and fit directly. `pip install vimol[align]` adds
+scipy, which speeds up the permutation search; without it a numpy fallback is
+used.
 Editing is on by default: `a` to append (grow fragments, swap elements — the
 status-bar pills pick the element and geometry), option-drag to draw bonds,
 `x` to delete, `c` to relax clashes, `u` to undo, `s` to save. `?` lists

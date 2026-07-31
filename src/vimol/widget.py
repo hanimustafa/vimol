@@ -65,6 +65,8 @@ class MoleculeWidget:
         self.delete_mode = False                # 'x': click to remove atoms
         self.measure_mode = False               # 'm': click to build a measurement pick list
         self.measure_sel: list = []             # ordered atom indices picked in measure mode
+        self.align_mode = False                 # 'R': pick reference atoms, Enter to align
+        self.align_sel: list = []               # active/reference-local atom indices
         # set by _guarded_pick when an append/delete/measure click resolves to
         # a non-active structure (design §3, §12.3); a host status bar can
         # show it. None whenever the last guarded pick was not refused.
@@ -79,6 +81,7 @@ class MoleculeWidget:
         # and the widget's own rubber-band preview VectorField, if installed.
         self._bond_anchor: Optional[int] = None
         self._bond_field: Optional[VectorField] = None
+        self._bond_drag_distance2 = 0.0
         # in-flight cleanup animation ('c'): the editor's RelaxState (None
         # when idle) and how many frames it may still run before finishing.
         self._cleanup_state = None
@@ -128,6 +131,8 @@ class MoleculeWidget:
         self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
         self.measure_sel = []                   # stale indices into the old molecule
+        self.align_sel = []
+        self.align_mode = False
         self.pick_refusal = None
         self._undo_stack.clear()
         self._saved_sig = self._signature()
@@ -216,15 +221,26 @@ class MoleculeWidget:
             if self._bond_anchor is not None:
                 self._cancel_bond_gesture()
             if ev.button == 0 and ev.alt and self.editable:
-                idx = self._active_local_pick(x, y)
+                # The option gesture acts on the active structure, so it must
+                # see the active structure: a composite pick would let a
+                # tinted overlay atom in front intercept the press and lose
+                # both the bond anchor and the subset-pick shortcut.
+                idx = self._pick_active_only(x, y)
                 if idx is not None:
                     # Start a bond gesture -- and deliberately do NOT set
                     # _drag_button, so the drag branch below won't rotate the
                     # camera while the gesture is live.
                     self._bond_anchor = idx
+                    self._press = (x, y)
+                    self._bond_drag_distance2 = 0.0
                     self._start_bond_preview(idx)
                     return False
                 # alt+down over empty space: fall through to a normal press.
+            elif ev.button == 0 and ev.alt:
+                # Option-click is the always-available shortcut into subset
+                # picking. Preserve a loaded named selection so the click
+                # edits a live copy rather than starting from nothing.
+                self.set_alignment_mode(True, preserve=True)
             self._drag_button = ev.button
             self._drag_shift = ev.shift
             self._last = (x, y)
@@ -254,9 +270,18 @@ class MoleculeWidget:
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
                     return self._measure_click(x, y)
+            elif self.align_mode and was_left and not ev.shift:
+                dx = x - self._press[0]
+                dy = y - self._press[1]
+                if dx * dx + dy * dy <= 9.0:
+                    return self._alignment_click(x, y)
             return False
         if ev.action == "drag":
             if self._bond_anchor is not None:
+                dx = x - self._press[0]
+                dy = y - self._press[1]
+                self._bond_drag_distance2 = max(
+                    self._bond_drag_distance2, dx * dx + dy * dy)
                 self._update_bond_preview(x, y)
                 return True
             if self._drag_button is not None:
@@ -322,6 +347,7 @@ class MoleculeWidget:
         if self.append_mode:
             self.delete_mode = False            # one active build tool at a time
             self.set_measure_mode(False)
+            self.set_alignment_mode(False)
 
     def set_delete_mode(self, on: bool) -> None:
         # delete mode is meaningless (and stays off) unless editing is enabled
@@ -329,6 +355,7 @@ class MoleculeWidget:
         if self.delete_mode:
             self.append_mode = False            # one active build tool at a time
             self.set_measure_mode(False)
+            self.set_alignment_mode(False)
 
     def set_measure_mode(self, on: bool) -> None:
         # unlike append/delete, measuring is non-destructive -- no editable gate.
@@ -336,8 +363,24 @@ class MoleculeWidget:
         if self.measure_mode:
             self.append_mode = False            # one active tool at a time
             self.delete_mode = False
+            self.set_alignment_mode(False)
         else:
             self.measure_sel = []               # disarming always clears the pick list
+
+    def set_alignment_mode(self, on: bool, preserve: bool = False) -> None:
+        """Arm/disarm reference-atom picking for the interactive subset fit."""
+        self.align_mode = bool(on)
+        if self.align_mode:
+            self.append_mode = False
+            self.delete_mode = False
+            # Do not call set_measure_mode(False) here: that calls back into
+            # this method when measure mode is on.
+            self.measure_mode = False
+            self.measure_sel = []
+            if not preserve:
+                self.align_sel = []
+        else:
+            self.align_sel = []
 
     # -- undo / dirty tracking -------------------------------------------
     def _signature(self):
@@ -356,7 +399,9 @@ class MoleculeWidget:
     def _snapshot(self):
         mol = self.scene.molecule
         return (list(mol.symbols), mol.positions.copy(), list(mol.bonds),
-                list(mol.manual_bonds), set(mol.new_atoms))
+                list(mol.manual_bonds), set(mol.new_atoms),
+                list(mol.atom_names), list(mol.atom_is_hetatm),
+                list(mol.atom_keys))
 
     def _commit_undo(self, snapshot) -> None:
         self._undo_stack.append(snapshot)
@@ -378,7 +423,8 @@ class MoleculeWidget:
         if self._bond_anchor is not None:
             self._cancel_bond_gesture()
         self._cleanup_state = None
-        symbols, positions, bonds, manual_bonds, new_atoms = self._undo_stack.pop()
+        (symbols, positions, bonds, manual_bonds, new_atoms,
+         atom_names, atom_is_hetatm, atom_keys) = self._undo_stack.pop()
         mol = self.scene.molecule
         # restore in place so the Scene keeps referencing the same object
         mol.symbols = list(symbols)
@@ -386,6 +432,9 @@ class MoleculeWidget:
         mol.bonds = list(bonds)
         mol.manual_bonds = list(manual_bonds)
         mol.new_atoms = set(new_atoms)
+        mol.atom_names = list(atom_names)
+        mol.atom_is_hetatm = list(atom_is_hetatm)
+        mol.atom_keys = list(atom_keys)
         self._touch_active()
         self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
@@ -493,6 +542,21 @@ class MoleculeWidget:
             self.measure_sel = self.measure_sel + [idx]
         return True
 
+    def _alignment_click(self, px: float, py: float) -> bool:
+        """Toggle one reference atom, looking through every tinted overlay."""
+        idx = self._pick_active_only(px, py)
+        if idx is None:
+            if self.align_sel:
+                self.align_sel = []
+                self.selected = None
+                return True
+            return False
+        if idx in self.align_sel:
+            self.align_sel = [i for i in self.align_sel if i != idx]
+        else:
+            self.align_sel = self.align_sel + [idx]
+        return True
+
     # -- manual-bond gesture (option/alt-drag) -----------------------------
     def _start_bond_preview(self, anchor: int) -> None:
         """Install the widget's own rubber-band preview field at gesture start."""
@@ -512,6 +576,7 @@ class MoleculeWidget:
         """Abort an in-flight bond gesture: drop the preview, clear the anchor."""
         self._remove_bond_preview()
         self._bond_anchor = None
+        self._bond_drag_distance2 = 0.0
 
     def _remove_bond_preview(self) -> None:
         """Drop exactly the widget's own preview field; never touch user fields.
@@ -530,12 +595,17 @@ class MoleculeWidget:
             self._bond_field = None
 
     def _end_bond_gesture(self, px: float, py: float) -> bool:
-        """Finish an option/alt-drag: bond the release atom to the anchor, or cancel."""
+        """Finish an option gesture: click selects; drag bonds two atoms."""
         mol = self.scene.molecule
         anchor = self._bond_anchor
         self._remove_bond_preview()
         self._bond_anchor = None
-        target = self._active_local_pick(px, py)
+        target = self._pick_active_only(px, py)
+        if target == anchor and self._bond_drag_distance2 <= 9.0:
+            self.set_alignment_mode(True, preserve=True)
+            self._bond_drag_distance2 = 0.0
+            return self._alignment_click(px, py)
+        self._bond_drag_distance2 = 0.0
         if target is not None and target != anchor:
             snapshot = self._snapshot()          # taken before mutating
             if editor.add_manual_bond(mol, anchor, target):
@@ -656,6 +726,33 @@ class MoleculeWidget:
         entry_idx, local = self.scene.structures.composite().locate(idx)
         return local if entry_idx == self.scene.structures.active_index else None
 
+    def _pick_active_only(self, px: float, py: float) -> Optional[int]:
+        """Pick the active/untinted structure as if tinted overlays were absent.
+
+        Subset alignment explicitly asks the user to pick the main frame.  A
+        normal composite pick would let a closer tinted atom intercept that
+        click, making a well-overlaid pair paradoxically harder to select.
+        """
+        entry = self.scene.structures.active
+        mol = entry.molecule
+        # Bypassing the composite also bypasses its visibility filter. A
+        # hidden active structure has no row in composite.sources, so any
+        # index picked here would crash _apply_highlight's globalize().
+        if mol.n_atoms == 0 or not entry.visible:
+            return None
+        positions = entry.transform.apply(mol.positions)
+        cam = self.scene.camera
+        Wr, Hr = self.scene.render_size
+        rx = px * (Wr / max(self.scene.width, 1))
+        ry = py * (Hr / max(self.scene.height, 1))
+        v = cam.view_positions(positions)
+        sx = Wr * 0.5 + cam.pan[0] + v[:, 0] * cam.zoom
+        sy = Hr * 0.5 - cam.pan[1] - v[:, 1] * cam.zoom
+        radii = np.maximum(_atom_radii(mol, self.style) * cam.zoom, 1.0)
+        d2 = (rx - sx) ** 2 + (ry - sy) ** 2
+        idx = np.flatnonzero(d2 <= radii * radii)
+        return None if not len(idx) else int(idx[np.argmax(v[idx, 2])])
+
     def _guarded_pick(self, px: float, py: float) -> Optional[int]:
         """pick(), converted to an active-local index for an EDIT ACTION
         (append/delete/measure click). Unlike :meth:`_active_local_pick`,
@@ -693,7 +790,8 @@ class MoleculeWidget:
         themed = elements.themed_base_colors(composite.molecule.symbols,
                                              composite.base_colors, self.theme)
         hi = self.hovered if self.hovered is not None else self.selected
-        if hi is None and not self.measure_sel:
+        align_sel = getattr(self, "align_sel", ())
+        if hi is None and not self.measure_sel and not align_sel:
             # themed is a no-op passthrough for "dark", so this stays
             # byte-identical to pre-theme rendering in the dark case.
             self.style.color_override = themed if self.theme == "light" else None
@@ -717,6 +815,11 @@ class MoleculeWidget:
             g_sel = composite.globalize(active_index, np.asarray(self.measure_sel, dtype=np.int64))
             for gidx in g_sel:
                 cols[gidx] = np.clip(cols[gidx] * 0.4 + yellow * 0.9, 0, 1)
+        if align_sel:
+            cyan = np.array([0.15, 1.0, 0.95])
+            g_sel = composite.globalize(active_index, np.asarray(align_sel, dtype=np.int64))
+            for gidx in g_sel:
+                cols[gidx] = np.clip(cols[gidx] * 0.25 + cyan * 0.95, 0, 1)
         if hi is not None:
             # brighten + tint the highlighted atom: red in delete mode (a preview of
             # "this disappears if you click here"), yellow otherwise.

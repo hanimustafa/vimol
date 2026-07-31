@@ -42,6 +42,7 @@ class Molecule:
     positions: (N, 3) float array, angstrom
     bonds:     list of (i, j, order) tuples, i < j
     name:      free-form label
+    atom_names / atom_keys: optional atom-aligned PDB identity metadata
     """
 
     symbols: List[str] = field(default_factory=list)
@@ -58,11 +59,22 @@ class Molecule:
     # atom it creates; `editor.cleanup` reads this to weight its relaxation
     # and clears it once the geometry is "accepted".
     new_atoms: Set[int] = field(default_factory=set)
+    # Optional PDB metadata, atom-aligned when present. Other formats leave
+    # these empty because element + coordinates cannot identify CA/CB roles.
+    atom_names: List[str] = field(default_factory=list)
+    atom_is_hetatm: List[bool] = field(default_factory=list)
+    atom_keys: List[str] = field(default_factory=list)
 
     # -- construction -----------------------------------------------------
     def add_atom(self, symbol: str, x: float, y: float, z: float) -> int:
         idx = len(self.symbols)
         self.symbols.append(elements.normalize_symbol(symbol))
+        if self.atom_names:
+            self.atom_names.append("")
+        if self.atom_is_hetatm:
+            self.atom_is_hetatm.append(False)
+        if self.atom_keys:
+            self.atom_keys.append("")
         self.positions = np.vstack([self.positions, [x, y, z]]) if len(self.positions) else np.array([[x, y, z]], float)
         return idx
 

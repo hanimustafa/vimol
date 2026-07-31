@@ -2309,15 +2309,13 @@ def test_viewer_list_focused_space_no_longer_changes_overlay_membership(tmp_path
         os.close(fd)
 
 
-def test_viewer_list_legend_is_three_rows_and_matches_the_reserved_footer(tmp_path):
-    """The legend lost its 'space mark' row, so the footer height reserved by
-    _LIST_ROWS_BELOW (separator + legend) has to shrink with it -- otherwise
-    _list_capacity() lies about what fits and the scroll clamps drift."""
+def test_viewer_list_legend_rows_match_the_reserved_footer(tmp_path):
+    """Footer reservation equals separator + all legend/hint rows."""
     from vimol.viewer import _LIST_ROWS_BELOW
 
     v, fd = _multi_viewer(tmp_path)
     try:
-        assert len(v._list_legend()) == 3
+        assert len(v._list_legend()) == 4
         assert _LIST_ROWS_BELOW == 1 + len(v._list_legend())
     finally:
         os.close(fd)
@@ -2628,5 +2626,155 @@ def test_viewer_plain_arrows_always_orbit_even_while_list_focused(tmp_path):
         assert v._list_cursor == 1
         assert v._dispatch([KeyEvent("k")]) is True
         assert v._list_cursor == 0
+    finally:
+        os.close(fd)
+
+
+# -- subset-alignment fixes (review 2026-07-31) --------------------------
+
+def _overlay_viewer(tmp_path, **kw):
+    """A three-structure overlay with editing on, ready for align tests."""
+    v, fd = _multi_viewer(tmp_path, editable=True, **kw)
+    v.structures.overlay = True
+    return v, fd
+
+
+def test_subset_column_disarms_when_the_reference_geometry_changes(tmp_path):
+    """A saved column's atom indices belong to the revision they were picked
+    at. Editing the reference shifts them, so an armed column must not stay
+    armed and silently re-fit on whatever atoms now occupy those indices."""
+    from vimol import editor
+
+    v, fd = _overlay_viewer(tmp_path)
+    try:
+        v._finish_subset_alignment((0, 1, 2))
+        column = v._rmsd_columns[0]
+        v._activate_subset_column(0)
+        assert v._selected_subset_column() is column
+
+        entry = v.structures.active
+        editor.delete_atom(entry.molecule, 4)
+        entry.touch()
+
+        assert v._selected_subset_column() is None
+        assert v.widget.align_sel == []
+        assert "#select1" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_subset_column_header_marks_itself_stale_after_an_edit(tmp_path):
+    """The numbers stay on screen (they were true once) but must not read as
+    current -- otherwise a stale RMSD is indistinguishable from a fresh one."""
+    from vimol import editor
+
+    v, fd = _overlay_viewer(tmp_path)
+    try:
+        v._finish_subset_alignment((0, 1, 2))
+        v._list_w = 40
+        assert "⊂RMSD #select1*" not in v._draw_list().decode("utf-8", "replace")
+
+        entry = v.structures.active
+        editor.delete_atom(entry.molecule, 4)
+        entry.touch()
+
+        assert "⊂RMSD #select1*" in v._draw_list().decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def test_option_click_arms_alignment_through_an_overlaid_atom(tmp_path):
+    """_pick_active_only exists so a tinted overlay atom cannot intercept a
+    subset pick. The option-click that ARMS picking has to use it too."""
+    from vimol.input import MouseEvent
+
+    v, fd = _overlay_viewer(tmp_path)
+    try:
+        active = v.structures[0].molecule
+        other = v.structures[1].molecule
+        # One active atom far from the camera, one overlay atom in front of
+        # it at the same screen position; everything else off to the side.
+        active.positions = np.array([[0.0, 0.0, -5.0]] + [[50.0, 0.0, 0.0]] * (active.n_atoms - 1))
+        other.positions = np.array([[0.0, 0.0, 5.0]] + [[50.0, 0.0, 0.0]] * (other.n_atoms - 1))
+        v.structures[0].marked = v.structures[1].marked = True
+        for e in v.structures.entries:
+            e.touch()
+        v.structures.invalidate()
+        v.widget.refresh_active()
+
+        w = v.widget
+        x, y = _atom_px_in_viewer(v, 0)
+        lx, ly = w._local_px(MouseEvent("down", x, y, pixel=True), v._img_origin_px)
+        assert w._active_local_pick(lx, ly) is None    # overlay wins the composite pick
+        assert w._pick_active_only(lx, ly) == 0        # ... but the active atom is there
+
+        v._dispatch([MouseEvent("down", x, y, button=0, alt=True, pixel=True)])
+        v._dispatch([MouseEvent("up", x, y, button=0, alt=True, pixel=True)])
+        assert w.align_mode is True
+        assert w.align_sel == [0]
+    finally:
+        os.close(fd)
+
+
+def test_enter_without_an_overlay_keeps_the_pick_instead_of_saving_a_column(tmp_path):
+    """Picking before an overlay exists is deliberate (opt+click a row, then
+    r). Enter must not turn that into a column of dashes -- at one loaded
+    structure _measure_layout never draws it, so it could not be removed."""
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path, editable=True)
+    try:
+        v.structures.overlay = False
+        v.widget.set_alignment_mode(True)
+        v.widget.align_sel = [0, 1, 2]
+        assert v._dispatch([KeyEvent("enter")]) is True
+
+        assert v._rmsd_columns == []            # nothing saved ...
+        assert v.widget.align_sel == [0, 1, 2]  # ... and the pick survives
+        assert v.widget.align_mode is True
+        assert "overlay" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_r_outside_overlay_says_why_nothing_happened(tmp_path):
+    """'r' used to reset the camera; it is now an overlay-only align key and
+    reaches the widget no more. Silence reads as a broken keybinding."""
+    from vimol.input import KeyEvent
+
+    v, fd = _multi_viewer(tmp_path, editable=True)
+    try:
+        v.structures.overlay = False
+        v._msg = ""
+        v._dispatch([KeyEvent("r")])
+        assert "overlay" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_alignment_pick_ignores_a_hidden_active_structure(tmp_path):
+    """_pick_active_only bypasses the composite on purpose, so it also
+    bypasses visibility. Picking an atom that is not drawn arms a selection
+    _apply_highlight cannot globalize -- composite.sources has no row for a
+    hidden active structure, and colouring it raises IndexError."""
+    from vimol.input import MouseEvent
+
+    v, fd = _overlay_viewer(tmp_path)
+    try:
+        for e in v.structures.entries:
+            e.marked = True
+        v.structures.active.visible = False
+        v.structures.invalidate()
+        assert v.structures.active_index not in v.structures.drawn_indices()
+
+        w = v.widget
+        cx, cy = w.scene.width * 0.5, w.scene.height * 0.5
+        assert w._pick_active_only(cx, cy) is None
+
+        w.set_alignment_mode(True)
+        v._dispatch([MouseEvent("down", cx, cy, button=0, alt=True, pixel=True)])
+        v._dispatch([MouseEvent("up", cx, cy, button=0, alt=True, pixel=True)])
+        assert w.align_sel == []
+        w._apply_highlight()          # must not raise
     finally:
         os.close(fd)

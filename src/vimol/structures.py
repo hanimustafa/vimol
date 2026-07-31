@@ -5,6 +5,7 @@ index. See ``docs/design/multi-structure.md`` for the full design.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import Counter
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -261,6 +262,106 @@ class StructureSet:
             else:
                 out.append((e.label, editor.measure_value(e.molecule, indices)))
         return out
+
+    # -- rigid alignment ---------------------------------------------------
+    def align(self, mobile, onto=None, **kwargs) -> AlignmentResult:
+        """Align one entry onto another and install its display transform.
+
+        ``mobile`` and ``onto`` accept either entry indices or labels.  The
+        numerical work lives in :mod:`vimol.align`; this method records the
+        result and invalidates the flattened render cache.
+        """
+        from .align import superpose
+
+        mobile_i = self._index_of_label(mobile) if isinstance(mobile, str) else int(mobile)
+        if onto is None:
+            onto_i = self.active_index
+        else:
+            onto_i = self._index_of_label(onto) if isinstance(onto, str) else int(onto)
+        if mobile_i == onto_i:
+            raise ValueError("mobile and reference must be different structures")
+        entry = self.entries[mobile_i]
+        reference = self.entries[onto_i]
+        result = superpose(entry.molecule, reference.molecule, **kwargs)
+        result.ref_label = reference.label
+        entry.undo_stack.append(("transform", entry.transform, entry.alignment))
+        if len(entry.undo_stack) > 200:
+            entry.undo_stack.pop(0)
+        # Alignment is solved in each file's source coordinates, while the
+        # active reference may itself be displayed through an older transform.
+        # Compose with that visible frame so the mobile lands on what the user
+        # actually sees, not on the reference's hidden raw coordinates.
+        result.transform = reference.transform.compose(result.transform)
+        entry.transform = result.transform
+        entry.alignment = result
+        self.invalidate()
+        return result
+
+    def align_to_reference_subset(self, mobile, onto=None, ref_select=None,
+                                  **kwargs) -> AlignmentResult:
+        """Find mobile atoms matching picked reference atoms, then align."""
+        from .align import (superpose, superpose_to_reference_subset,
+                            _topology_subset_indices, _largest_topology_subset)
+
+        mobile_i = self._index_of_label(mobile) if isinstance(mobile, str) else int(mobile)
+        onto_i = (self.active_index if onto is None else
+                  self._index_of_label(onto) if isinstance(onto, str) else int(onto))
+        if mobile_i == onto_i:
+            raise ValueError("mobile and reference must be different structures")
+        entry = self.entries[mobile_i]
+        reference = self.entries[onto_i]
+        ref_indices = np.asarray(ref_select, dtype=np.int64)
+        mobile_keys = entry.molecule.atom_keys
+        reference_keys = reference.molecule.atom_keys
+        keyed = (len(mobile_keys) == entry.molecule.n_atoms
+                 and len(reference_keys) == reference.molecule.n_atoms)
+        mobile_indices = None
+        if keyed:
+            key_to_mobile = {}
+            duplicates = set()
+            for i, key in enumerate(mobile_keys):
+                if key in key_to_mobile:
+                    duplicates.add(key)
+                else:
+                    key_to_mobile[key] = i
+            selected_keys = [reference_keys[i] for i in ref_indices]
+            pairs = [(key_to_mobile[key], ref_i)
+                     for key, ref_i in zip(selected_keys, ref_indices)
+                     if key not in duplicates and key in key_to_mobile]
+            # A complete 1- or 2-atom explicit pick is intentional and Kabsch
+            # supports it. A *partial* identity overlap needs at least three
+            # points to define a useful rigid fit; otherwise try topology.
+            if len(pairs) == len(ref_indices) or len(pairs) >= 3:
+                mobile_indices = np.asarray([pair[0] for pair in pairs], dtype=np.int64)
+                ref_indices = np.asarray([pair[1] for pair in pairs], dtype=np.int64)
+        if mobile_indices is None:
+            mobile_indices = _topology_subset_indices(
+                entry.molecule, reference.molecule, ref_indices)
+        if mobile_indices is None:
+            needed = Counter(reference.molecule.symbols[int(i)] for i in ref_indices)
+            available = Counter(entry.molecule.symbols)
+            if any(count > available[element] for element, count in needed.items()):
+                partial = _largest_topology_subset(
+                    entry.molecule, reference.molecule, ref_indices)
+                if partial is not None:
+                    mobile_indices, ref_indices = partial
+        if mobile_indices is not None:
+            # Named identity or connected bond-graph correspondence: both are
+            # O(n) setup plus one tiny Kabsch fit.
+            result = superpose(entry.molecule, reference.molecule,
+                               select=mobile_indices, ref_select=ref_indices)
+        else:
+            result = superpose_to_reference_subset(
+                entry.molecule, reference.molecule, ref_indices, **kwargs)
+        result.ref_label = reference.label
+        entry.undo_stack.append(("transform", entry.transform, entry.alignment))
+        if len(entry.undo_stack) > 200:
+            entry.undo_stack.pop(0)
+        result.transform = reference.transform.compose(result.transform)
+        entry.transform = result.transform
+        entry.alignment = result
+        self.invalidate()
+        return result
 
     # -- what the composite draws -------------------------------------------
     def drawn_indices(self) -> List[int]:

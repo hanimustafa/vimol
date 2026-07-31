@@ -62,6 +62,15 @@ def parse(text: str) -> List[Molecule]:
             el = _guess_element(atom_name, col_el)
             idx = len(cur.symbols)
             cur.symbols.append(el)
+            cur.atom_names.append(atom_name.strip().upper())
+            cur.atom_is_hetatm.append(rec == "HETATM")
+            chain = line[21:22].strip()
+            residue_number = line[22:26].strip()
+            insertion = line[26:27].strip()
+            alternate = line[16:17].strip()
+            cur.atom_keys.append(
+                "|".join((rec, chain, residue_number, insertion,
+                          atom_name.strip().upper(), alternate)))
             serial_to_index[serial] = idx
             cur.positions = (
                 np.vstack([cur.positions, [x, y, z]]) if len(cur.positions) else np.array([[x, y, z]], float)

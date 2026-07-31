@@ -32,6 +32,9 @@ from . import kitty
 from . import elements
 from . import templates
 from . import editor
+from . import select
+from .structures import StructureSet, Structure, Transform, AlignmentResult
+from .align import kabsch, superpose, permutation_search, subset_search
 
 __version__ = "0.1.2"
 
@@ -39,7 +42,9 @@ __all__ = [
     "Molecule", "VectorField", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
     "InputDecoder", "MouseEvent", "KeyEvent", "enable_mouse", "disable_mouse",
     "load", "load_all", "loads", "save", "SUPPORTED_EXTENSIONS", "SAVE_EXTENSIONS",
-    "perceive_bonds", "ensure_bonds", "kitty", "elements", "templates", "editor",
+    "perceive_bonds", "ensure_bonds", "kitty", "elements", "templates", "editor", "select",
+    "StructureSet", "Structure", "Transform", "AlignmentResult", "kabsch",
+    "superpose", "permutation_search", "subset_search",
     "view", "__version__",
 ]
 

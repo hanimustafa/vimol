@@ -13,6 +13,8 @@ import os
 import re
 import select
 import time
+from collections import Counter
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from .molecule import Molecule
@@ -26,6 +28,7 @@ from . import input as _input
 from . import elements
 from . import templates
 from . import periodic_table
+from . import select as atom_selection
 from . import theme
 
 # ANSI / terminal control -------------------------------------------------
@@ -51,6 +54,8 @@ _IMAGE_Z_INDEX = -1_200_000_000
 _STATUS_ZONE_ROWS = 4
 # Footer hint shown inside the geometry picker (also sizes its minimum width).
 _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
+_SELECTION_OPTIONS = ("Manual", "Backbone", "Backbone + Cβ")
+_SELECTION_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 # Fallback visible width of the status bar's left-hand (hover/molecule-info)
 # field, used ONLY before the terminal size is known (_cols == 0, i.e. before
 # the first _update_geometry). Once it is known the field is sized
@@ -69,12 +74,33 @@ _LIST_W_MAX = 28
 # the viewport to nothing or negative.
 _MEASURE_MIN_VIEWPORT_COLS = 20
 
+
+@dataclass
+class _SubsetRMSDColumn:
+    """One persistent subset fit shown beside the structure list.
+
+    ``indices`` are raw positions into the reference molecule, so they only
+    mean anything at the revision they were picked at -- ``reference_revision``
+    is what lets a later edit be noticed instead of silently re-fitting on
+    whatever atoms have shifted into those slots (design §5, "stale").
+    """
+    select_id: int
+    reference_index: int
+    reference_revision: int
+    indices: Tuple[int, ...]
+    labels: Tuple[str, ...]
+    values: List[Optional[float]]
+
+    @property
+    def header(self) -> str:
+        return f"⊂RMSD #select{self.select_id}"
+
 # Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
 # separator plus footer lines below. _list_capacity() derives what fits from
 # these, and _draw_list lays the panel out to match.
 _LIST_ROWS_ABOVE = 2                # header + a blank row
-_LIST_ROWS_BELOW = 4                # separator + the three legend lines
+_LIST_ROWS_BELOW = 5                # separator + the four legend/hint lines
 _LIST_WHEEL_STEP = 3                # display rows per mouse-wheel notch
 
 _HELP_HEAD = [
@@ -107,7 +133,11 @@ _HELP_TAIL = [
     "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
     "  ctrl-t ............. light/dark theme",
-    "  f / r / z .......... re-fit / reset    ? .................. toggle help",
+    "  f / z .............. re-fit / reset    ? .................. toggle help",
+    "  overlay: r .......... align all         R ... pick reference atoms, Enter",
+    "     Shift+S / click select ... Backbone or Backbone + Cβ preset",
+    "     option-click atom ........ additive manual subset selection",
+    "     ⊂RMSD column: hover atoms · click arm selection · R recalculate",
     "  q / Esc ............ quit",
 ]
 
@@ -117,7 +147,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "\x03", "\x14",
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "r", "R", "S", "\x03", "\x14",
                       "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
@@ -238,7 +268,8 @@ class Viewer:
         self._running = False
         self._show_help = False
         # modal state: "normal" | "save_input" | "save_confirm" |
-        # "quit_confirm" | "periodic_table" | "geometry_picker"
+        # "quit_confirm" | "periodic_table" | "geometry_picker" |
+        # "selection_picker"
         self._mode = "normal"
         self._quit_after_save = False    # ESC-quit routed through the save prompt
         self._input_buf = ""
@@ -252,6 +283,8 @@ class Viewer:
         # geometry/hybridization picker: the options list and cursor index
         self._geom_opts: List = []
         self._geom_idx = 0
+        self._selection_menu_idx = 0
+        self._select_hint_span = None
         # True from a mouse-down that landed in the status-bar zone (see
         # _in_status_zone) until the matching up -- keeps a drag that started
         # on the status bar from ever reaching the 3D viewport, even if the
@@ -355,15 +388,22 @@ class Viewer:
         # _measure_header_spans is the click hit-test for each FROZEN
         # column's × (the live column has none -- nothing to remove yet).
         self._measure_columns: List[Tuple[str, Tuple[int, ...]]] = []
+        self._rmsd_columns: List[_SubsetRMSDColumn] = []
+        self._next_subset_id = 1
+        self._active_subset_id: Optional[int] = None
+        self._subset_hover_tip = ""
         self._measure_w = 0
         self._measure_header_spans: List[Tuple[int, int, int, int]] = []
+        self._subset_header_spans: List[Tuple[int, int, int, int]] = []
+        self._subset_remove_spans: List[Tuple[int, int, int, int]] = []
+        self._measure_layout_sources: List[Tuple[str, int]] = []
         # (key, layout) memo for _measure_layout -- it's recomputed every
         # _update_geometry tick (see there) plus once per _draw_list, and
         # its body calls StructureSet.measure() per column, each of which
         # walks every entry's full symbol list. Unchanged inputs must not
         # pay that cost dozens of times a second at idle with a column
         # pinned; the key covers everything the body reads.
-        self._measure_layout_cache: Optional[Tuple[tuple, List[Tuple[str, int, List[str], bool]]]] = None
+        self._measure_layout_cache = None
         # Set whenever _measure_columns changes outside of _update_geometry's
         # own polling (i.e. by _refresh_measure_w) so the NEXT _update_geometry
         # call still recomputes image size/origin and triggers a full clear --
@@ -786,10 +826,13 @@ class Viewer:
         narrowest strip (_LIST_W_MIN); wider strips just leave more air."""
         muted = self._sgr_fg(self.theme.list_muted_fg)
         cap = self._list_cap
+        select_style = (self._sgr_bg(self.theme.list_cap_bg)
+                        + self._sgr_fg(self.theme.list_label_fg) + "\x1b[1m")
         return [
             [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
             [(" ", ""), cap("n"), cap("p"), (" next/prev", muted)],
             [(" ", ""), cap("z"), (" solo ", muted), cap("h"), (" hide", muted)],
+            [(" Shft+S to ", muted), ("select", select_style)],
         ]
 
     def _draw_list(self) -> bytes:
@@ -812,6 +855,9 @@ class Viewer:
         self._list_row_spans = []
         self._list_row_struct = []
         self._measure_header_spans = []
+        self._subset_header_spans = []
+        self._subset_remove_spans = []
+        self._select_hint_span = None
         layout = self._measure_layout(list_w)
         total_w = list_w + self._layout_width(layout)
         max_row = max(self._rows - 1, 0)   # never draw over the status bar
@@ -870,6 +916,15 @@ class Viewer:
                 if align == "left" and removable:
                     x_col = col_offset + len(raw)   # raw ends in ' ×': × is its last char
                     self._measure_header_spans.append((row0, x_col, x_col + 1, k))
+                if (align == "left" and k < len(self._measure_layout_sources)
+                        and self._measure_layout_sources[k][0] == "subset"):
+                    subset_idx = self._measure_layout_sources[k][1]
+                    self._subset_header_spans.append(
+                        (row0, col_offset, col_offset + len(cell_text), subset_idx))
+                    if raw.endswith(" ×"):
+                        x_col = col_offset + len(raw)
+                        self._subset_remove_spans.append(
+                            (row0, x_col, x_col + 1, subset_idx))
                 col_offset += len(cell_text)
                 if k != len(layout) - 1:
                     segs.append((" ", ""))          # untinted gap between columns
@@ -941,8 +996,13 @@ class Viewer:
         row0 = _LIST_ROWS_ABOVE + drawn_rows
         rule = "\u2500" * max(0, list_w - 2)
         put(row0, self._list_line([(" ", ""), (rule, self._sgr_fg(self.theme.list_rule_fg))], total_w))
-        for k, segs in enumerate(self._list_legend(), start=1):
-            put(row0 + k, self._list_line(segs, total_w))
+        legend = self._list_legend()
+        for k, segs in enumerate(legend, start=1):
+            if put(row0 + k, self._list_line(segs, total_w)) and k == len(legend):
+                # Exact span of the visibly button-like word itself.
+                word_start = len(" Shft+S to ")
+                self._select_hint_span = (row0 + k, word_start,
+                                          word_start + len("select"))
         # Status lines last: on a short panel they are the first thing to
         # fall off the bottom (put() simply refuses), the legend the last.
         row0 += 1 + len(self._list_legend())
@@ -1244,6 +1304,8 @@ class Viewer:
             self._draw_periodic_table()
         elif self._mode == "geometry_picker":
             self._draw_geometry_picker()
+        elif self._mode == "selection_picker":
+            self._draw_selection_picker()
 
     def _draw_help(self):
         out = bytearray()
@@ -1507,6 +1569,144 @@ class Viewer:
             return True
         return False
 
+    # -- peptide-backbone selection picker -------------------------------
+    def _selection_menu_geometry(self) -> Tuple[int, int, int, int]:
+        inner = max(max(map(len, _SELECTION_OPTIONS)) + 4,
+                    len(" Selection preset "), len(_SELECTION_HINT))
+        width = inner + 2
+        height = len(_SELECTION_OPTIONS) + 3
+        if self._select_hint_span is not None:
+            hint_row, c0, c1 = self._select_hint_span
+            anchor = (c0 + c1) // 2
+            top = max(0, hint_row - height)
+        else:
+            anchor = max(self._list_w // 2, width // 2)
+            top = max(0, self._rows - 1 - height)
+        left = max(0, min(anchor - width // 2, max(self._cols - width, 0)))
+        return top, left, width, height
+
+    def _selection_menu_row_at(self, row: int, col: int) -> Optional[int]:
+        top, left, width, _height = self._selection_menu_geometry()
+        if not (left <= col < left + width):
+            return None
+        option = row - (top + 1)
+        return option if 0 <= option < len(_SELECTION_OPTIONS) else None
+
+    def _draw_selection_picker(self) -> None:
+        top, left, width, _height = self._selection_menu_geometry()
+        inner_w = width - 2
+        border = (f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+                  f"\x1b[38;2;{self.theme.pt_border_fg[0]};{self.theme.pt_border_fg[1]};{self.theme.pt_border_fg[2]}m")
+        bg = f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+        fg = f"\x1b[38;2;{self.theme.pt_text_fg[0]};{self.theme.pt_text_fg[1]};{self.theme.pt_text_fg[2]}m"
+        out = bytearray()
+
+        def put(row0: int, text: str) -> None:
+            out.extend(b"\x1b[%d;%dH" % (row0 + 1, left + 1))
+            out.extend(text.encode("utf-8", "replace"))
+
+        title = " Selection preset ".center(inner_w, "─")
+        put(top, f"{border}┌{title}┐\x1b[0m")
+        for i, option in enumerate(_SELECTION_OPTIONS):
+            label = f"   {option}".ljust(inner_w)
+            if i == self._selection_menu_idx:
+                content = f"{bg}\x1b[1m\x1b[7m{label}\x1b[27m\x1b[22m"
+            else:
+                content = f"{bg}{fg}{label}"
+            put(top + 1 + i,
+                f"{border}│\x1b[0m{content}\x1b[0m{border}│\x1b[0m")
+        hint_row = top + 1 + len(_SELECTION_OPTIONS)
+        put(hint_row,
+            f"{border}│\x1b[0m{bg}{fg}{_SELECTION_HINT.ljust(inner_w)}"
+            f"\x1b[0m{border}│\x1b[0m")
+        put(hint_row + 1, f"{border}└{'─' * inner_w}┘\x1b[0m")
+        kitty.write_bytes(bytes(out), self.fd_out)
+
+    def _open_selection_picker(self) -> None:
+        if not len(self.structures):
+            return
+        self._mode = "selection_picker"
+        self._list_zone_press = False
+        self._selection_menu_idx = 0
+        self._msg = ""
+
+    def _close_selection_picker(self) -> None:
+        top, _left, _width, height = self._selection_menu_geometry()
+        self._mode = "normal"
+        self._erase_rows(top, height)
+
+    def _activate_selection_preset(self) -> None:
+        label = _SELECTION_OPTIONS[self._selection_menu_idx]
+        self._close_selection_picker()
+        # A previous hover/click is a transient highlight, not part of the
+        # alignment set. Clearing both prevents a nearby Cβ from looking as
+        # though the Backbone preset selected it.
+        self.widget.hovered = None
+        self.widget.selected = None
+        self._push_pointer("cell")
+        if label == "Manual":
+            parent = self._selected_subset_column()
+            self.widget.set_alignment_mode(True, preserve=True)
+            self._active_subset_id = None
+            inherited = (f" from #select{parent.select_id}"
+                         if parent is not None else "")
+            self._msg = (f"Manual additive selection{inherited}: click atoms"
+                         " / Option-click · whitespace clears · r saves after RMSD")
+            return
+
+        self._active_subset_id = None
+        self.widget.set_alignment_mode(True)
+        include_cb = label == "Backbone + Cβ"
+        indices = atom_selection.peptide_backbone(
+            self.structures.active.molecule,
+            include_beta_carbon=include_cb,
+        )
+        if not len(indices):
+            self.widget.set_alignment_mode(False)
+            self._pop_pointer()
+            self._msg = "no peptide-backbone motif found on the main frame"
+            return
+        self.widget.align_sel = indices.tolist()
+        inferred = (" (inferred)"
+                    if len(self.structures.active.molecule.atom_names)
+                    != self.structures.active.molecule.n_atoms else "")
+        self._msg = (f"{label}{inferred}: {len(indices)} main-frame atoms selected"
+                     " · Enter align")
+
+    def _handle_selection_picker_event(self, ev) -> bool:
+        if isinstance(ev, _input.KeyEvent):
+            if ev.key in ("escape", "\x03", "S"):
+                self._close_selection_picker()
+                return True
+            if ev.key in ("up", "k"):
+                self._selection_menu_idx = max(0, self._selection_menu_idx - 1)
+                return True
+            if ev.key in ("down", "j"):
+                self._selection_menu_idx = min(
+                    len(_SELECTION_OPTIONS) - 1, self._selection_menu_idx + 1)
+                return True
+            if ev.key == "enter":
+                self._activate_selection_preset()
+                return True
+            return False
+        if isinstance(ev, _input.MouseEvent) and ev.action in ("down", "move"):
+            col, row = self._event_cell(ev)
+            option = self._selection_menu_row_at(row, col)
+            if option is None:
+                if ev.action == "down":
+                    self._close_selection_picker()
+                    return True
+                return False
+            if ev.action == "move":
+                if option != self._selection_menu_idx:
+                    self._selection_menu_idx = option
+                    return True
+                return False
+            self._selection_menu_idx = option
+            self._activate_selection_preset()
+            return True
+        return False
+
     @staticmethod
     def _pt_nearest_col(row_cells, col: int) -> Optional[int]:
         """The nearest landable column to *col* in *row_cells* (itself if valid)."""
@@ -1711,8 +1911,11 @@ class Viewer:
         # the left field's width below is what bounds it, so a wide terminal
         # actually shows the comment instead of clipping it to a stub while
         # the middle of the bar sits empty.
-        raw_left = measure or self.widget.pick_refusal or hov or (self._msg or
-            f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms")
+        align_prompt = ("subset %d picked · Enter align · Esc cancel"
+                        % len(self.widget.align_sel) if self.widget.align_mode else "")
+        raw_left = (self._subset_hover_tip or align_prompt or measure
+                    or self.widget.pick_refusal or hov or (self._msg or
+                    f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"))
         rep = self.style.representation
         spin = " ⟳" if self.autospin else ""
         px = " px" if self.decoder.pixel else ""
@@ -1725,6 +1928,7 @@ class Viewer:
         show_buttons = self.editable and self.widget.append_mode
         show_delete = self.editable and self.widget.delete_mode
         show_measure = self.widget.measure_mode      # read-only-safe: no editable gate
+        show_align = self.widget.align_mode
 
         # Everything from the representation tag onward is a "trailer" built
         # from (escaped, visible_len) pieces and right-anchored via padding
@@ -1740,6 +1944,8 @@ class Viewer:
             pieces.append((f"  {base}\x1b[1m✗DELETE\x1b[22m", 9))          # "  ✗DELETE"
         elif show_measure:
             pieces.append((f"  {base}\x1b[1m∡MEASURE\x1b[22m", 10))        # "  ∡MEASURE"
+        elif show_align:
+            pieces.append((f"  {base}\x1b[1m◎ALIGN\x1b[22m", 9))           # "  ◎ALIGN"
         pieces.append((mod, len(mod)))
         # Cleanup hint: recomputed from model state every render (no hover
         # dependence), so it appears/disappears exactly like [MODIFIED] does
@@ -1845,6 +2051,12 @@ class Viewer:
         _btn_row, col_start, col_end = span
         return col_start <= col < col_end
 
+    def _select_hint_hit(self, col: int, row: int) -> bool:
+        if self._select_hint_span is None:
+            return False
+        hint_row, col_start, col_end = self._select_hint_span
+        return row == hint_row and col_start <= col < col_end
+
     def _dispatch(self, events) -> bool:
         """Apply input events; return True if anything visible changed and the
         frame should be redrawn."""
@@ -1857,6 +2069,16 @@ class Viewer:
                     self._button_held = True
                 elif ev.action == "up":
                     self._button_held = False
+            if self._mode == "selection_picker":
+                if isinstance(ev, _input.MouseEvent) and ev.action == "down":
+                    col, row = self._event_cell(ev)
+                    if self._select_hint_hit(col, row):
+                        self._close_selection_picker()
+                        changed = True
+                        continue
+                if self._handle_selection_picker_event(ev):
+                    changed = True
+                continue
             if self._mode in ("periodic_table", "geometry_picker"):
                 # Clicking the pill that opened the current picker closes it
                 # again -- a normal toggle button, not a one-way switch.
@@ -1893,6 +2115,22 @@ class Viewer:
                 if isinstance(ev, _input.KeyEvent) and self._handle_prompt_key(ev.key):
                     changed = True
                 continue
+            if self.widget.align_mode and isinstance(ev, _input.KeyEvent):
+                if ev.key == "enter":
+                    if self.widget.align_sel:
+                        if self._finish_subset_alignment(tuple(self.widget.align_sel)):
+                            self.widget.set_alignment_mode(False)
+                            self._pop_pointer()
+                    else:
+                        self._msg = "pick one or more untinted reference atoms, then press Enter"
+                    changed = True
+                    continue
+                if ev.key in ("escape", "\x03"):
+                    self.widget.set_alignment_mode(False)
+                    self._pop_pointer()
+                    self._msg = "subset alignment cancelled"
+                    changed = True
+                    continue
             if isinstance(ev, _input.KeyEvent) and ev.key == "tab" and len(self.structures) > 1:
                 self._list_focused = not self._list_focused
                 if self._list_focused:
@@ -1915,6 +2153,10 @@ class Viewer:
                     # strip click must never be swallowed by that guard.
                     if self._in_list_zone(col):
                         self._list_zone_press = True
+                        if self._select_hint_hit(col, row):
+                            self._open_selection_picker()
+                            changed = True
+                            continue
                         # A measurement column's × removes it (design
                         # 2026-07-30) and must win over the row click below --
                         # the header row owns no structure, so it would
@@ -1923,6 +2165,16 @@ class Viewer:
                         if removed is not None:
                             del self._measure_columns[removed]
                             self._refresh_measure_w()
+                            changed = True
+                            continue
+                        removed_subset = self._subset_remove_hit(col, row)
+                        if removed_subset is not None:
+                            self._remove_subset_column(removed_subset)
+                            changed = True
+                            continue
+                        subset_col = self._subset_header_hit(col, row)
+                        if subset_col is not None:
+                            self._activate_subset_column(subset_col)
                             changed = True
                             continue
                         i = self._list_index_at_row(row)
@@ -1956,6 +2208,13 @@ class Viewer:
                 elif ev.action in ("move", "scroll"):
                     col, row = self._event_cell(ev)
                     if self._in_list_zone(col):
+                        if ev.action == "move":
+                            subset_col = self._subset_header_hit(col, row)
+                            tip = (self._subset_tip(self._rmsd_columns[subset_col])
+                                   if subset_col is not None else "")
+                            if tip != self._subset_hover_tip:
+                                self._subset_hover_tip = tip
+                                changed = True
                         # the wheel scrolls the strip; it must never fall
                         # through to the widget and zoom the 3D view.
                         if ev.action == "scroll" and ev.scroll in ("up", "down"):
@@ -1963,6 +2222,9 @@ class Viewer:
                             if self._list_scroll_by(step):
                                 changed = True
                         continue
+                    if ev.action == "move" and self._subset_hover_tip:
+                        self._subset_hover_tip = ""
+                        changed = True
                     if self._in_status_zone(row):
                         continue
             if isinstance(ev, _input.KeyEvent) and ev.key in self._driver_keys:
@@ -1977,10 +2239,22 @@ class Viewer:
                 # reset, or an empty-space click) freezes the old pick.
                 prev_sel = (tuple(self.widget.measure_sel)
                             if self.widget.measure_mode else None)
+                prev_align_sel = tuple(self.widget.align_sel)
+                parent_subset_id = self._active_subset_id
                 if self.widget.handle_event(ev, origin=self._img_origin_px):
                     self._last_interact = time.time()
                     self._msg = ""          # a fresh interaction clears "saved …"
                     changed = True
+                new_align_sel = tuple(self.widget.align_sel)
+                if new_align_sel != prev_align_sel:
+                    # The named column remains immutable. The first actual
+                    # Option/manual edit turns its loaded atoms into an
+                    # unsaved derived selection; r/Enter creates a new column.
+                    if parent_subset_id is not None:
+                        self._active_subset_id = None
+                        self._msg = (f"derived from #select{parent_subset_id}: "
+                                     f"{len(new_align_sel)} atoms · r saves after RMSD")
+                    self._push_pointer("cell")
                 if prev_sel is not None and len(prev_sel) >= 2:
                     new_sel = tuple(self.widget.measure_sel)
                     extends = (len(new_sel) >= len(prev_sel)
@@ -2022,6 +2296,51 @@ class Viewer:
                 self._push_pointer("cell")               # precision plus-cross
             else:
                 self._pop_pointer()
+        elif key == "r":
+            if not self.structures.overlay:
+                # 'r' meant camera reset before it became the align key, and
+                # it no longer falls through to the widget. Say so rather
+                # than reading as a dead binding.
+                self._msg = "align needs overlay mode — z resets the camera"
+                return True
+            selected = self._selected_subset_column()
+            if selected is not None:
+                if self.structures.active_index != selected.reference_index:
+                    self._activate_structure(selected.reference_index)
+                self._align_overlay(ref_select=selected.indices,
+                                    rmsd_column=selected)
+                self._refresh_measure_w()
+                self.widget.align_sel = list(selected.indices)
+                return True
+            if self.widget.align_mode and self.widget.align_sel:
+                indices = tuple(self.widget.align_sel)
+                if self._finish_subset_alignment(indices):
+                    self.widget.set_alignment_mode(False)
+                    self._pop_pointer()
+                return True
+            if self.widget.align_mode:
+                self._msg = "select one or more main-frame atoms first"
+                return True
+            return self._align_overlay()
+        elif key == "R":
+            if not self.structures.overlay:
+                self._msg = "subset align needs overlay mode"
+                return True
+            selected = self._selected_subset_column()
+            if selected is not None:
+                if self.structures.active_index != selected.reference_index:
+                    self._activate_structure(selected.reference_index)
+                self._align_overlay(ref_select=selected.indices,
+                                    rmsd_column=selected)
+                self._refresh_measure_w()
+                self.widget.align_sel = list(selected.indices)
+                return True
+            self._list_focused = False
+            self.widget.set_alignment_mode(True)
+            self._push_pointer("cell")
+            self._msg = "pick untinted reference atoms, then press Enter"
+        elif key == "S":
+            self._open_selection_picker()
         elif key == "x" and self.editable:
             self.widget.set_delete_mode(not self.widget.delete_mode)
             self._msg = ""
@@ -2063,6 +2382,178 @@ class Viewer:
             self._cycle_frame(1 if key in ("n", "alt+down") else -1)
         else:
             return False
+        return True
+
+    def _subset_column_stale(self, column: _SubsetRMSDColumn) -> bool:
+        """True once the reference geometry moved out from under the pick."""
+        if column.reference_index >= len(self.structures):
+            return True
+        return (self.structures[column.reference_index].revision
+                != column.reference_revision)
+
+    def _selected_subset_column(self) -> Optional[_SubsetRMSDColumn]:
+        if self._active_subset_id is None:
+            return None
+        column = next((column for column in self._rmsd_columns
+                       if column.select_id == self._active_subset_id), None)
+        # Selection indices are local to their saved reference. Never let a
+        # stale armed column silently pull the main frame back after an
+        # embedding (or another code path) changed StructureSet directly.
+        if (column is None
+                or column.reference_index != self.structures.active_index):
+            self._active_subset_id = None
+            self.widget.align_sel = []
+            return None
+        if self._subset_column_stale(column):
+            # An edit renumbered the reference: those indices now point at
+            # different atoms. Recalculating would quietly fit the wrong set,
+            # so disarm and make the user re-pick.
+            self._active_subset_id = None
+            self.widget.align_sel = []
+            self._msg = (f"#select{column.select_id} is stale — the main frame "
+                         "was edited; pick the atoms again")
+            return None
+        return column
+
+    @staticmethod
+    def _subset_tip(column: _SubsetRMSDColumn) -> str:
+        return "aligning on " + ",".join(column.labels)
+
+    def _finish_subset_alignment(self, indices: Tuple[int, ...]) -> bool:
+        """Persist a newly picked subset, align, and expose its RMSD column.
+
+        False when there is nothing to fit against: picking deliberately works
+        before an overlay exists (add one with opt+click, then press r), so a
+        premature Enter must keep the selection alive rather than saving a
+        column of dashes -- at one loaded structure _measure_layout never
+        draws that column, leaving it impossible to remove.
+        """
+        indices = tuple(sorted(indices))
+        reference_i = self.structures.active_index
+        if not [i for i in self.structures.drawn_indices() if i != reference_i]:
+            self._msg = ("selection kept — overlay a structure "
+                         "(opt+click a row), then press r to align")
+            return False
+        existing = next(
+            (column for column in self._rmsd_columns
+             if column.reference_index == reference_i and column.indices == indices
+             and not self._subset_column_stale(column)),
+            None,
+        )
+        if existing is not None:
+            # Selection identity is its owning main frame plus atom set, not
+            # the click/preset action that happened to request the RMSD. This
+            # is the normal path after adding another structure to an overlay:
+            # refill #selectN for every current row instead of cloning it.
+            self._align_overlay(ref_select=indices, rmsd_column=existing)
+            self._active_subset_id = None
+            self._refresh_measure_w()
+            return True
+        symbols = self.structures[reference_i].molecule.symbols
+        labels = tuple(f"{symbols[i]}{i}" for i in indices)
+        column = _SubsetRMSDColumn(
+            select_id=self._next_subset_id,
+            reference_index=reference_i,
+            reference_revision=self.structures[reference_i].revision,
+            indices=indices,
+            labels=labels,
+            values=[None] * len(self.structures),
+        )
+        self._next_subset_id += 1
+        self._rmsd_columns.append(column)
+        self._align_overlay(ref_select=indices, rmsd_column=column)
+        # A completed pick is saved but not armed. This keeps plain R available
+        # for creating #select2; clicking a saved header arms it for a rerun.
+        self._active_subset_id = None
+        self._refresh_measure_w()
+        return True
+
+    def _activate_subset_column(self, column_index: int) -> None:
+        """Toggle a saved subset header as the active R-recalculation set."""
+        column = self._rmsd_columns[column_index]
+        if self._active_subset_id == column.select_id:
+            self._active_subset_id = None
+            self.widget.align_sel = []
+            self._msg = f"#select{column.select_id} disabled"
+            return
+        if self.structures.active_index != column.reference_index:
+            self._activate_structure(column.reference_index)
+        self.widget.set_alignment_mode(False)
+        self.widget.align_sel = list(column.indices)
+        self._active_subset_id = column.select_id
+        self._msg = (f"#select{column.select_id} enabled · "
+                     + ",".join(column.labels)
+                     + " · R recalculates · Option-click derives")
+
+    def _align_overlay(self, ref_select=None,
+                       rmsd_column: Optional[_SubsetRMSDColumn] = None) -> bool:
+        """Align every tinted/drawn structure onto the active untinted one."""
+        sset = self.structures
+        reference_i = sset.active_index
+        mobiles = [i for i in sset.drawn_indices() if i != reference_i]
+        if rmsd_column is None:
+            rmsd_values: List[Optional[float]] = [None] * len(sset)
+        else:
+            # A column accumulates results across overlay swaps. Preserve rows
+            # that are not part of this run, extend for newly added entries,
+            # and replace only rows that are actually recalculated below.
+            rmsd_values = list(rmsd_column.values[:len(sset)])
+            rmsd_values.extend([None] * (len(sset) - len(rmsd_values)))
+        rmsd_values[reference_i] = 0.0
+        if not mobiles:
+            self._msg = "overlay has no tinted structure to align"
+            if rmsd_column is not None:
+                rmsd_column.values = rmsd_values
+                self._measure_layout_cache = None
+            return True
+
+        fitted = []
+        failures = []
+        reference = sset[reference_i].molecule
+        ref_counts = Counter(reference.symbols)
+        for i in mobiles:
+            rmsd_values[i] = None
+            mobile = sset[i].molecule
+            mobile_counts = Counter(mobile.symbols)
+            try:
+                if ref_select is not None:
+                    result = sset.align_to_reference_subset(
+                        i, onto=reference_i, ref_select=ref_select)
+                elif (mobile.symbols == reference.symbols
+                      and mobile.n_atoms > 300):
+                    # Protein-scale permutation is inherently quadratic and
+                    # deliberately capped; known correspondence remains a
+                    # tiny SVD at any size.
+                    result = sset.align(i, onto=reference_i)
+                elif mobile_counts == ref_counts:
+                    # Full RMSD-finder semantics, including permutations
+                    # within repeated element blocks. Exact index-ordered
+                    # rigid copies short-circuit to one Kabsch in align.py.
+                    result = sset.align(i, onto=reference_i, permute=True)
+                elif all(count <= ref_counts[el]
+                         for el, count in mobile_counts.items()):
+                    result = sset.align(i, onto=reference_i, subset=True)
+                elif all(count <= mobile_counts[el]
+                         for el, count in ref_counts.items()):
+                    result = sset.align_to_reference_subset(
+                        i, onto=reference_i,
+                        ref_select=list(range(reference.n_atoms)))
+                else:
+                    raise ValueError("no element-compatible complete/subset match")
+                fitted.append((sset[i].label, result.rmsd, result.n_fitted))
+                rmsd_values[i] = result.rmsd
+            except (ValueError, IndexError) as exc:
+                failures.append("%s: %s" % (sset[i].label, exc))
+        if fitted:
+            values = ", ".join("%s %.4f Å (%d)" % row for row in fitted)
+            self._msg = "aligned " + values
+            if failures:
+                self._msg += "; skipped " + "; ".join(failures)
+        else:
+            self._msg = "alignment failed: " + "; ".join(failures)
+        if rmsd_column is not None:
+            rmsd_column.values = rmsd_values
+            self._measure_layout_cache = None
         return True
 
     def _measure_header_text(self, sel: Tuple[int, ...]) -> str:
@@ -2124,6 +2615,30 @@ class Viewer:
                 return col_idx
         return None
 
+    def _subset_header_hit(self, col: int, row: int) -> Optional[int]:
+        """Saved subset-column index under a header click/hover, if any."""
+        for r0, c0, c1, column_index in self._subset_header_spans:
+            if r0 == row and c0 <= col < c1:
+                return column_index
+        return None
+
+    def _subset_remove_hit(self, col: int, row: int) -> Optional[int]:
+        """Saved subset-column index whose ``×`` was clicked, if any."""
+        for r0, c0, c1, column_index in self._subset_remove_spans:
+            if r0 == row and c0 <= col < c1:
+                return column_index
+        return None
+
+    def _remove_subset_column(self, column_index: int) -> None:
+        """Delete one saved subset and disarm it if it was active."""
+        column = self._rmsd_columns.pop(column_index)
+        if self._active_subset_id == column.select_id:
+            self._active_subset_id = None
+            self.widget.align_sel = []
+        self._subset_hover_tip = ""
+        self._msg = f"#select{column.select_id} deleted"
+        self._refresh_measure_w()
+
     def _measure_layout(self, list_w: int) -> List[Tuple[str, int, List[str], bool]]:
         """Per-column ``(header cell, width, formatted value cells,
         removable)`` for the measurement table (design 2026-07-30 rev. 2).
@@ -2149,27 +2664,48 @@ class Viewer:
         pinned columns drive ``_img_cols`` to zero or negative and corrupt
         every row's layout, not just the table's.
         """
-        columns: List[Tuple[str, Tuple[int, ...], bool]] = [
-            (header, indices, True) for header, indices in self._measure_columns]
+        columns = [
+            ("measure", i, header, indices, True, None)
+            for i, (header, indices) in enumerate(self._measure_columns)]
         live_sel = tuple(self.widget.measure_sel)
         already_frozen = any(live_sel == indices for _h, indices in self._measure_columns)
         if self.widget.measure_mode and len(live_sel) >= 2 and not already_frozen:
-            columns.append((self._measure_header_text(live_sel), live_sel, False))
+            columns.append(("measure_live", -1, self._measure_header_text(live_sel),
+                            live_sel, False, None))
+        for i, column in enumerate(self._rmsd_columns):
+            cells = ["—" if value is None else f"{value:.4f}"
+                     for value in column.values]
+            if len(cells) < len(self.structures):
+                cells.extend(["—"] * (len(self.structures) - len(cells)))
+            # A '*' after the name is the design's stale marker (§4.4): the
+            # numbers were true once, so they stay readable, but they must
+            # not be mistaken for a fit against the geometry on screen now.
+            header = column.header + ("*" if self._subset_column_stale(column) else "")
+            columns.append(("subset", i, f"{header} ×", column.indices,
+                            False, cells[:len(self.structures)]))
         if not columns or len(self.structures) <= 1:
+            self._measure_layout_sources = []
             return []
         key = (tuple(self._measure_columns), live_sel, self.widget.measure_mode,
+               tuple((c.select_id, c.reference_index, c.indices,
+                      tuple(c.values)) for c in self._rmsd_columns),
                list_w, self._cols, self.structures.active_index,
                tuple((id(e.molecule), e.revision) for e in self.structures.entries))
         if self._measure_layout_cache is not None and self._measure_layout_cache[0] == key:
+            self._measure_layout_sources = self._measure_layout_cache[2]
             return self._measure_layout_cache[1]
         available = max(0, self._cols - list_w - _MEASURE_MIN_VIEWPORT_COLS)
         out: List[Tuple[str, int, List[str], bool]] = []
+        sources: List[Tuple[str, int]] = []
         used = 0
-        for header, indices, removable in columns:
-            kind = len(indices)
-            values = [v for _, v in self.structures.measure(indices)]
-            cells = ["—" if v is None else (f"{v:.3f}" if kind == 2 else f"{v:.1f}")
-                     for v in values]
+        for source, source_index, header, indices, removable, saved_cells in columns:
+            if saved_cells is None:
+                kind = len(indices)
+                values = [v for _, v in self.structures.measure(indices)]
+                cells = ["—" if v is None else (f"{v:.3f}" if kind == 2 else f"{v:.1f}")
+                         for v in values]
+            else:
+                cells = saved_cells
             header_cell = f"{header} ×" if removable else header
             width = max(len(header_cell), max((len(c) for c in cells), default=1))
             cost = width + 2 + (1 if out else 0)   # padding, plus the gap before it
@@ -2177,7 +2713,9 @@ class Viewer:
                 break
             used += cost
             out.append((header_cell, width, cells, removable))
-        self._measure_layout_cache = (key, out)
+            sources.append((source, source_index))
+        self._measure_layout_sources = sources
+        self._measure_layout_cache = (key, out, sources)
         return out
 
     @staticmethod
@@ -2208,6 +2746,7 @@ class Viewer:
             # whole point of the table is comparing across frames, so
             # silently discarding a mid-measurement pick here would defeat it.
             self._freeze_measure_sel(tuple(self.widget.measure_sel))
+        self._disarm_alignment_for_main_change()
         self.structures.cycle_active(step)
         self._list_cursor = self.structures.active_index
         self._list_ensure_visible(self._list_cursor)
@@ -2221,10 +2760,25 @@ class Viewer:
         reset) without discarding the rest of the StructureSet."""
         if self.widget.measure_mode:
             self._freeze_measure_sel(tuple(self.widget.measure_sel))
+        self._disarm_alignment_for_main_change()
         self.structures.set_active(i)
         self._list_cursor = i
         self._list_ensure_visible(i)
         self.widget.refresh_active()
+
+    def _disarm_alignment_for_main_change(self) -> None:
+        """Drop atom-local selection state before changing the main frame.
+
+        Saved RMSD columns remain available, but none stays armed: its atom
+        indices and reference ownership belong to the frame being left.
+        """
+        self._active_subset_id = None
+        self._subset_hover_tip = ""
+        if self.widget.align_mode:
+            self.widget.set_alignment_mode(False)
+            self._pop_pointer()
+        else:
+            self.widget.align_sel = []
 
     def _hide_toggle(self, i: int) -> None:
         """Toggle Structure.visible on row *i* (the 'h' list key, design
