@@ -153,6 +153,12 @@ def test_renderer_reuse_across_style_switches():
         assert np.array_equal(g, w)
 
 
+# Cold-cache numba compile measured at ~30 s/attempt on an M-series laptop.
+# This bound is deliberately ~10x that: it exists to catch a deadlock, not
+# to police how fast someone's machine compiles.
+_COLD_COMPILE_TIMEOUT = 300
+
+
 def test_kernel_ready_is_race_safe(tmp_path):
     """A second, unsynchronized caller forcing readiness while warm_async's
     background thread is already mid-compile must not crash the process.
@@ -169,26 +175,45 @@ def test_kernel_ready_is_race_safe(tmp_path):
     Needs a fresh NUMBA_CACHE_DIR per attempt: a warm cache compiles too
     fast to open the race window at all, which is why every fixture/bench
     caller elsewhere in this repo deletes it before measuring compile time.
+
+    That cold compile is the whole cost of this test: measured at ~30 s per
+    attempt on an M-series laptop (0.2 s once cached), NOT the "~1-3 s"
+    warm_async's docstring quotes. warm_sync() is therefore called with no
+    timeout of its own -- exactly as the kernel_ready fixture above and
+    bench/speed.py call it. An inner deadline only adds a second, tighter
+    bound that turns a merely slow machine into a failure claiming the
+    concurrent-compile crash came back. subprocess.run's timeout is the one
+    real bound, set an order of magnitude above the measured cost so that
+    reaching it means something is genuinely wrong (a deadlock in warm_sync
+    is a plausible regression of this very code, so it must fail rather than
+    skip).
     """
     if not _fast.available():
         pytest.skip("numba not installed")
     src = os.path.join(os.path.dirname(__file__), "..", "src")
     script = (
-        "import sys, time\n"
+        "import time\n"
         "from vimol import _render_fast as _fast\n"
         "_fast.warm_async()\n"
         "time.sleep(0.05)\n"           # give the background thread a head start
-        "ok = _fast.warm_sync(timeout=30)\n"
-        "assert ok, 'warm_sync reported the kernel not ready'\n"
+        "assert _fast.warm_sync(), 'warm_sync reported the kernel not ready'\n"
     )
     for i in range(3):
         env = dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path / f"cache{i}"))
-        out = subprocess.run([sys.executable, "-c", script],
-                             env=env, cwd=src, capture_output=True, text=True,
-                             timeout=60)
+        try:
+            out = subprocess.run([sys.executable, "-c", script],
+                                 env=env, cwd=src, capture_output=True, text=True,
+                                 timeout=_COLD_COMPILE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"attempt {i}: cold compile did not finish within "
+                f"{_COLD_COMPILE_TIMEOUT}s -- warm_sync is deadlocked, or this "
+                f"machine is far slower than the ~30s this is budgeted for")
+        assert out.returncode >= 0, (
+            f"attempt {i}: killed by signal {-out.returncode} -- this is the "
+            f"concurrent-compile crash regressing\n{out.stderr}")
         assert out.returncode == 0, (
-            f"attempt {i}: exit {out.returncode} (signal "
-            f"{-out.returncode if out.returncode < 0 else 'n/a'})\n{out.stderr}")
+            f"attempt {i}: exit {out.returncode}\n{out.stderr}")
 
 
 def test_numba_cache_dir_kept_out_of_source_tree():
