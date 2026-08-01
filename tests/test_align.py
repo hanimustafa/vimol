@@ -587,6 +587,46 @@ def test_backbone_preset_reports_missing_names(tmp_path):
         os.close(fd)
 
 
+def test_heavy_atoms_preset_reports_an_all_hydrogen_frame(tmp_path):
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer.structures.overlay = True
+        viewer.structures[0].molecule.symbols = ["H"] * 4
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 3
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_mode is False
+        assert viewer.widget.align_sel == []
+        assert "no heavy atoms" in viewer._msg
+    finally:
+        os.close(fd)
+
+
+def test_ring_system_preset_reports_an_acyclic_frame(tmp_path):
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer.structures.overlay = True
+        molecule = viewer.structures[0].molecule
+        molecule.bonds = [(0, 1, 1), (1, 2, 1), (0, 3, 1)]
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 4
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_mode is False
+        assert viewer.widget.align_sel == []
+        assert "no ring system" in viewer._msg
+
+        # Control: one more bond closes C-N-O, so the empty result above is
+        # the acyclic graph talking and not an unreachable preset.
+        molecule.bonds = molecule.bonds + [(0, 2, 1)]
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 4
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_mode is True
+        assert viewer.widget.align_sel == [0, 1, 2]
+    finally:
+        os.close(fd)
+
+
 def test_heavy_atoms_excludes_hydrogen_only():
     molecule = _mol(
         ["H", "C", "N", "O", "S", "H"],
