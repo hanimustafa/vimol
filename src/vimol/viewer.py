@@ -54,7 +54,9 @@ _IMAGE_Z_INDEX = -1_200_000_000
 _STATUS_ZONE_ROWS = 4
 # Footer hint shown inside the geometry picker (also sizes its minimum width).
 _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
-_SELECTION_OPTIONS = ("Manual", "Backbone", "Backbone + Cβ")
+_SELECTION_OPTIONS = (
+    "Manual", "Backbone", "Backbone + Cβ", "Heavy atoms", "Largest ring system",
+)
 _SELECTION_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 # Fallback visible width of the status bar's left-hand (hover/molecule-info)
 # field, used ONLY before the terminal size is known (_cols == 0, i.e. before
@@ -135,7 +137,7 @@ _HELP_TAIL = [
     "  ctrl-t ............. light/dark theme",
     "  f / z .............. re-fit / reset    ? .................. toggle help",
     "  overlay: r .......... align all         R ... pick reference atoms, Enter",
-    "     Shift+S / click select ... Backbone or Backbone + Cβ preset",
+    "     Shift+S / click select ... Backbone, Heavy atoms, or Ring system",
     "     option-click atom ........ additive manual subset selection",
     "     ⊂RMSD column: hover atoms · click arm selection · R recalculate",
     "  q / Esc ............ quit",
@@ -1569,7 +1571,7 @@ class Viewer:
             return True
         return False
 
-    # -- peptide-backbone selection picker -------------------------------
+    # -- atom-selection preset picker ------------------------------------
     def _selection_menu_geometry(self) -> Tuple[int, int, int, int]:
         inner = max(max(map(len, _SELECTION_OPTIONS)) + 4,
                     len(" Selection preset "), len(_SELECTION_HINT))
@@ -1656,20 +1658,28 @@ class Viewer:
 
         self._active_subset_id = None
         self.widget.set_alignment_mode(True)
-        include_cb = label == "Backbone + Cβ"
-        indices = atom_selection.peptide_backbone(
-            self.structures.active.molecule,
-            include_beta_carbon=include_cb,
-        )
+        molecule = self.structures.active.molecule
+        if label == "Heavy atoms":
+            indices = atom_selection.heavy_atoms(molecule)
+            missing = "no heavy atoms found on the main frame"
+        elif label == "Largest ring system":
+            indices = atom_selection.largest_ring_system(molecule)
+            missing = "no ring system found on the main frame"
+        else:
+            indices = atom_selection.peptide_backbone(
+                molecule,
+                include_beta_carbon=label == "Backbone + Cβ",
+            )
+            missing = "no peptide-backbone motif found on the main frame"
         if not len(indices):
             self.widget.set_alignment_mode(False)
             self._pop_pointer()
-            self._msg = "no peptide-backbone motif found on the main frame"
+            self._msg = missing
             return
         self.widget.align_sel = indices.tolist()
         inferred = (" (inferred)"
-                    if len(self.structures.active.molecule.atom_names)
-                    != self.structures.active.molecule.n_atoms else "")
+                    if label.startswith("Backbone")
+                    and len(molecule.atom_names) != molecule.n_atoms else "")
         self._msg = (f"{label}{inferred}: {len(indices)} main-frame atoms selected"
                      " · Enter align")
 

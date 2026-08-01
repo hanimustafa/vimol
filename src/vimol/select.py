@@ -14,6 +14,90 @@ _PEPTIDE_BACKBONE = frozenset(("N", "CA", "C"))
 _CARBONYL_CO_MAX2 = 1.36 ** 2
 
 
+def heavy_atoms(molecule: Molecule) -> np.ndarray:
+    """Return every non-hydrogen atom in file order."""
+    return np.fromiter(
+        (i for i, symbol in enumerate(molecule.symbols)
+         if symbol.strip().upper() != "H"),
+        dtype=np.int64,
+    )
+
+
+def largest_ring_system(molecule: Molecule) -> np.ndarray:
+    """Return the largest fused ring system in the heavy-atom bond graph.
+
+    An atom lies on at least one cycle exactly when it survives the graph's
+    2-core, so repeatedly stripping terminal atoms leaves the cyclic part and
+    nothing else; the largest connected component of that core is the answer.
+    Both passes are O(N+E).
+
+    A depth-first cycle basis would be just as cheap but is not a well-defined
+    answer: which fundamental cycles it finds depends on the file's atom
+    order, so the same molecule written twice can yield different subsets.
+    The 2-core does not, and it keeps fused systems (naphthalene, steroids,
+    porphyrins) whole -- which is what a rigid-core RMSD subset wants anyway.
+
+    Explicit bonds are preferred; unnamed formats fall back to the same
+    spatially hashed bond perception used by the viewer.
+    """
+    n = molecule.n_atoms
+    if n < 3:
+        return np.empty(0, dtype=np.int64)
+
+    bonds = molecule.bonds or perceive_bonds(molecule)
+    adjacency = [set() for _ in range(n)]
+    symbols = molecule.symbols
+    for i, j, _order in bonds:
+        if not (0 <= i < n and 0 <= j < n) or i == j:
+            continue
+        if (symbols[i].strip().upper() == "H"
+                or symbols[j].strip().upper() == "H"):
+            continue
+        adjacency[i].add(j)
+        adjacency[j].add(i)
+
+    # Peel to the 2-core. Dropping a terminal atom can strand its neighbor,
+    # so the walk continues until nothing is left below degree two.
+    degree = np.fromiter((len(row) for row in adjacency), dtype=np.int64, count=n)
+    alive = degree > 0
+    pending = [i for i in range(n) if alive[i] and degree[i] < 2]
+    while pending:
+        atom = pending.pop()
+        if not alive[atom]:
+            continue
+        alive[atom] = False
+        for other in adjacency[atom]:
+            if alive[other]:
+                degree[other] -= 1
+                if degree[other] < 2:
+                    pending.append(other)
+
+    # Every remaining component is a ring or a fused ring system; the smallest
+    # possible one is a three-membered cycle.
+    components = []
+    seen = np.zeros(n, dtype=np.bool_)
+    for root in range(n):
+        if not alive[root] or seen[root]:
+            continue
+        seen[root] = True
+        component = [root]
+        stack = [root]
+        while stack:
+            atom = stack.pop()
+            for other in adjacency[atom]:
+                if alive[other] and not seen[other]:
+                    seen[other] = True
+                    component.append(other)
+                    stack.append(other)
+        components.append(tuple(sorted(component)))
+
+    if not components:
+        return np.empty(0, dtype=np.int64)
+    # Stable tie-break: the earliest system in atom/file order wins.
+    chosen = min(components, key=lambda system: (-len(system), system))
+    return np.asarray(chosen, dtype=np.int64)
+
+
 def _topology_backbone(molecule: Molecule, include_beta_carbon: bool) -> np.ndarray:
     """Infer N-Cα-C(-O) motifs from elements and connectivity in O(N+E)."""
     n = molecule.n_atoms
@@ -128,4 +212,4 @@ def peptide_backbone(molecule: Molecule, include_beta_carbon: bool = False) -> n
     return _topology_backbone(molecule, include_beta_carbon)
 
 
-__all__ = ["peptide_backbone"]
+__all__ = ["heavy_atoms", "largest_ring_system", "peptide_backbone"]

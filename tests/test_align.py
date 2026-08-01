@@ -587,6 +587,98 @@ def test_backbone_preset_reports_missing_names(tmp_path):
         os.close(fd)
 
 
+def test_heavy_atoms_excludes_hydrogen_only():
+    molecule = _mol(
+        ["H", "C", "N", "O", "S", "H"],
+        np.zeros((6, 3)),
+    )
+    assert np.array_equal(vimol.select.heavy_atoms(molecule), [1, 2, 3, 4])
+
+
+def test_largest_ring_system_selects_largest_disjoint_ring():
+    molecule = _mol(["C"] * 10, np.zeros((10, 3)))
+    # A triangle, a six-membered ring, and an acyclic tail.
+    molecule.bonds = [
+        (0, 1, 1), (1, 2, 1), (0, 2, 1),
+        (3, 4, 1), (4, 5, 1), (5, 6, 1),
+        (6, 7, 1), (7, 8, 1), (3, 8, 1), (8, 9, 1),
+    ]
+    assert np.array_equal(vimol.select.largest_ring_system(molecule),
+                          [3, 4, 5, 6, 7, 8])
+
+
+def test_largest_ring_system_keeps_fused_rings_whole_whatever_the_atom_order():
+    # Naphthalene: two six-rings sharing the 4--9 edge. A depth-first cycle
+    # basis answers 6 or 10 here depending on the file's atom order; the whole
+    # fused system is the only order-independent answer.
+    base = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 9), (9, 0),
+            (4, 5), (5, 6), (6, 7), (7, 8), (8, 9)]
+    for shift in range(10):
+        relabel = [(i + shift) % 10 for i in range(10)]
+        molecule = _mol(["C"] * 10, np.zeros((10, 3)))
+        molecule.bonds = [(relabel[i], relabel[j], 1) for i, j in base]
+        assert np.array_equal(vimol.select.largest_ring_system(molecule),
+                              np.arange(10))
+
+
+def test_largest_ring_system_ignores_hydrogens_and_returns_empty_for_chain():
+    molecule = _mol(["C", "C", "C", "H"], np.zeros((4, 3)))
+    molecule.bonds = [(0, 1, 1), (1, 2, 1), (2, 3, 1)]
+    assert vimol.select.largest_ring_system(molecule).size == 0
+
+
+def test_largest_ring_system_strips_substituents_down_to_the_cycle():
+    # A benzene ring carrying a three-atom tail: peeling must not stop after
+    # one pass, or the atom that the terminal atom was hanging off survives.
+    molecule = _mol(["C"] * 9, np.zeros((9, 3)))
+    molecule.bonds = [
+        (0, 1, 1), (1, 2, 1), (2, 3, 1), (3, 4, 1), (4, 5, 1), (5, 0, 1),
+        (0, 6, 1), (6, 7, 1), (7, 8, 1),
+    ]
+    assert np.array_equal(vimol.select.largest_ring_system(molecule),
+                          [0, 1, 2, 3, 4, 5])
+
+
+def test_largest_ring_system_perceives_bonds_for_unnamed_xyz():
+    angles = np.arange(6) * (np.pi / 3.0)
+    positions = np.column_stack((1.4 * np.cos(angles),
+                                 1.4 * np.sin(angles),
+                                 np.zeros(6)))
+    molecule = _mol(["C"] * 6, positions)
+    assert molecule.bonds == []
+    assert np.array_equal(vimol.select.largest_ring_system(molecule),
+                          np.arange(6))
+
+
+def test_new_selection_presets_select_main_frame_only(tmp_path):
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        reference = viewer.structures[0].molecule
+        reference.symbols = ["C", "C", "C", "C", "C", "C", "H"]
+        reference.positions = np.zeros((7, 3))
+        reference.bonds = [
+            (0, 1, 1), (1, 2, 1), (2, 3, 1),
+            (3, 4, 1), (4, 5, 1), (0, 5, 1), (0, 6, 1),
+        ]
+        mobile = viewer.structures[1].molecule
+        mobile_symbols = list(mobile.symbols)
+
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 3
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_sel == [0, 1, 2, 3, 4, 5]
+        assert "Heavy atoms" in viewer._msg
+
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 4
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_sel == [0, 1, 2, 3, 4, 5]
+        assert "Largest ring system" in viewer._msg
+        assert mobile.symbols == mobile_symbols
+    finally:
+        os.close(fd)
+
+
 def test_unnamed_backbone_is_inferred_from_one_bond_graph_pass():
     # N-CA-C(=O), with CB plus an amide side chain hanging off CB. The latter
     # must not be mistaken for peptide backbone.
