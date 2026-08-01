@@ -876,7 +876,42 @@ def superpose_to_reference_subset(mobile: Molecule, reference: Molecule,
         ref_select=ref_indices.copy(), mapping=mapping)
 
 
+def superpose_between_subsets(mobile: Molecule, reference: Molecule,
+                              mobile_select, ref_select, *, candidates: int = 64,
+                              permute_max_atoms: Optional[int] = 300
+                              ) -> AlignmentResult:
+    """Fit a smaller mobile subset into a larger selected reference subset.
+
+    This is the complementary direction to
+    :func:`superpose_to_reference_subset`: it is used when the main-frame
+    selection contains terminal atoms that do not exist in the mobile
+    structure. The whole mobile molecule still receives the fitted transform.
+    """
+    if not isinstance(mobile, Molecule) or not isinstance(reference, Molecule):
+        raise TypeError("mobile and reference must be Molecule instances")
+    mobile_indices = _selection(mobile_select, mobile.n_atoms, "mobile_select")
+    ref_indices = _selection(ref_select, reference.n_atoms, "ref_select")
+    if len(mobile_indices) > len(ref_indices):
+        raise ValueError("mobile subset must be no larger than reference subset")
+    if permute_max_atoms is not None and len(mobile_indices) > permute_max_atoms:
+        raise ValueError("subset permutation search is impractical above %d selected atoms"
+                         % permute_max_atoms)
+    mobile_symbols = [mobile.symbols[i] for i in mobile_indices]
+    reference_symbols = [reference.symbols[i] for i in ref_indices]
+    rotation, translation, local_mapping, rmsd = subset_search(
+        mobile.positions[mobile_indices], reference.positions[ref_indices],
+        mobile_symbols, reference_symbols, candidates=candidates)
+    paired_reference = ref_indices[local_mapping]
+    mapping = np.full(mobile.n_atoms, -1, dtype=np.int64)
+    mapping[mobile_indices] = paired_reference
+    return AlignmentResult(
+        rmsd=rmsd, n_fitted=len(mobile_indices),
+        transform=Transform(rotation=rotation, translation=translation),
+        ref_label=reference.name, method="subset", select=mobile_indices.copy(),
+        ref_select=paired_reference.copy(), mapping=mapping)
+
+
 __all__ = [
     "kabsch", "permutation_search", "subset_search", "superpose",
-    "superpose_to_reference_subset",
+    "superpose_to_reference_subset", "superpose_between_subsets",
 ]

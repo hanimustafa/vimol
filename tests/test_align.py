@@ -194,6 +194,28 @@ def test_long_backbone_uses_largest_viable_segment_for_shorter_mobile():
     assert result.rmsd < 1e-10
 
 
+def test_heavy_atom_subset_drops_terminal_reference_atom_missing_from_mobile():
+    reference = _mol(
+        ["C", "N", "O", "O"],
+        [[0, 0, 0], [1.2, 0, 0], [0, 1.4, 0], [8, 8, 8]],
+    )
+    mobile_core = _rigid(reference.positions[:3])
+    mobile = _mol(
+        ["C", "N", "O", "H"],
+        np.vstack((mobile_core, [[30, 30, 30]])),
+    )
+    structures = StructureSet()
+    structures.append(reference, label="reference")
+    structures.append(mobile, label="mobile")
+
+    result = structures.align_to_reference_subset(
+        1, onto=0, ref_select=[0, 1, 2, 3])
+    assert result.n_fitted == 3
+    assert result.rmsd < 1e-10
+    assert np.array_equal(result.select, [0, 1, 2])
+    assert np.array_equal(result.ref_select, [0, 1, 2])
+
+
 def _overlay_viewer(tmp_path):
     p = np.array([[0, 0, 0], [1, 0, 0], [0, 2, 0], [0, 0, 3]], dtype=float)
     reference = _mol(["C", "N", "O", "H"], p, "reference")

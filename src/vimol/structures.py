@@ -300,7 +300,8 @@ class StructureSet:
     def align_to_reference_subset(self, mobile, onto=None, ref_select=None,
                                   **kwargs) -> AlignmentResult:
         """Find mobile atoms matching picked reference atoms, then align."""
-        from .align import (superpose, superpose_to_reference_subset,
+        from .align import (superpose, superpose_between_subsets,
+                            superpose_to_reference_subset,
                             _topology_subset_indices, _largest_topology_subset)
 
         mobile_i = self._index_of_label(mobile) if isinstance(mobile, str) else int(mobile)
@@ -316,6 +317,7 @@ class StructureSet:
         keyed = (len(mobile_keys) == entry.molecule.n_atoms
                  and len(reference_keys) == reference.molecule.n_atoms)
         mobile_indices = None
+        result = None
         if keyed:
             key_to_mobile = {}
             duplicates = set()
@@ -341,16 +343,35 @@ class StructureSet:
             needed = Counter(reference.molecule.symbols[int(i)] for i in ref_indices)
             available = Counter(entry.molecule.symbols)
             if any(count > available[element] for element, count in needed.items()):
-                partial = _largest_topology_subset(
-                    entry.molecule, reference.molecule, ref_indices)
-                if partial is not None:
-                    mobile_indices, ref_indices = partial
-        if mobile_indices is not None:
+                # A preset such as Heavy atoms can select the whole reference
+                # while a related mobile differs by one terminal atom. If all
+                # mobile atoms belonging to the selected element set fit
+                # inside the reference selection, fit that maximal pool in
+                # the reverse direction instead of demanding the absent atom.
+                mobile_pool = np.fromiter(
+                    (i for i, symbol in enumerate(entry.molecule.symbols)
+                     if symbol in needed), dtype=np.int64)
+                pool_counts = Counter(entry.molecule.symbols[int(i)]
+                                      for i in mobile_pool)
+                if (len(mobile_pool) >= 3 and len(mobile_pool) < len(ref_indices)
+                        and all(count <= needed[element]
+                                for element, count in pool_counts.items())):
+                    result = superpose_between_subsets(
+                        entry.molecule, reference.molecule,
+                        mobile_pool, ref_indices, **kwargs)
+                    mobile_indices = result.select
+                    ref_indices = result.ref_select
+                else:
+                    partial = _largest_topology_subset(
+                        entry.molecule, reference.molecule, ref_indices)
+                    if partial is not None:
+                        mobile_indices, ref_indices = partial
+        if mobile_indices is not None and result is None:
             # Named identity or connected bond-graph correspondence: both are
             # O(n) setup plus one tiny Kabsch fit.
             result = superpose(entry.molecule, reference.molecule,
                                select=mobile_indices, ref_select=ref_indices)
-        else:
+        elif mobile_indices is None:
             result = superpose_to_reference_subset(
                 entry.molecule, reference.molecule, ref_indices, **kwargs)
         result.ref_label = reference.label
