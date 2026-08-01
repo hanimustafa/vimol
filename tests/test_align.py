@@ -216,6 +216,43 @@ def test_heavy_atom_subset_drops_terminal_reference_atom_missing_from_mobile():
     assert np.array_equal(result.ref_select, [0, 1, 2])
 
 
+def test_subset_alignment_reuses_correspondence_across_trajectory_frames(
+        tmp_path, monkeypatch):
+    reference = _mol(
+        ["C", "N", "O", "O"],
+        [[0, 0, 0], [1.2, 0, 0], [0, 1.4, 0], [8, 8, 8]],
+    )
+    core = _rigid(reference.positions[:3])
+    first = _mol(["C", "N", "O", "H"],
+                 np.vstack((core, [[30, 30, 30]])))
+    second = _mol(["C", "N", "O", "H"],
+                  np.vstack((core + [0.02, 0, 0], [[31, 30, 30]])))
+    structures = StructureSet()
+    structures.append(first, label="traj.xyz#1", path="/data/traj.xyz").marked = True
+    structures.append(second, label="traj.xyz#2", path="/data/traj.xyz").marked = True
+    structures.append(reference, label="reference.xyz",
+                      path="/data/reference.xyz").marked = True
+    structures.active_index = 2
+    structures.overlay = True
+    fd = os.open(str(tmp_path / "reuse.out"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        viewer = Viewer(reference, structures=structures, fd_out=fd, backend="cpu")
+        original = structures.align_to_reference_subset
+        searches = []
+
+        def counted_search(*args, **kwargs):
+            searches.append(args[0])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(structures, "align_to_reference_subset", counted_search)
+        viewer._align_overlay(ref_select=(0, 1, 2, 3))
+        assert searches == [0]
+        assert structures[0].alignment.n_fitted == 3
+        assert structures[1].alignment.n_fitted == 3
+    finally:
+        os.close(fd)
+
+
 def _overlay_viewer(tmp_path):
     p = np.array([[0, 0, 0], [1, 0, 0], [0, 2, 0], [0, 0, 3]], dtype=float)
     reference = _mol(["C", "N", "O", "H"], p, "reference")

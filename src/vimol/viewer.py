@@ -371,6 +371,9 @@ class Viewer:
         # headers and off-screen rows appear in neither).
         self._list_row_spans: List[Tuple[int, int, int]] = []
         self._list_row_struct: List[int] = []
+        # (screen row, col start/end, first/last structure index) for each
+        # visible per-file ALL button.
+        self._list_group_all_spans: List[Tuple[int, int, int, int, int]] = []
         # index of the first VISIBLE display row (see _list_display_rows):
         # the strip scrolls, so a 100-frame trajectory is reachable.
         self._list_scroll = 0
@@ -705,28 +708,74 @@ class Viewer:
         related (design §4.1).
 
         A file contributing several structures becomes a non-selectable
-        ``("group", None, basename)`` header followed by one
+        ``("group", first_index, basename)`` header followed by one
         ``("struct", i, "frame k")`` row per model, so a 100-frame trajectory
-        names its file once instead of a hundred times. A file contributing a
-        single structure is just its own ``("struct", i, basename)`` row, with
-        no header. Runs are consecutive: structures load in file order, and
-        grouping across a gap would reorder the strip behind the user's back.
+        names its file once instead of a hundred times. Path-backed singleton
+        files also receive a section whenever several files are open or the
+        viewer is in overlay mode. Runs are consecutive: structures load in
+        file order, and grouping across a gap would reorder the strip.
         """
         rows: List[Tuple[str, Optional[int], str]] = []
         n = len(self.structures)
+        path_groups = set()
+        for k in range(n):
+            key = self._list_group_key(k)
+            if key[0] == "path":
+                path_groups.add(key)
         i = 0
         while i < n:
             key = self._list_group_key(i)
             j = i + 1
             while j < n and self._list_group_key(j) == key:
                 j += 1
-            if j - i > 1:
-                rows.append(("group", None, self._list_group_name(i, True)))
+            sectioned = (j - i > 1
+                         or (key[0] == "path"
+                             and (self.structures.overlay or len(path_groups) > 1)))
+            if sectioned:
+                rows.append(("group", i, self._list_group_name(i, True)))
                 rows.extend(("struct", m, f"frame {m - i + 1}") for m in range(i, j))
             else:
                 rows.append(("struct", i, self._list_group_name(i, False)))
             i = j
         return rows
+
+    def _list_group_end(self, first: int) -> int:
+        """Exclusive end of the consecutive file group starting at *first*."""
+        key = self._list_group_key(first)
+        end = first + 1
+        while end < len(self.structures) and self._list_group_key(end) == key:
+            end += 1
+        return end
+
+    def _list_group_all_hit(self, col: int, row: int):
+        for r0, c0, c1, first, end in self._list_group_all_spans:
+            if r0 == row and c0 <= col < c1:
+                return first, end
+        return None
+
+    def _toggle_list_group_all(self, first: int, end: int) -> None:
+        """Fill a file's overlay membership, or reduce it to the main frame."""
+        sset = self.structures
+        all_selected = all(i == sset.active_index or sset[i].marked
+                           for i in range(first, end))
+        if all_selected:
+            for i in range(first, end):
+                sset[i].marked = False
+            # Never leave overlay=True with no marks: StructureSet interprets
+            # that as "draw everything". The main frame is always retained.
+            sset.active.marked = True
+            # The main frame need not live in the file being cleared -- saying
+            # it does would credit this file with a row it does not own.
+            held = first <= sset.active_index < end
+            self._msg = "%s: %s" % (self._list_group_name(first, True),
+                                    "main frame only" if held else "hidden")
+        else:
+            for i in range(first, end):
+                sset[i].marked = True
+            self._msg = f"{self._list_group_name(first, True)}: all selected"
+        sset.overlay = True
+        sset.invalidate()
+        self._list_focused = True
 
     # -- strip scrolling ---------------------------------------------------
     def _list_capacity(self) -> int:
@@ -856,6 +905,7 @@ class Viewer:
         sset = self.structures
         self._list_row_spans = []
         self._list_row_struct = []
+        self._list_group_all_spans = []
         self._measure_header_spans = []
         self._subset_header_spans = []
         self._subset_remove_spans = []
@@ -948,9 +998,25 @@ class Viewer:
         for n_row, (kind, i, text) in enumerate(visible):
             row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
-                name = self._truncate_middle(text, max(1, list_w - 1))
-                if not put(row0, self._list_line([(" ", ""), (name, head_fg)], total_w)):
+                end = self._list_group_end(i)
+                all_selected = all(k == sset.active_index or sset[k].marked
+                                   for k in range(i, end))
+                button = " ALL "
+                name = self._truncate_middle(
+                    text, max(1, list_w - len(button) - 2))
+                button_col = 1 + len(name) + 1
+                button_style = (self._sgr_bg(
+                    self.theme.measure_col_bg_a if all_selected
+                    else self.theme.list_cap_bg)
+                    + self._sgr_fg(self.theme.list_label_fg if all_selected
+                                   else self.theme.list_muted_fg)
+                    + ("\x1b[1m" if all_selected else ""))
+                segs = [(" ", ""), (name, head_fg), (" ", ""),
+                        (button, button_style)]
+                if not put(row0, self._list_line(segs, total_w)):
                     break
+                self._list_group_all_spans.append(
+                    (row0, button_col, button_col + len(button), i, end))
                 drawn_rows += 1
                 continue
             entry = sset[i]
@@ -2167,6 +2233,11 @@ class Viewer:
                             self._open_selection_picker()
                             changed = True
                             continue
+                        group = self._list_group_all_hit(col, row)
+                        if group is not None:
+                            self._toggle_list_group_all(*group)
+                            changed = True
+                            continue
                         # A measurement column's × removes it (design
                         # 2026-07-30) and must win over the row click below --
                         # the header row owns no structure, so it would
@@ -2519,6 +2590,11 @@ class Viewer:
 
         fitted = []
         failures = []
+        # Once one frame from a trajectory has established atom
+        # correspondence, every sibling frame with the same atom-identity
+        # layout can reuse it. The remaining fits are then O(N) Kabsch calls
+        # instead of repeating the subset search for every trajectory frame.
+        correspondence_cache = {}
         reference = sset[reference_i].molecule
         ref_counts = Counter(reference.symbols)
         for i in mobiles:
@@ -2527,8 +2603,27 @@ class Viewer:
             mobile_counts = Counter(mobile.symbols)
             try:
                 if ref_select is not None:
-                    result = sset.align_to_reference_subset(
-                        i, onto=reference_i, ref_select=ref_select)
+                    # Bond perception can legitimately fluctuate as a
+                    # trajectory moves through a distance cutoff; atom order
+                    # within one source trajectory does not. PDB identity is
+                    # even stronger when available.
+                    identity = (tuple(mobile.atom_keys)
+                                if len(mobile.atom_keys) == mobile.n_atoms
+                                else tuple(mobile.symbols))
+                    cache_key = (self._list_group_key(i), identity)
+                    correspondence = correspondence_cache.get(cache_key)
+                    if correspondence is None:
+                        result = sset.align_to_reference_subset(
+                            i, onto=reference_i, ref_select=ref_select)
+                        if (result.select is not None
+                                and result.ref_select is not None):
+                            correspondence_cache[cache_key] = (
+                                result.select.copy(), result.ref_select.copy())
+                    else:
+                        mobile_select, matched_reference = correspondence
+                        result = sset.align(
+                            i, onto=reference_i, select=mobile_select,
+                            ref_select=matched_reference)
                 elif (mobile.symbols == reference.symbols
                       and mobile.n_atoms > 300):
                     # Protein-scale permutation is inherently quadratic and

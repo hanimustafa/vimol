@@ -1336,9 +1336,9 @@ def test_viewer_list_groups_a_multi_model_file_under_one_header(tmp_path):
         os.close(fd)
 
 
-def test_viewer_list_single_structure_files_get_no_group_header(tmp_path):
-    """A file contributing exactly one structure gets no header row -- just
-    its own row, labelled with the basename."""
+def test_viewer_list_single_structure_files_get_overlay_sections(tmp_path):
+    """Each file gets its own section when several files are open, even when
+    that file contributes only one structure."""
     from vimol.structures import StructureSet
     from vimol.viewer import Viewer
 
@@ -1353,13 +1353,14 @@ def test_viewer_list_single_structure_files_get_no_group_header(tmp_path):
         v._update_geometry()
         v._list_w = 40
         text = v._draw_list().decode("utf-8", "replace")
-        assert "methane.xyz" in text and "water.xyz" in text
-        assert "frame " not in text
+        assert text.count("methane.xyz") == 1 and text.count("water.xyz") == 1
+        assert text.count("frame 1") == 2
+        assert text.count("ALL") == 2
         assert "/data/" not in text               # basenames only
         assert len(v._list_row_spans) == 2
-        # two rows, two structures, and no group header anywhere
         rows = v._list_display_rows()
-        assert [kind for kind, _i, _t in rows] == ["struct", "struct"]
+        assert [kind for kind, _i, _t in rows] == [
+            "group", "struct", "group", "struct"]
     finally:
         os.close(fd)
 
@@ -1385,8 +1386,8 @@ def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
         v._update_geometry()
         rows = v._list_display_rows()
         assert [kind for kind, _i, _t in rows] == [
-            "group", "struct", "struct", "struct", "struct"]
-        assert rows[-1][1:] == (3, "apo.pdb")     # lone file: no 'frame 4'
+            "group", "struct", "struct", "struct", "group", "struct"]
+        assert rows[-1][1:] == (3, "frame 1")
         assert rows[1][2] == "frame 1"
 
         v._draw_list()
@@ -1403,6 +1404,71 @@ def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
         assert v._list_cursor == 2
         v._draw_list()
         assert 2 in v._list_row_struct
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_group_all_button_fills_then_clears_to_main(tmp_path):
+    """ALL fills a partial file selection; its selected colour and next click
+    then clear the file while retaining the untinted main frame."""
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=3)
+    try:
+        v.structures.overlay = True
+        v._list_w = 28
+        partial = v._draw_list().decode("utf-8", "replace")
+        assert len(v._list_group_all_spans) == 1
+        row, c0, c1, first, end = v._list_group_all_spans[0]
+        assert (first, end) == (0, 3)
+        partial_style = _sgr_bg(v.theme.list_cap_bg)
+        selected_style = _sgr_bg(v.theme.measure_col_bg_a)
+        assert partial_style in partial
+
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert [entry.marked for entry in v.structures] == [True, True, True]
+        selected = v._draw_list().decode("utf-8", "replace")
+        assert selected_style in selected
+
+        row, c0, c1, _first, _end = v._list_group_all_spans[0]
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert [entry.marked for entry in v.structures] == [True, False, False]
+        assert v.structures.drawn_indices() == [0]
+        assert v.structures.overlay is True
+        assert "main frame only" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_group_all_does_not_claim_a_main_frame_it_does_not_own(tmp_path):
+    """Clearing a file that does not contain the main frame hides it outright.
+    Reporting 'main frame only' there would credit the file with a row that
+    lives in a different file, and the strip would show it contributing none."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    for label, path in (("a.xyz#1", "/data/a.xyz"), ("a.xyz#2", "/data/a.xyz"),
+                        ("b.xyz#1", "/data/b.xyz"), ("b.xyz#2", "/data/b.xyz")):
+        sset.append(vimol.load(os.path.join(EX, "methane.xyz")),
+                    label=label, path=path).marked = True
+    sset.active_index = 0                        # main frame lives in a.xyz
+    sset.overlay = True
+    fd = os.open(str(tmp_path / "twofile.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+        v._update_geometry()
+
+        v._toggle_list_group_all(2, 4)           # clear b.xyz
+        assert [entry.marked for entry in sset] == [True, True, False, False]
+        assert sset.drawn_indices() == [0, 1]
+        assert v._msg == "b.xyz: hidden"
+
+        v._toggle_list_group_all(0, 2)           # clear a.xyz, which owns it
+        assert sset.drawn_indices() == [0]
+        assert v._msg == "a.xyz: main frame only"
     finally:
         os.close(fd)
 
