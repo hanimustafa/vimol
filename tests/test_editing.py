@@ -861,14 +861,89 @@ def test_pick_and_unproject_correct_at_reduced_render_scale():
 
 
 def test_dynamic_resolution_controller_steps_down_up_and_clamps():
-    from vimol.viewer import Viewer, _INTERACT_BUDGET
+    from vimol.viewer import Viewer, _INTERACT_BUDGET, _SCALE_FLOOR
     step_down = Viewer._next_render_scale(1.0, _INTERACT_BUDGET * 4)
     assert step_down < 1.0
-    assert Viewer._next_render_scale(0.15, _INTERACT_BUDGET * 100) == 0.15  # floor
+    assert Viewer._next_render_scale(_SCALE_FLOOR,
+                                     _INTERACT_BUDGET * 100) == _SCALE_FLOOR
     step_up = Viewer._next_render_scale(0.5, _INTERACT_BUDGET * 0.2)
     assert step_up > 0.5
     assert Viewer._next_render_scale(1.0, _INTERACT_BUDGET * 0.2) == 1.0   # ceiling
-    assert Viewer._next_render_scale(0.7, _INTERACT_BUDGET * 0.8) == 0.7   # in band
+
+
+def test_one_cold_frame_does_not_collapse_resolution():
+    """A post-idle wake-up is not evidence that the resolution is too high.
+
+    VIM-31: a single cold frame (gap=2415ms in the field log) cost ~28ms
+    against an 8.3ms budget and knocked the scale from 1.0 to 0.53 in one
+    step. Only a *sustained* overload should cost resolution.
+    """
+    from vimol.viewer import Viewer, _INTERACT_BUDGET
+    cold = _INTERACT_BUDGET * 4
+    assert Viewer._next_render_scale(1.0, cold, _INTERACT_BUDGET, 1) == 1.0
+    assert Viewer._next_render_scale(1.0, cold, _INTERACT_BUDGET, 2) < 1.0
+
+
+def test_dynamic_resolution_climbs_back_to_exactly_one():
+    """The controller must escape its own steady state and land on 1.0.
+
+    VIM-31: the old ramp-up branch only fired below budget*0.5, but a working
+    controller sits just *under* budget -- so the target zone was the zone it
+    could never leave (2024 of 7342 field frames pinned at the floor). And
+    landing near 1.0 is not good enough: any scale < 1.0 makes the terminal
+    resample every pixel, so 0.99 is fully blurry, not 1% blurry.
+    """
+    from vimol.viewer import Viewer, _INTERACT_BUDGET, _SCALE_FLOOR
+    # a frame comfortably inside budget must never freeze the scale
+    assert Viewer._next_render_scale(0.7, _INTERACT_BUDGET * 0.8) > 0.7
+    # Frame cost must be modelled, not constant: it grows with pixel count,
+    # i.e. with scale**2. A fixed cost at every scale is physically impossible
+    # and would hide the controller overshooting what it can actually afford.
+    def cost(scale, full):
+        return full * scale * scale
+
+    scale = _SCALE_FLOOR
+    for _ in range(40):
+        scale = Viewer._next_render_scale(
+            scale, cost(scale, _INTERACT_BUDGET * 0.8), _INTERACT_BUDGET, 0)
+    assert scale == 1.0            # exactly, not 0.99
+    # and once there it stays there
+    assert Viewer._next_render_scale(
+        scale, cost(scale, _INTERACT_BUDGET * 0.8), _INTERACT_BUDGET) == 1.0
+
+
+def test_render_scale_does_not_oscillate_when_full_res_just_misses_budget():
+    """Never pulse between crisp and resampled.
+
+    VIM-31 follow-up: a controller that snaps to 1.0 whenever it gets close
+    blows the budget there, gets stepped back down, and snaps again -- a
+    visible ~4-frame throb, worse to look at than steady softness. When full
+    resolution genuinely does not fit, the scale must settle and stay put.
+    """
+    from vimol.viewer import Viewer, _INTERACT_BUDGET
+    full = _INTERACT_BUDGET * 1.4          # full res misses budget by 40%
+    scale, streak, seen = 1.0, 0, []
+    for _ in range(60):
+        elapsed = full * scale * scale
+        streak = streak + 1 if elapsed > _INTERACT_BUDGET else 0
+        scale = Viewer._next_render_scale(scale, elapsed, _INTERACT_BUDGET,
+                                          streak)
+        seen.append(round(scale, 4))
+    assert len(set(seen[-10:])) == 1, f"scale is oscillating: {seen[-10:]}"
+    assert seen[-1] < 1.0                  # honest: full res does not fit
+    # and the resting frame it chose actually fits the budget
+    assert full * seen[-1] ** 2 <= _INTERACT_BUDGET * 1.01
+
+
+def test_render_scale_floor_stays_legible():
+    """Even the worst case must stay readable: 0.15 was a 6.7x upscale."""
+    from vimol.viewer import Viewer, _INTERACT_BUDGET, _SCALE_FLOOR
+    assert _SCALE_FLOOR >= 0.5
+    scale = 1.0
+    for _ in range(50):
+        scale = Viewer._next_render_scale(scale, _INTERACT_BUDGET * 100,
+                                          _INTERACT_BUDGET, 2)
+    assert scale == _SCALE_FLOOR
 
 
 def test_encode_image_compress_level_controls_zlib_but_not_pixels():
@@ -1019,13 +1094,18 @@ def test_interact_fence_uses_rtt_aware_budget(monkeypatch):
     v._fence_base = 0.0
     v._fence_tick(b"\x1b[?62;4c")
     assert v._interact_scale > 0.5
-    # ack after ~0.6s total: 0.5s controllable vs 0.1s budget -> step down
-    v._interact_scale = 0.5
-    v._fence_t0 = _time.perf_counter() - 0.6
-    v._fence_kind = "interact"
-    v._fence_base = 0.0
-    v._fence_tick(b"\x1b[?62;4c")
-    assert v._interact_scale < 0.5
+    # ack after ~0.6s total: 0.5s controllable vs 0.1s budget -> over budget.
+    # One such frame is tolerated (a cold frame proves nothing, VIM-31); the
+    # second consecutive one is what actually costs resolution. Starts at 1.0
+    # because _SCALE_FLOOR is 0.5 -- stepping down from the floor is a no-op.
+    v._interact_scale = 1.0
+    for _ in range(2):
+        v._fence_t0 = _time.perf_counter() - 0.6
+        v._fence_kind = "interact"
+        v._fence_base = 0.0
+        v._fence_tick(b"\x1b[?62;4c")
+    assert v._interact_scale < 1.0
+    assert v._slow_frames == 2
 
 
 def test_fence_reply_split_across_reads(monkeypatch):

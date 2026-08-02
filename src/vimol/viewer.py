@@ -171,9 +171,29 @@ _BASE_DRIVER_KEYS = {"q", "escape", "a", "A", "?", "d", "g", "t", "n", "p", "m",
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
 
-# Interactive frame budget (seconds) for the dynamic-resolution controller:
-# ~120 fps, minus headroom for encode/transmit.
-_INTERACT_BUDGET = 1.0 / 120.0
+# Interactive frame budget (seconds) for the dynamic-resolution controller.
+# The budget has to be reachable at full resolution or the controller can
+# never sit at 1.0 and the image is permanently resampled -- which is what
+# VIM-31 was. The worst full-resolution frame observed in the field log cost
+# ~28ms end to end (render + encode + the terminal's own texture upload) at
+# 2968x1856; that sample was the first frame after an idle pause, so it is an
+# upper bound rather than the steady-state cost, and the budget is set to
+# clear it with headroom. The old 120 fps (8.3ms) target could not be met at
+# full resolution by any measurement taken, so it bought frame rate nobody
+# asked for with sharpness everybody notices -- input arrives at 60 Hz at
+# best, so frames past that are discarded anyway. 30 fps is smooth for
+# orbiting a molecule.
+_INTERACT_BUDGET = 1.0 / 30.0
+# Lowest interactive render scale. This is a legibility floor, not a
+# performance one: below about half resolution the terminal's upscale turns
+# the molecule to mush, and a frame that cheap is almost never render-bound
+# anyway (encode+transmit dominate and do not shrink with resolution).
+_SCALE_FLOOR = 0.5
+# Consecutive over-budget frames required before giving up resolution. One
+# slow frame is not evidence of a too-high resolution -- the first frame after
+# an idle pause pays for a cold cache/GPU wake-up and can cost several times
+# the budget all by itself (VIM-31).
+_SLOW_FRAMES_BEFORE_STEP_DOWN = 2
 # Budget (seconds) for a *settle* frame: render + encode + transmit of the
 # crisp full-quality still that lands after you stop moving. On a slow link
 # (SSH) a full-resolution frame is megabytes and can take seconds to arrive;
@@ -337,6 +357,8 @@ class Viewer:
         # resolution factor for the crisp settle frame; probe-seeded in
         # _finish_startup, then adapted by _next_idle_scale measurements.
         self._idle_scale = 1.0
+        # consecutive over-budget interactive frames; see _next_render_scale.
+        self._slow_frames = 0
         # capability probe handed in by the CLI (it may have probed already
         # to decide whether to launch at all); None -> probe in _finish_startup.
         self._probe = probe
@@ -1461,29 +1483,56 @@ class Viewer:
 
     @staticmethod
     def _next_render_scale(current: float, elapsed: float,
-                           budget: float = _INTERACT_BUDGET) -> float:
+                           budget: float = _INTERACT_BUDGET,
+                           slow_streak: int = _SLOW_FRAMES_BEFORE_STEP_DOWN
+                           ) -> float:
         """Dynamic-resolution controller: the next interactive render scale.
 
         Aims the whole frame pipeline -- render (either backend), encode, and
         delivery over the terminal link -- at *budget* by trading resolution
         for speed while the camera is moving (pixels scale with the square of
-        the factor, so the correction is a square root). Slow frames step the
-        scale down immediately; comfortably fast frames ease it back up.
-        *budget* is ~120 fps locally, but a paced remote session passes
-        max(that, link RTT): on a high-latency link 120 fps is physically
-        impossible no matter how few pixels are sent, and chasing it would
-        floor the resolution for nothing -- the right target there is
-        "transfer costs no more than the RTT that's already unavoidable".
-        Clamped to [0.15, 1]; the floor is a last resort, and only ever
-        applies during motion (idle frames use the separate, more generous
-        _next_idle_scale controller and supersampling).
+        the factor, so the correction is a square root). *budget* is ~30 fps
+        locally, but a paced remote session passes max(that, link RTT): on a
+        high-latency link 30 fps is physically impossible no matter how few
+        pixels are sent, and chasing it would floor the resolution for
+        nothing -- the right target there is "transfer costs no more than the
+        RTT that's already unavoidable". Clamped to [_SCALE_FLOOR, 1].
+
+        Three rules keep it from parking below 1.0 and staying there, which
+        is what VIM-31 was (2024 of 7342 field frames pinned at the floor):
+
+        * Stepping DOWN needs *slow_streak* consecutive over-budget frames.
+          A single cold frame -- the first one after an idle pause, paying
+          for a cache/GPU wake-up -- measured ~28ms against an 8.3ms budget
+          and used to knock the scale straight from 1.0 to 0.53.
+        * Stepping UP happens on ANY under-budget frame. The old rule only
+          climbed below budget*0.5, but a working controller's steady state
+          is just *under* budget -- so its own target zone was the one zone
+          it could never leave, and the descent was one-way.
+        * Landing *near* 1.0 is worth nothing, because sharpness is binary:
+          below 1.0 the terminal resamples every pixel on display, so 0.99 is
+          exactly as blurry as 0.7 and merely wastes the pixels it rendered.
+          So the climb predicts what full resolution would cost and jumps
+          straight to 1.0 when it fits -- and deliberately stops short of 1.0
+          when it doesn't, rather than snapping up and being knocked back
+          every few frames.
         """
         if elapsed > budget:
+            if slow_streak < _SLOW_FRAMES_BEFORE_STEP_DOWN:
+                return current       # one slow frame proves nothing
             factor = (budget / elapsed) ** 0.5
-            return max(0.15, current * max(factor, 0.5))
-        if elapsed < budget * 0.5:
-            return min(1.0, current * 1.15)
-        return current
+            return max(_SCALE_FLOOR, current * max(factor, 0.5))
+        # Under budget: climb, but never past what the measurement says we can
+        # afford. Frame time is dominated by pixel count, so a frame that cost
+        # *elapsed* at *current* would cost budget at exactly this scale:
+        affordable = current * (budget / elapsed) ** 0.5 if elapsed > 0 else 1.0
+        if affordable >= 1.0:
+            return 1.0               # full resolution genuinely fits
+        # It doesn't fit. Ease toward the affordable scale and stop there --
+        # deliberately NOT snapping to 1.0, which would blow the budget, get
+        # stepped back down, and snap again: a ~4-frame pulse between crisp
+        # and resampled is worse to look at than steady softness.
+        return min(affordable, current * 1.15)
 
     @staticmethod
     def _next_idle_scale(current: float, elapsed: float) -> float:
@@ -1597,11 +1646,21 @@ class Viewer:
                     self._idle_after = min(1.0, 0.25 + 2.0 * self._link_rtt)
                 if kind == "settle":
                     self._idle_scale = self._next_idle_scale(self._idle_scale, total)
+                    # A settle ends the interaction burst, so the run length
+                    # starts over: the cold frame that opens the NEXT burst
+                    # must not be counted alongside one from the last.
+                    self._slow_frames = 0
                 else:
+                    controllable = max(total - self._link_rtt, 0.0)
+                    live_budget = max(_INTERACT_BUDGET, self._link_rtt)
+                    # Run length of consecutive over-budget frames, so one
+                    # cold frame after an idle pause can't cost resolution
+                    # (see _next_render_scale).
+                    self._slow_frames = (self._slow_frames + 1
+                                         if controllable > live_budget else 0)
                     self._interact_scale = self._next_render_scale(
-                        self._interact_scale,
-                        max(total - self._link_rtt, 0.0),
-                        max(_INTERACT_BUDGET, self._link_rtt))
+                        self._interact_scale, controllable, live_budget,
+                        self._slow_frames)
                 return
         if time.perf_counter() - self._fence_t0 > _FENCE_TIMEOUT:
             self._fence_t0 = None
@@ -1613,7 +1672,7 @@ class Viewer:
         scene = self.widget.scene
         if scene.supersample != want_ss:
             scene.set_supersample(want_ss)
-        # dynamic resolution, BOTH backends: interactive frames at the ~120fps
+        # dynamic resolution, BOTH backends: interactive frames at the ~30fps
         # adaptive scale, settle frames at the link-speed-adaptive idle scale.
         # No CPU-only gate: a slow link costs the same megabytes per frame no
         # matter which backend rendered them, so a GPU on a fast link simply
