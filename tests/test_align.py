@@ -292,6 +292,44 @@ def test_subset_alignment_reuses_correspondence_across_trajectory_frames(
         os.close(fd)
 
 
+def test_full_rmsd_aligns_all_frames_while_file_group_is_collapsed(tmp_path):
+    reference = _mol(
+        ["C", "N", "O", "H"],
+        [[0, 0, 0], [1.2, 0, 0], [0, 1.4, 0], [0, 0, 1.6]],
+    )
+    first = _mol(reference.symbols, _rigid(reference.positions), "first")
+    second = _mol(reference.symbols,
+                  _rigid(reference.positions) + [0.02, 0, 0], "second")
+    structures = StructureSet()
+    structures.append(first, label="traj.xyz#1",
+                      path="/data/traj.xyz").marked = True
+    structures.append(second, label="traj.xyz#2",
+                      path="/data/traj.xyz").marked = True
+    structures.append(reference, label="reference.xyz",
+                      path="/data/reference.xyz").marked = True
+    structures.active_index = 2
+    structures.overlay = True
+    fd = os.open(str(tmp_path / "collapsed-full-rmsd.out"),
+                 os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        viewer = Viewer(reference, structures=structures,
+                        fd_out=fd, backend="cpu")
+        viewer._toggle_list_group_collapsed(0, 2)
+        assert viewer._list_display_rows()[1] == (
+            "collapsed", 0, "2 frames")
+
+        assert viewer._dispatch([KeyEvent("r")]) is True
+        assert len(viewer._full_rmsd_columns) == 1
+        column = viewer._full_rmsd_columns[0]
+        assert column.values[0] is not None
+        assert column.values[1] is not None
+        assert column.values[2] == 0.0
+        assert viewer._list_display_rows()[1] == (
+            "collapsed", 0, "2 frames")
+    finally:
+        os.close(fd)
+
+
 def _overlay_viewer(tmp_path):
     p = np.array([[0, 0, 0], [1, 0, 0], [0, 2, 0], [0, 0, 3]], dtype=float)
     reference = _mol(["C", "N", "O", "H"], p, "reference")

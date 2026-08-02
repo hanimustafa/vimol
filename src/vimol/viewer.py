@@ -394,6 +394,16 @@ class Viewer:
         # or middle-truncated display name.
         self._list_path_hover_spans: List[Tuple[int, int, int, str]] = []
         self._list_path_hover_tip = ""
+        # File groups collapsed to one ``N frames`` summary row. Keys use the
+        # same stable identity as grouping, so scrolling or changing the main
+        # frame never loses collapse state.
+        self._collapsed_groups = set()
+        self._list_group_toggle_spans: List[Tuple[int, int, int, int, int]] = []
+        self._list_group_summary_spans: List[Tuple[int, int, int, int, int]] = []
+        # One past the last row the strip painted last time. Collapsing can
+        # shrink the strip by hundreds of rows at once, and nothing else
+        # repaints that column, so _draw_list clears back down to here.
+        self._list_drawn_bottom = 0
         # index of the first VISIBLE display row (see _list_display_rows):
         # the strip scrolls, so a 100-frame trajectory is reachable.
         self._list_scroll = 0
@@ -807,7 +817,11 @@ class Viewer:
             if sectioned:
                 rows.append(("group", i, self._list_group_name(
                     i, True, path_names)))
-                rows.extend(("struct", m, f"frame {m - i + 1}") for m in range(i, j))
+                if key in self._collapsed_groups:
+                    rows.append(("collapsed", i, f"{j - i} frames"))
+                else:
+                    rows.extend(("struct", m, f"frame {m - i + 1}")
+                                for m in range(i, j))
             else:
                 rows.append(("struct", i, self._list_group_name(
                     i, False, path_names)))
@@ -844,6 +858,48 @@ class Viewer:
         while first > 0 and self._list_group_key(first - 1) == key:
             first -= 1
         return f"{entry.path}#frame {i - first + 1}"
+    @staticmethod
+    def _list_group_span_hit(spans, col: int, row: int):
+        for r0, c0, c1, first, end in spans:
+            if r0 == row and c0 <= col < c1:
+                return first, end
+        return None
+
+    def _toggle_list_group_collapsed(self, first: int, end: int) -> None:
+        key = self._list_group_key(first)
+        if key in self._collapsed_groups:
+            self._collapsed_groups.remove(key)
+            state = "expanded"
+        else:
+            self._collapsed_groups.add(key)
+            state = "collapsed"
+        # The display can shrink from hundreds of rows to two. Clamp now,
+        # rather than leaving one draw where the file vanishes below a stale
+        # scroll offset.
+        self._list_scroll = min(self._list_scroll, self._list_max_scroll())
+        self._list_focused = True
+        self._msg = f"{self._list_group_name(first, True)}: {state}"
+
+    @staticmethod
+    def _list_collapsed_measure_cells(layout, first: int, end: int) -> List[str]:
+        """Local minimum cell for every column across ``[first, end)``."""
+        result = []
+        for _header, _width, cells, _removable in layout:
+            candidates = []
+            for cell in cells[first:end]:
+                bare = cell.rstrip("↑↓")
+                try:
+                    number = float(bare)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(number):
+                    candidates.append((number, bare))
+            if not candidates:
+                result.append("—")
+            else:
+                _number, formatted = min(candidates, key=lambda item: item[0])
+                result.append(formatted + "↓")
+        return result
 
     def _toggle_list_group_all(self, first: int, end: int) -> None:
         """Fill a file's overlay membership, or reduce it to the main frame."""
@@ -901,8 +957,15 @@ class Viewer:
         the two apart, and doing this arithmetic on the structure index is
         exactly how a cursor ends up 'visible' at the wrong row."""
         rows = self._list_display_rows()
-        row = next((r for r, (kind, k, _t) in enumerate(rows)
-                    if kind == "struct" and k == i), None)
+        row = None
+        for r, (kind, k, _text) in enumerate(rows):
+            if kind == "struct" and k == i:
+                row = r
+                break
+            if (kind == "collapsed" and k is not None
+                    and k <= i < self._list_group_end(k)):
+                row = r
+                break
         if row is None:
             return
         # scrolling up to the first frame of a file brings its header along:
@@ -999,6 +1062,8 @@ class Viewer:
         self._list_row_struct = []
         self._list_group_all_spans = []
         self._list_path_hover_spans = []
+        self._list_group_toggle_spans = []
+        self._list_group_summary_spans = []
         self._measure_header_spans = []
         self._subset_header_spans = []
         self._subset_remove_spans = []
@@ -1062,6 +1127,8 @@ class Viewer:
             if entry.path is not None:
                 self._list_path_hover_spans.append(
                     (row0, 1, 1 + len(name), entry.path))
+            self._list_group_toggle_spans.append(
+                (row0, 1, 1 + len(name), group_i, end))
             self._list_group_all_spans.append(
                 (row0, button_col, button_col + len(button), group_i, end))
             return True
@@ -1132,7 +1199,8 @@ class Viewer:
         # header scrolls away, it becomes a sticky copy instead, keeping both
         # the source name and its ALL control visible throughout the file.
         sticky = None
-        if 0 < first < len(rows) and rows[first][0] == "struct":
+        if (0 < first < len(rows)
+                and rows[first][0] in ("struct", "collapsed")):
             struct_i = rows[first][1]
             for candidate in range(first - 1, -1, -1):
                 if rows[candidate][0] != "group":
@@ -1155,6 +1223,24 @@ class Viewer:
                 if not draw_group(row0, i, text):
                     break
                 drawn_rows += 1
+                continue
+            if kind == "collapsed":
+                end = self._list_group_end(i)
+                prefix = " ▸ "
+                visible_label = self._truncate_middle(
+                    text, max(1, list_w - len(prefix)))
+                segs = [(prefix, muted),
+                        (visible_label.ljust(max(1, list_w - len(prefix))),
+                         head_fg)]
+                if layout:
+                    segs += measure_segs(
+                        row0, self._list_collapsed_measure_cells(
+                            layout, i, end), "right")
+                if not put(row0, self._list_line(segs, total_w)):
+                    break
+                drawn_rows += 1
+                self._list_group_summary_spans.append(
+                    (row0, len(prefix), len(prefix) + len(visible_label), i, end))
                 continue
             entry = sset[i]
             tint = tuple(int(max(0.0, min(1.0, c)) * 255) for c in entry.tint)
@@ -1225,6 +1311,16 @@ class Viewer:
             put(row0, self._list_line([(status, muted)], total_w))
             row0 += 1
         put(row0, self._list_line([(" camera shared", muted)], total_w))
+        # Collapsing a file can retire hundreds of rows in one draw. The
+        # molecule image sits to the right of the strip, so nothing else ever
+        # repaints the column the strip just gave up -- clear it here, the
+        # same way a closing picker clears itself, or the retired rows keep
+        # showing 'frame N' underneath the legend.
+        bottom = row0 + 1
+        for r in range(bottom, min(self._list_drawn_bottom,
+                                   max(self._rows - 1, 0))):
+            out += b"\x1b[%d;1H\x1b[0m\x1b[2K" % (r + 1)
+        self._list_drawn_bottom = bottom
         return bytes(out)
 
     def _update_geometry(self) -> bool:
@@ -2387,6 +2483,15 @@ class Viewer:
                         group = self._list_group_all_hit(col, row)
                         if group is not None:
                             self._toggle_list_group_all(*group)
+                            changed = True
+                            continue
+                        group = self._list_group_span_hit(
+                            self._list_group_toggle_spans, col, row)
+                        if group is None:
+                            group = self._list_group_span_hit(
+                                self._list_group_summary_spans, col, row)
+                        if group is not None:
+                            self._toggle_list_group_collapsed(*group)
                             changed = True
                             continue
                         # A measurement column's × removes it (design
