@@ -2325,7 +2325,8 @@ class Viewer:
         # the middle of the bar sits empty.
         align_prompt = ("subset %d picked · Enter align · Esc cancel"
                         % len(self.widget.align_sel) if self.widget.align_mode else "")
-        raw_left = (self._subset_hover_tip or self._list_path_hover_tip
+        raw_left = (self._subset_hover_tip or self._full_rmsd_hover_tip
+                    or self._list_path_hover_tip
                     or align_prompt or measure
                     or self.widget.pick_refusal or hov or (self._msg or
                     f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"))
@@ -2655,6 +2656,13 @@ class Viewer:
                             if tip != self._subset_hover_tip:
                                 self._subset_hover_tip = tip
                                 changed = True
+                            full_col = (None if subset_col is not None
+                                       else self._full_rmsd_header_hit(col, row))
+                            full_tip = (self._full_rmsd_tip(self._full_rmsd_columns[full_col])
+                                       if full_col is not None else "")
+                            if full_tip != self._full_rmsd_hover_tip:
+                                self._full_rmsd_hover_tip = full_tip
+                                changed = True
                             path_tip = self._list_path_hover_hit(col, row)
                             if path_tip != self._list_path_hover_tip:
                                 self._list_path_hover_tip = path_tip
@@ -2669,6 +2677,9 @@ class Viewer:
                     if ev.action == "move":
                         if self._subset_hover_tip:
                             self._subset_hover_tip = ""
+                            changed = True
+                        if self._full_rmsd_hover_tip:
+                            self._full_rmsd_hover_tip = ""
                             changed = True
                         if self._list_path_hover_tip:
                             self._list_path_hover_tip = ""
@@ -3107,9 +3118,17 @@ class Viewer:
             return None
         return column
 
-    @staticmethod
-    def _subset_tip(column: _SubsetRMSDColumn) -> str:
-        return "aligning on " + ",".join(column.labels)
+    def _subset_tip(self, column: _SubsetRMSDColumn) -> str:
+        """Status-bar spec for a ⊂RMSD header hover (design VIM-30): the
+        reference frame this fit is anchored to, plus the atoms it fit on."""
+        ref_label = self.structures[column.reference_index].label
+        return f"{ref_label} · aligning on " + ",".join(column.labels)
+
+    def _full_rmsd_tip(self, column: _FullRMSDColumn) -> str:
+        """Status-bar spec for a ∀RMSD header hover: the reference frame only
+        -- a whole-molecule fit has no atom subset to name."""
+        ref_label = self.structures[column.reference_index].label
+        return f"{ref_label} · aligning on all atoms"
 
     def _finish_subset_alignment(self, indices: Tuple[int, ...]) -> bool:
         """Persist a newly picked subset, align, and expose its RMSD column.
@@ -3363,8 +3382,16 @@ class Viewer:
                 return column_index
         return None
 
+    def _full_rmsd_header_hit(self, col: int, row: int) -> Optional[int]:
+        """Saved full-RMSD column index under a header hover, if any."""
+        for r0, c0, c1, column_index in self._full_rmsd_header_spans:
+            if r0 == row and c0 <= col < c1:
+                return column_index
+        return None
+
     def _remove_full_rmsd_column(self, column_index: int) -> None:
         column = self._full_rmsd_columns.pop(column_index)
+        self._full_rmsd_hover_tip = ""
         self._msg = f"#all{column.full_id} deleted"
         self._refresh_measure_w()
 
@@ -3573,6 +3600,7 @@ class Viewer:
         """
         self._active_subset_id = None
         self._subset_hover_tip = ""
+        self._full_rmsd_hover_tip = ""
         if self.widget.align_mode:
             self.widget.set_alignment_mode(False)
             self._pop_pointer()

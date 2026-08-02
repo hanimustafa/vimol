@@ -426,8 +426,8 @@ def test_subset_rmsd_header_hover_click_and_R_recalculate(tmp_path):
 
         assert viewer._dispatch([
             MouseEvent("move", float(header_col), float(row), button=0)]) is True
-        assert viewer._subset_hover_tip == "aligning on C0,N1,O2,H3"
-        assert "aligning on C0,N1,O2,H3" in viewer._status_bar()
+        assert viewer._subset_hover_tip == "reference · aligning on C0,N1,O2,H3"
+        assert "reference · aligning on C0,N1,O2,H3" in viewer._status_bar()
 
         assert viewer._dispatch([
             MouseEvent("down", float(header_col), float(row), button=0)]) is True
@@ -674,6 +674,35 @@ def test_full_rmsd_column_accumulates_overlay_swaps_and_x_deletes(tmp_path):
             MouseEvent("down", float(start), float(row), button=0)]) is True
         assert viewer._full_rmsd_columns == []
         assert viewer._msg == "#all1 deleted"
+    finally:
+        os.close(fd)
+
+
+def test_full_rmsd_header_hover_shows_reference_and_all_atoms(tmp_path):
+    """A ∀RMSD header hover has no atom subset to name (design VIM-30) -- it
+    shows only the reference frame it is fitted against."""
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer._cols = 200
+        viewer._rows = 24
+        viewer._list_w = 20
+        viewer.structures.overlay = True
+        viewer._dispatch([KeyEvent("r")])
+
+        viewer._draw_list()
+        assert len(viewer._full_rmsd_header_spans) == 2   # sign row + id row
+        row, start, end, column_index = viewer._full_rmsd_header_spans[0]
+        assert column_index == 0
+        header_col = (start + end) // 2
+
+        assert viewer._dispatch([
+            MouseEvent("move", float(header_col), float(row), button=0)]) is True
+        assert viewer._full_rmsd_hover_tip == "reference · aligning on all atoms"
+        assert "reference · aligning on all atoms" in viewer._status_bar()
+
+        assert viewer._dispatch([
+            MouseEvent("move", 1.0, 1.0, button=0)]) is True
+        assert viewer._full_rmsd_hover_tip == ""
     finally:
         os.close(fd)
 
