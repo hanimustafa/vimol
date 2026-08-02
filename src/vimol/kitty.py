@@ -26,6 +26,19 @@ _GRAPHICS_END = b"\x1b\\"
 _CHUNK = 4096
 
 
+def clipboard_set_text(text: str) -> bytes:
+    """Encode a clipboard write using OSC 52, the sequence terminals implement.
+
+    Kitty's OSC 5522 can carry MIME-typed binary payloads, but support for it
+    is not widespread -- Ghostty, for one, parses the sequence and then does
+    nothing with it, so the write silently fails. OSC 52 is text-only and
+    universally understood, which is what a coordinate dump needs anyway.
+    An empty string is a legitimate request to clear the clipboard.
+    """
+    payload = base64.standard_b64encode(text.encode("utf-8"))
+    return b"\x1b]52;c;" + payload + b"\x07"
+
+
 # --------------------------------------------------------------------------
 # Shared-memory transfer (the protocol's "local client" path, t=s)
 # --------------------------------------------------------------------------
