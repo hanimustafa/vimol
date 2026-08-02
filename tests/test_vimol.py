@@ -3652,15 +3652,44 @@ def test_rmsd_columns_share_one_id_sequence_and_round_to_2_decimals(tmp_path):
 
         layout = v._measure_layout(v._list_w)
         assert [h for h, _w, _v, _r in layout] == ["∀RMSD#1 ×", "⊂RMSD#2 ×"]
-        # The reference-to-itself value is masked to None (not a real
-        # measurement); the sole remaining value is trivially both extrema.
+        # The reference row reads "Self", not the em-dash that means "no
+        # result here"; it is excluded from the extrema either way, so the
+        # sole remaining value is trivially both.
         assert [cells for _h, _w, cells, _r in layout] == [
-            ["—", "0.12↑↓"], ["—", "0.99↑↓"]]
+            ["Self", "0.12↑↓"], ["Self", "0.99↑↓"]]
         for header_cell, width, cells, _removable in layout:
             assert width == max(len(header_cell), max(len(c) for c in cells))
 
         text = v._draw_list().decode("utf-8", "replace")
         assert "∀RMSD#1 ×" in text and "⊂RMSD#2 ×" in text
+    finally:
+        os.close(fd)
+
+
+def test_rmsd_reference_row_reads_self_and_a_never_run_row_stays_a_dash(tmp_path):
+    """The whole point of "Self" (design 2026-08-02): a row that WAS the
+    reference and a row that simply has no result must not look alike. Both
+    used to render the same em-dash."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn
+
+    sset = StructureSet()
+    for i, dx in enumerate((0.0, 0.4, 0.8)):
+        sset.append(_measure_mol(dx), label=f"f{i}.xyz", path=f"/d/f{i}.xyz")
+    fd = os.open(str(tmp_path / "self-cell.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+        v._cols, v._rows, v._list_w = 200, 30, 40
+        # Row 1 was fitted; row 2 never was (it was not in the overlay).
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.4, None]))
+
+        cells = v._measure_layout(v._list_w)[0][2]
+        assert cells == ["Self", "0.40↑↓", "—"]
+
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "Self" in text
     finally:
         os.close(fd)
 

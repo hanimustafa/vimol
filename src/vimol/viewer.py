@@ -71,6 +71,11 @@ _SELECTION_PHRASES = {
     "Largest ring system": "the largest ring system",
 }
 _SELECTION_HINT = " ↑↓ move · Enter/click select · Esc cancel"
+# What an RMSD column shows on the row it was fitted ONTO. Distinct from the
+# em-dash every other blank cell uses (design 2026-08-02): a reference row is
+# not a measurement that failed or never ran, it is the frame everything else
+# was measured against, and the two must not look alike.
+_SELF_CELL = "Self"
 _BROWSER_HINT = " ↑↓ move · Enter open · ~ home · Esc cancel"
 # Fallback visible width of the status bar's left-hand (hover/molecule-info)
 # field, used ONLY before the terminal size is known (_cols == 0, i.e. before
@@ -1051,6 +1056,10 @@ class Viewer:
                 c.select_id == self._active_subset_id for c in self._rmsd_columns):
             self._active_subset_id = None
             self.widget.align_sel = []
+        # A tip left over from a column this removal just dropped would
+        # otherwise sit in the status bar until the next mouse move.
+        self._subset_hover_tip = ""
+        self._full_rmsd_hover_tip = ""
 
         sset.invalidate()
         self._measure_layout_cache = None
@@ -1349,7 +1358,10 @@ class Viewer:
                 raw = raw_cells[k]
                 padded = raw.ljust(width) if align == "left" else raw.rjust(width)
                 cell_text = f" {padded} "
-                fg = head_fg if align == "left" else (muted if raw == "—" else dim_fg)
+                # "Self" and the em-dash are both non-values: keep them muted
+                # so the eye lands on the actual numbers.
+                fg = (head_fg if align == "left"
+                      else muted if raw in ("—", _SELF_CELL) else dim_fg)
                 style = self._sgr_bg(bg) + fg
                 # Extrema are recomputed by _measure_layout on every data
                 # revision.  Keep the underline tight around the value and
@@ -3635,12 +3647,15 @@ class Viewer:
             values = list(column.values[:len(self.structures)])
             if len(values) < len(self.structures):
                 values.extend([None] * (len(self.structures) - len(values)))
-            # The reference-to-itself RMSD is not a measurement.  Hide it
-            # before finding extrema so its synthetic zero neither renders
-            # nor permanently claims the column's minimum marker.
+            # The reference-to-itself RMSD is not a measurement.  Mask it
+            # before finding extrema so its synthetic zero never claims the
+            # column's minimum marker, then label the cell "Self" rather than
+            # leaving the em-dash that means "no result here".
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
             cells = self._format_measure_extrema(values, 2)
+            if 0 <= column.reference_index < len(cells):
+                cells[column.reference_index] = _SELF_CELL
             # Just "RMSD#N" (design 2026-08-02) -- which fit produced it and
             # what it's aligned on is hover-only detail (_full_rmsd_tip,
             # VIM-30), not part of the permanent label.
@@ -3655,6 +3670,8 @@ class Viewer:
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
             cells = self._format_measure_extrema(values, 2)
+            if 0 <= column.reference_index < len(cells):
+                cells[column.reference_index] = _SELF_CELL
             # A '*' after the id is the design's stale marker (§4.4): the
             # numbers were true once, so they stay readable, but they must
             # not be mistaken for a fit against the geometry on screen now.

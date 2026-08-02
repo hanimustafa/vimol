@@ -391,7 +391,8 @@ def test_R_picks_reference_subset_and_enter_aligns_overlay(tmp_path, monkeypatch
         viewer._cols = 200
         viewer._list_w = 20
         cells = viewer._measure_layout(viewer._list_w)[0][2]
-        assert cells[column.reference_index] == "—"
+        assert cells[column.reference_index] == "Self"   # not "—": it IS the
+        # frame everything else was fitted onto, not a missing result.
         assert any("↑" in cell for cell in cells)
         assert any("↓" in cell for cell in cells)
         result = viewer.structures[1].alignment
@@ -687,7 +688,8 @@ def test_lowercase_r_aligns_complete_matching_overlay(tmp_path):
         viewer._cols = 200
         viewer._list_w = 20
         cells = viewer._measure_layout(viewer._list_w)[0][2]
-        assert cells[column.reference_index] == "—"
+        assert cells[column.reference_index] == "Self"   # not "—": it IS the
+        # frame everything else was fitted onto, not a missing result.
         assert any("↑" in cell for cell in cells)
         assert any("↓" in cell for cell in cells)
     finally:
