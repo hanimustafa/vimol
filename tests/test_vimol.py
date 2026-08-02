@@ -1336,6 +1336,164 @@ def test_viewer_list_groups_a_multi_model_file_under_one_header(tmp_path):
         os.close(fd)
 
 
+def test_clicking_filename_collapses_and_summary_click_expands(tmp_path):
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=4, fd_name="collapse-toggle.bin")
+    try:
+        v._list_w = 28
+        v._draw_list()
+        row, c0, c1, first, end = v._list_group_toggle_spans[0]
+        assert (first, end) == (0, 4)
+        assert v._dispatch([MouseEvent(
+            "down", float((c0 + c1) // 2), float(row), button=0)]) is True
+
+        assert v._list_display_rows() == [
+            ("group", 0, "traj.xyz"), ("collapsed", 0, "4 frames")]
+        collapsed = _visible(v._draw_list().decode("utf-8", "replace"))
+        assert "4 frames" in collapsed
+        assert "frame 1" not in collapsed and "frame 4" not in collapsed
+        assert "ALL" in collapsed
+
+        row, c0, c1, first, end = v._list_group_summary_spans[0]
+        assert (first, end) == (0, 4)
+        assert v._dispatch([MouseEvent(
+            "down", float((c0 + c1) // 2), float(row), button=0)]) is True
+        assert [kind for kind, _i, _text in v._list_display_rows()] == [
+            "group", "struct", "struct", "struct", "struct"]
+
+        # The filename itself is a true toggle in both directions too.
+        v._draw_list()
+        row, c0, c1, _first, _end = v._list_group_toggle_spans[0]
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert v._list_display_rows()[-1][0] == "collapsed"
+        v._draw_list()
+        row, c0, c1, _first, _end = v._list_group_toggle_spans[0]
+        assert v._dispatch([MouseEvent(
+            "down", float((c0 + c1) // 2), float(row), button=0)]) is True
+        assert v._list_display_rows()[-1][0] == "struct"
+    finally:
+        os.close(fd)
+
+
+def test_collapsed_file_all_button_selects_and_clears_every_frame(tmp_path):
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=4, fd_name="collapse-all.bin")
+    try:
+        v.structures.overlay = True
+        v._toggle_list_group_collapsed(0, 4)
+        v._draw_list()
+        assert len(v._list_group_all_spans) == 1
+        row, c0, c1, first, end = v._list_group_all_spans[0]
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert all(entry.marked for entry in v.structures)
+        assert v._list_display_rows()[-1] == ("collapsed", 0, "4 frames")
+
+        v._draw_list()
+        row, c0, c1, _first, _end = v._list_group_all_spans[0]
+        assert v._dispatch([MouseEvent(
+            "down", float((c0 + c1) // 2), float(row), button=0)]) is True
+        assert [entry.marked for entry in v.structures] == [
+            True, False, False, False]
+        assert v.structures.drawn_indices() == [0]
+    finally:
+        os.close(fd)
+
+
+def test_collapsed_group_keeps_active_frame_reachable_and_clamps_scroll(tmp_path):
+    v, fd = _traj_viewer(tmp_path, n=20, fd_name="collapse-scroll.bin")
+    try:
+        v._rows = 14
+        v._list_scroll_to(8)
+        assert v._list_scroll == 8
+        v._activate_structure(12)
+        v._toggle_list_group_collapsed(0, 20)
+        assert v._list_scroll == 0
+        assert v.structures.active_index == 12
+        assert v._list_display_rows() == [
+            ("group", 0, "traj.xyz"), ("collapsed", 0, "20 frames")]
+
+        v._cycle_frame(1)
+        assert v.structures.active_index == 13
+        assert v._list_scroll == 0
+        assert v._list_display_rows()[-1] == ("collapsed", 0, "20 frames")
+    finally:
+        os.close(fd)
+
+
+def test_collapsing_erases_the_frame_rows_it_stops_drawing(tmp_path):
+    """Collapsing turns hundreds of rows into two, so the strip stops painting
+    most of the column it used to own. Nothing else repaints those cells --
+    the molecule image lives to the right -- so a shrinking strip has to clear
+    what it vacated, or the old frame rows stay on screen under the legend."""
+    import re
+
+    v, fd = _traj_viewer(tmp_path, n=60, fd_name="collapse-erase.bin")
+    try:
+        v._rows = 30
+        v._list_w = 28
+        # A cleared row is addressed and then blanked; anything else is content.
+        erase = re.compile(rb"\x1b\[(\d+);1H\x1b\[0m\x1b\[2K")
+        cup = re.compile(rb"\x1b\[(\d+);(\d+)H")
+
+        def split(payload):
+            cleared = {int(m.group(1)) - 1 for m in erase.finditer(payload)}
+            touched = {int(m.group(1)) - 1 for m in cup.finditer(payload)}
+            return touched - cleared, cleared
+
+        painted, _ = split(v._draw_list())
+        assert max(painted) > 20             # the strip really did fill the panel
+
+        v._toggle_list_group_collapsed(0, 60)
+        collapsed_painted, cleared = split(v._draw_list())
+        assert max(collapsed_painted) < 15   # and really did shrink
+
+        # Every row it gave up is blanked, not left holding a stale 'frame N'.
+        assert not (painted - collapsed_painted - cleared)
+
+        # Expanding again refills them rather than clearing what now belongs.
+        v._toggle_list_group_collapsed(0, 60)
+        repainted, still_cleared = split(v._draw_list())
+        assert painted <= repainted
+        assert not (repainted & still_cleared)
+    finally:
+        os.close(fd)
+
+
+def test_collapsed_summary_gets_sticky_filename_and_live_frame_count(tmp_path):
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset = StructureSet()
+    for i in range(3):
+        sset.append(mol, label=f"a.xyz#{i + 1}", path="/d/a.xyz")
+    for i in range(12):
+        sset.append(mol, label=f"b.xyz#{i + 1}", path="/d/b.xyz")
+    fd = os.open(str(tmp_path / "collapse-sticky.bin"),
+                 os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._rows, v._list_w = 14, 28
+        v._toggle_list_group_collapsed(0, 3)
+        # Adding another frame to the same source updates the summary rather
+        # than freezing the count at collapse time.
+        sset.entries.insert(3, sset.entries[2].__class__(
+            molecule=mol, label="a.xyz#4", path="/d/a.xyz"))
+        assert v._list_display_rows()[1] == ("collapsed", 0, "4 frames")
+
+        v._list_scroll_to(1)  # summary visible, its ordinary header scrolled off
+        v._draw_list()
+        sticky = [span for span in v._list_group_all_spans if span[0] == 1]
+        assert len(sticky) == 1
+        assert sticky[0][3:5] == (0, 4)
+    finally:
+        os.close(fd)
+
+
 def test_viewer_list_single_structure_files_get_overlay_sections(tmp_path):
     """Each file gets its own section when several files are open, even when
     that file contributes only one structure."""
@@ -1754,6 +1912,53 @@ def _measure_viewer(tmp_path, fd_name="measure.bin"):
     v._update_geometry()
     v._list_w = 40
     return v, fd
+
+
+def test_collapsed_summary_uses_local_minimum_in_every_measurement_column(tmp_path):
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn, _SubsetRMSDColumn
+
+    sset = StructureSet()
+    for i, dx in enumerate((0.0, 0.5, 1.0, 1.5)):
+        path = "/data/a.xyz" if i < 2 else "/data/b.xyz"
+        sset.append(_measure_mol(dx), label=f"frame {i + 1}", path=path)
+    fd = os.open(str(tmp_path / "collapsed-measures.bin"),
+                 os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+        v._cols, v._rows, v._list_w = 200, 30, 40
+        v._freeze_measure_sel((0, 1))
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.4, 0.3, 0.2]))
+        v._rmsd_columns.append(_SubsetRMSDColumn(
+            select_id=1, reference_index=0, reference_revision=0,
+            indices=(0, 1), labels=("C0", "N1"),
+            values=[0.0, 0.5, None, 0.1]))
+        v._toggle_list_group_collapsed(2, 4)
+
+        layout = v._measure_layout(v._list_w)
+        assert v._list_collapsed_measure_cells(layout, 2, 4) == [
+            "2.000↓", "0.2000↓", "0.1000↓"]
+
+        v._draw_list()
+        row = v._list_group_summary_spans[0][0]
+        summary = _visible(_strip_rows(v)[row])
+        assert "2 frames" in summary
+        assert "2.000↓" in summary
+        assert "0.2000↓" in summary
+        assert "0.1000↓" in summary
+    finally:
+        os.close(fd)
+
+
+def test_collapsed_summary_measurement_is_dash_when_group_has_no_values(tmp_path):
+    v, fd = _measure_viewer(tmp_path, fd_name="collapsed-dash.bin")
+    try:
+        layout = [("test", 4, ["1.0↓", "—", "—"], False)]
+        assert v._list_collapsed_measure_cells(layout, 1, 3) == ["—"]
+    finally:
+        os.close(fd)
 
 
 def _atom_px_in_viewer(v, idx):
