@@ -98,7 +98,12 @@ class _SubsetRMSDColumn:
 
     @property
     def header(self) -> str:
-        return f"⊂RMSD #select{self.select_id}"
+        # Just "RMSD#N" (design 2026-08-02): the action (whole-molecule vs.
+        # subset) and what it's fitted on are hover-only detail (VIM-30), not
+        # part of the column's permanent label. select_id/full_id share one
+        # counter (Viewer._next_rmsd_id) precisely so this can't collide with
+        # a ∀RMSD column's number.
+        return f"RMSD#{self.select_id}"
 
 
 @dataclass
@@ -111,7 +116,7 @@ class _FullRMSDColumn:
 
     @property
     def header(self) -> str:
-        return f"∀RMSD #all{self.full_id}"
+        return f"RMSD#{self.full_id}"
 
 # Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
@@ -153,10 +158,10 @@ _HELP_TAIL = [
     "  t .................. transparent bg    g .................. hi-quality",
     "  ctrl-t ............. light/dark theme",
     "  f / z .............. re-fit / reset    ? .................. toggle help",
-    "  overlay: r .......... align all → ∀RMSD  R ... pick atoms → ⊂RMSD",
+    "  overlay: r .......... align all → RMSD#N  R ... pick atoms → RMSD#N",
     "     Shift+S / click select ... Backbone, Heavy atoms, or Ring system",
     "     option-click atom ........ additive manual subset selection",
-    "     ⊂RMSD column: hover atoms · click arm selection · R recalculate",
+    "     RMSD#N column: hover title for spec · click arm selection · R recalculate",
     "  q / Esc ............ quit",
 ]
 
@@ -451,8 +456,10 @@ class Viewer:
         self._measure_columns: List[Tuple[str, Tuple[int, ...]]] = []
         self._full_rmsd_columns: List[_FullRMSDColumn] = []
         self._rmsd_columns: List[_SubsetRMSDColumn] = []
-        self._next_full_rmsd_id = 1
-        self._next_subset_id = 1
+        # One counter shared by both column kinds (design 2026-08-02): they
+        # all render as plain "RMSD#N", so a ∀RMSD and a ⊂RMSD column must
+        # never be numbered alike.
+        self._next_rmsd_id = 1
         self._active_subset_id: Optional[int] = None
         self._subset_hover_tip = ""
         self._full_rmsd_hover_tip = ""
@@ -463,11 +470,6 @@ class Viewer:
         self._full_rmsd_header_spans: List[Tuple[int, int, int, int]] = []
         self._full_rmsd_remove_spans: List[Tuple[int, int, int, int]] = []
         self._measure_layout_sources: List[Tuple[str, int]] = []
-        # Second header line for RMSD columns only (design VIM-29): the sign
-        # ("⊂RMSD"/"∀RMSD" + stale marker) is `layout`'s own header cell on
-        # row 0; the #selectN/#allN id and its × live here, drawn on row 1,
-        # empty for every non-RMSD column so that row stays blank behind them.
-        self._measure_layout_header2: List[str] = []
         # (key, layout) memo for _measure_layout -- it's recomputed every
         # _update_geometry tick (see there) plus once per _draw_list, and
         # its body calls StructureSet.measure() per column, each of which
@@ -1273,14 +1275,8 @@ class Viewer:
         head_fg = self._sgr_fg(self.theme.list_header_fg)
         dim_fg = self._sgr_fg(self.theme.list_dim_fg)
 
-        def draw_group(row0: int, group_i: int, text: str,
-                       extra_segs: Optional[list] = None) -> bool:
-            """Draw a file header plus ALL button and register its hit span.
-
-            *extra_segs* carries the sticky row's second RMSD header line
-            (design VIM-29) -- only ever passed for the row-1 sticky copy,
-            which otherwise draws nothing past the strip's own list_w
-            columns and would blank out that line instead."""
+        def draw_group(row0: int, group_i: int, text: str) -> bool:
+            """Draw a file header plus ALL button and register its hit span."""
             end = self._list_group_end(group_i)
             all_selected = all(k == sset.active_index or sset[k].marked
                                for k in range(group_i, end))
@@ -1304,8 +1300,6 @@ class Viewer:
             x_style = self._sgr_fg(self.theme.list_muted_fg)
             segs = [(" ", ""), (name, head_fg), (" " * gap, ""),
                     (button, button_style), (x_glyph, x_style)]
-            if extra_segs:
-                segs = segs + extra_segs
             if not put(row0, self._list_line(segs, total_w)):
                 return False
             entry = sset[group_i]
@@ -1350,14 +1344,10 @@ class Viewer:
                     segs.append((" ", style))
                 else:
                     segs.append((cell_text, style))
-                # `raw` is empty for every non-RMSD column when this runs
-                # over the second header line (design VIM-29) -- guard every
-                # span below on it, or an empty cell registers a phantom
-                # 1-column hit at its own left edge.
-                if align == "left" and removable and raw:
+                if align == "left" and removable:
                     x_col = col_offset + len(raw)   # raw ends in ' ×': × is its last char
                     self._measure_header_spans.append((row0, x_col, x_col + 1, k))
-                if (align == "left" and raw and k < len(self._measure_layout_sources)
+                if (align == "left" and k < len(self._measure_layout_sources)
                         and self._measure_layout_sources[k][0] == "subset"):
                     subset_idx = self._measure_layout_sources[k][1]
                     self._subset_header_spans.append(
@@ -1366,7 +1356,7 @@ class Viewer:
                         x_col = col_offset + len(raw)
                         self._subset_remove_spans.append(
                             (row0, x_col, x_col + 1, subset_idx))
-                if (align == "left" and raw and k < len(self._measure_layout_sources)
+                if (align == "left" and k < len(self._measure_layout_sources)
                         and self._measure_layout_sources[k][0] == "full_rmsd"):
                     full_idx = self._measure_layout_sources[k][1]
                     self._full_rmsd_header_spans.append(
@@ -1430,11 +1420,10 @@ class Viewer:
                 if self._list_group_key(group_i) == self._list_group_key(struct_i):
                     sticky = rows[candidate]
                 break
-        row1_segs = measure_segs(1, self._measure_layout_header2, "left") if layout else []
         if sticky is None:
-            put(1, self._list_line(row1_segs, total_w))
+            put(1, self._list_line([], total_w))
         else:
-            draw_group(1, sticky[1], sticky[2], extra_segs=row1_segs)
+            draw_group(1, sticky[1], sticky[2])
 
         idx_w = max(2, len(str(len(sset))))
         label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
@@ -1816,6 +1805,16 @@ class Viewer:
             gap_ms = ((frame_start - self._t_last_draw_end) * 1000
                       if self._t_last_draw_end is not None else 0.0)
             self._t_last_draw_end = t_now
+            # VIM-31 (blur at small pane sizes): the transmitted image's own
+            # pixel size vs. the cell grid it's placed into -- if these
+            # disagree at rest (ss=2, scale=1.0), the terminal is rescaling
+            # the image on display, not vimol. cell_px_exact is the RAW
+            # xpx/cols ratio (kitty.cell_size_px rounds it before this point),
+            # so a real mismatch there -- as opposed to _cell_px, the
+            # terminal's own CSI-16t answer when it replied -- points at that
+            # rounding rather than the render_scale/idle_scale controllers.
+            cw, ch = self._cell_px or kitty.cell_size_px(self.fd_out)
+            cols, rows, xpx, ypx = kitty.terminal_size_px(self.fd_out)
             self._tline("frame",
                         kind=("interact" if interacting else "SETTLE"),
                         ss=want_ss, scale=round(scene.render_scale, 3),
@@ -1823,7 +1822,15 @@ class Viewer:
                         render_ms=(t_render - frame_start) * 1000,
                         encode_ms=(t_encode - t_render) * 1000,
                         write_ms=(t_now - t_encode) * 1000,
-                        gap_ms=gap_ms)
+                        gap_ms=gap_ms,
+                        img_px=f"{img.shape[1]}x{img.shape[0]}",
+                        target_px=f"{int(self._img_cols * cw)}x{int(self._img_rows * ch)}",
+                        cell_px=f"{cw:.3f}x{ch:.3f}",
+                        cell_px_exact=(f"{xpx / cols:.3f}x{ypx / rows:.3f}"
+                                      if xpx and cols and ypx and rows else "?"),
+                        queried_cell_px=("yes" if self._cell_px else "no"),
+                        idle_scale=round(self._idle_scale, 3),
+                        interact_scale=round(self._interact_scale, 3))
         if self._paced:
             # Every frame gets a fence: its ack both feeds the matching
             # resolution controller with the TRUE delivery time and gates
@@ -2187,7 +2194,7 @@ class Viewer:
             parent = self._selected_subset_column()
             self.widget.set_alignment_mode(True, preserve=True)
             self._active_subset_id = None
-            inherited = (f" from #select{parent.select_id}"
+            inherited = (f" from RMSD#{parent.select_id}"
                          if parent is not None else "")
             self._msg = (f"Manual additive selection{inherited}: click atoms"
                          " / Option-click · whitespace clears · r saves after RMSD")
@@ -2859,7 +2866,7 @@ class Viewer:
                     # unsaved derived selection; r/Enter creates a new column.
                     if parent_subset_id is not None:
                         self._active_subset_id = None
-                        self._msg = (f"derived from #select{parent_subset_id}: "
+                        self._msg = (f"derived from RMSD#{parent_subset_id}: "
                                      f"{len(new_align_sel)} atoms · r saves after RMSD")
                     self._push_pointer("cell")
                 if prev_sel is not None and len(prev_sel) >= 2:
@@ -3224,12 +3231,12 @@ class Viewer:
         )
         if column is None:
             column = _FullRMSDColumn(
-                full_id=self._next_full_rmsd_id,
+                full_id=self._next_rmsd_id,
                 reference_index=reference_i,
                 reference_revision=self.structures[reference_i].revision,
                 values=[None] * len(self.structures),
             )
-            self._next_full_rmsd_id += 1
+            self._next_rmsd_id += 1
             self._full_rmsd_columns.append(column)
         result = self._align_overlay(rmsd_column=column)
         self._refresh_measure_w()
@@ -3261,7 +3268,7 @@ class Viewer:
             # so disarm and make the user re-pick.
             self._active_subset_id = None
             self.widget.align_sel = []
-            self._msg = (f"#select{column.select_id} is stale — the main frame "
+            self._msg = (f"RMSD#{column.select_id} is stale — the main frame "
                          "was edited; pick the atoms again")
             return None
         return column
@@ -3303,7 +3310,7 @@ class Viewer:
             # Selection identity is its owning main frame plus atom set, not
             # the click/preset action that happened to request the RMSD. This
             # is the normal path after adding another structure to an overlay:
-            # refill #selectN for every current row instead of cloning it.
+            # refill its RMSD#N for every current row instead of cloning it.
             self._align_overlay(ref_select=indices, rmsd_column=existing)
             self._active_subset_id = None
             self._refresh_measure_w()
@@ -3311,18 +3318,19 @@ class Viewer:
         symbols = self.structures[reference_i].molecule.symbols
         labels = tuple(f"{symbols[i]}{i}" for i in indices)
         column = _SubsetRMSDColumn(
-            select_id=self._next_subset_id,
+            select_id=self._next_rmsd_id,
             reference_index=reference_i,
             reference_revision=self.structures[reference_i].revision,
             indices=indices,
             labels=labels,
             values=[None] * len(self.structures),
         )
-        self._next_subset_id += 1
+        self._next_rmsd_id += 1
         self._rmsd_columns.append(column)
         self._align_overlay(ref_select=indices, rmsd_column=column)
         # A completed pick is saved but not armed. This keeps plain R available
-        # for creating #select2; clicking a saved header arms it for a rerun.
+        # for creating the next RMSD#N; clicking a saved header arms it for
+        # a rerun.
         self._active_subset_id = None
         self._refresh_measure_w()
         return True
@@ -3333,14 +3341,14 @@ class Viewer:
         if self._active_subset_id == column.select_id:
             self._active_subset_id = None
             self.widget.align_sel = []
-            self._msg = f"#select{column.select_id} disabled"
+            self._msg = f"RMSD#{column.select_id} disabled"
             return
         if self.structures.active_index != column.reference_index:
             self._activate_structure(column.reference_index)
         self.widget.set_alignment_mode(False)
         self.widget.align_sel = list(column.indices)
         self._active_subset_id = column.select_id
-        self._msg = (f"#select{column.select_id} enabled · "
+        self._msg = (f"RMSD#{column.select_id} enabled · "
                      + ",".join(column.labels)
                      + " · R recalculates · Option-click derives")
 
@@ -3540,7 +3548,7 @@ class Viewer:
     def _remove_full_rmsd_column(self, column_index: int) -> None:
         column = self._full_rmsd_columns.pop(column_index)
         self._full_rmsd_hover_tip = ""
-        self._msg = f"#all{column.full_id} deleted"
+        self._msg = f"RMSD#{column.full_id} deleted"
         self._refresh_measure_w()
 
     def _remove_subset_column(self, column_index: int) -> None:
@@ -3550,7 +3558,7 @@ class Viewer:
             self._active_subset_id = None
             self.widget.align_sel = []
         self._subset_hover_tip = ""
-        self._msg = f"#select{column.select_id} deleted"
+        self._msg = f"RMSD#{column.select_id} deleted"
         self._refresh_measure_w()
 
     def _measure_layout(self, list_w: int) -> List[Tuple[str, int, List[str], bool]]:
@@ -3579,13 +3587,13 @@ class Viewer:
         every row's layout, not just the table's.
         """
         columns = [
-            ("measure", i, header, indices, True, None, "")
+            ("measure", i, header, indices, True, None)
             for i, (header, indices) in enumerate(self._measure_columns)]
         live_sel = tuple(self.widget.measure_sel)
         already_frozen = any(live_sel == indices for _h, indices in self._measure_columns)
         if self.widget.measure_mode and len(live_sel) >= 2 and not already_frozen:
             columns.append(("measure_live", -1, self._measure_header_text(live_sel),
-                            live_sel, False, None, ""))
+                            live_sel, False, None))
         for i, column in enumerate(self._full_rmsd_columns):
             values = list(column.values[:len(self.structures)])
             if len(values) < len(self.structures):
@@ -3595,32 +3603,29 @@ class Viewer:
             # nor permanently claims the column's minimum marker.
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
-            cells = self._format_measure_extrema(values, 4)
-            # Split across the two header rows (design VIM-29) so the column
-            # need only be as wide as the longer of the two, not their
-            # concatenation: the sign (+ stale marker) on row 0, the id and
-            # its × on row 1.
-            sign = "∀RMSD" + ("*" if self._full_rmsd_column_stale(column) else "")
-            columns.append(("full_rmsd", i, sign, (),
-                            False, cells[:len(self.structures)],
-                            f"#all{column.full_id} ×"))
+            cells = self._format_measure_extrema(values, 2)
+            # Just "RMSD#N" (design 2026-08-02) -- which fit produced it and
+            # what it's aligned on is hover-only detail (_full_rmsd_tip,
+            # VIM-30), not part of the permanent label.
+            header = column.header + (
+                "*" if self._full_rmsd_column_stale(column) else "")
+            columns.append(("full_rmsd", i, f"{header} ×", (),
+                            False, cells[:len(self.structures)]))
         for i, column in enumerate(self._rmsd_columns):
             values = list(column.values[:len(self.structures)])
             if len(values) < len(self.structures):
                 values.extend([None] * (len(self.structures) - len(values)))
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
-            cells = self._format_measure_extrema(values, 4)
-            # A '*' after the sign is the design's stale marker (§4.4): the
+            cells = self._format_measure_extrema(values, 2)
+            # A '*' after the id is the design's stale marker (§4.4): the
             # numbers were true once, so they stay readable, but they must
             # not be mistaken for a fit against the geometry on screen now.
-            sign = "⊂RMSD" + ("*" if self._subset_column_stale(column) else "")
-            columns.append(("subset", i, sign, column.indices,
-                            False, cells[:len(self.structures)],
-                            f"#select{column.select_id} ×"))
+            header = column.header + ("*" if self._subset_column_stale(column) else "")
+            columns.append(("subset", i, f"{header} ×", column.indices,
+                            False, cells[:len(self.structures)]))
         if not columns or len(self.structures) <= 1:
             self._measure_layout_sources = []
-            self._measure_layout_header2 = []
             return []
         key = (tuple(self._measure_columns), live_sel, self.widget.measure_mode,
                tuple((c.full_id, c.reference_index, c.reference_revision,
@@ -3631,14 +3636,12 @@ class Viewer:
                tuple((id(e.molecule), e.revision) for e in self.structures.entries))
         if self._measure_layout_cache is not None and self._measure_layout_cache[0] == key:
             self._measure_layout_sources = self._measure_layout_cache[2]
-            self._measure_layout_header2 = self._measure_layout_cache[3]
             return self._measure_layout_cache[1]
         available = max(0, self._cols - list_w - _MEASURE_MIN_VIEWPORT_COLS)
         out: List[Tuple[str, int, List[str], bool]] = []
         sources: List[Tuple[str, int]] = []
-        header2: List[str] = []
         used = 0
-        for source, source_index, header, indices, removable, saved_cells, line2 in columns:
+        for source, source_index, header, indices, removable, saved_cells in columns:
             if saved_cells is None:
                 kind = len(indices)
                 values = [v for _, v in self.structures.measure(indices)]
@@ -3647,18 +3650,15 @@ class Viewer:
             else:
                 cells = saved_cells
             header_cell = f"{header} ×" if removable else header
-            width = max(len(header_cell), len(line2),
-                        max((len(c) for c in cells), default=1))
+            width = max(len(header_cell), max((len(c) for c in cells), default=1))
             cost = width + 2 + (1 if out else 0)   # padding, plus the gap before it
             if used + cost > available:
                 break
             used += cost
             out.append((header_cell, width, cells, removable))
             sources.append((source, source_index))
-            header2.append(line2)
         self._measure_layout_sources = sources
-        self._measure_layout_header2 = header2
-        self._measure_layout_cache = (key, out, sources, header2)
+        self._measure_layout_cache = (key, out, sources)
         return out
 
     @staticmethod
