@@ -1394,6 +1394,76 @@ def test_viewer_list_climbs_parent_tree_until_file_headers_are_unique(tmp_path):
         os.close(fd)
 
 
+def test_list_filename_hover_shows_original_relative_path_and_frame(tmp_path):
+    from vimol.input import MouseEvent
+
+    original = "relative/input/run/traj.xyz"
+    v, fd = _traj_viewer(tmp_path, n=3, path=original,
+                         fd_name="relative-path-hover.bin")
+    try:
+        v._list_w = 24  # force the visible header to truncate
+        v._draw_list()
+
+        group = next(span for span in v._list_path_hover_spans
+                     if span[3] == original)
+        assert v._dispatch([MouseEvent(
+            "move", float(group[1]), float(group[0]), button=0)]) is True
+        assert original in _visible(v._status_bar())
+
+        frame_tip = f"{original}#frame 2"
+        frame = next(span for span in v._list_path_hover_spans
+                     if span[3] == frame_tip)
+        assert v._dispatch([MouseEvent(
+            "move", float(frame[1]), float(frame[0]), button=0)]) is True
+        assert frame_tip in _visible(v._status_bar())
+    finally:
+        os.close(fd)
+
+
+def test_list_path_hover_preserves_absolute_path_and_clears_off_label(tmp_path):
+    from vimol.input import MouseEvent
+
+    original = "/full/project/calculations/traj.xyz"
+    v, fd = _traj_viewer(tmp_path, n=2, path=original,
+                         fd_name="absolute-path-hover.bin")
+    try:
+        v._list_w = 24
+        v._draw_list()
+        group = next(span for span in v._list_path_hover_spans
+                     if span[3] == original)
+        v._dispatch([MouseEvent(
+            "move", float(group[1]), float(group[0]), button=0)])
+        assert v._list_path_hover_tip == original
+
+        # The ALL control belongs to the file but is not its filename.
+        all_span = v._list_group_all_spans[0]
+        assert v._dispatch([MouseEvent(
+            "move", float(all_span[1]), float(all_span[0]), button=0)]) is True
+        assert v._list_path_hover_tip == ""
+    finally:
+        os.close(fd)
+
+
+def test_sticky_file_header_hover_keeps_original_path(tmp_path):
+    from vimol.input import MouseEvent
+
+    original = "runs/long/traj.xyz"
+    v, fd = _traj_viewer(tmp_path, n=30, path=original,
+                         fd_name="sticky-path-hover.bin")
+    try:
+        v._rows = 14
+        v._list_w = 24
+        v._list_scroll = 8
+        v._draw_list()
+        sticky = next(span for span in v._list_path_hover_spans
+                      if span[0] == 1 and span[3] == original)
+        assert v._dispatch([MouseEvent(
+            "move", float(sticky[1]), float(sticky[0]), button=0)]) is True
+        assert v._list_path_hover_tip == original
+    finally:
+        os.close(fd)
+
+
 def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
     """A grouped file followed by a lone one: the offset between display rows
     and structure indices CHANGES partway down the list, which is exactly

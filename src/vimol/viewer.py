@@ -388,6 +388,12 @@ class Viewer:
         # (screen row, col start/end, first/last structure index) for each
         # visible per-file ALL button.
         self._list_group_all_spans: List[Tuple[int, int, int, int, int]] = []
+        # Exact visible filename/frame-label hit boxes.  The associated text
+        # is always the source path exactly as supplied by the caller (plus a
+        # group-local ``#frame N`` suffix for frame rows), never the compact
+        # or middle-truncated display name.
+        self._list_path_hover_spans: List[Tuple[int, int, int, str]] = []
+        self._list_path_hover_tip = ""
         # index of the first VISIBLE display row (see _list_display_rows):
         # the strip scrolls, so a 100-frame trajectory is reachable.
         self._list_scroll = 0
@@ -822,6 +828,23 @@ class Viewer:
                 return first, end
         return None
 
+    def _list_path_hover_hit(self, col: int, row: int) -> str:
+        for r0, c0, c1, tip in self._list_path_hover_spans:
+            if r0 == row and c0 <= col < c1:
+                return tip
+        return ""
+
+    def _list_frame_path_tip(self, i: int) -> str:
+        """Original input path plus this entry's group-local frame number."""
+        entry = self.structures[i]
+        if entry.path is None:
+            return ""
+        key = self._list_group_key(i)
+        first = i
+        while first > 0 and self._list_group_key(first - 1) == key:
+            first -= 1
+        return f"{entry.path}#frame {i - first + 1}"
+
     def _toggle_list_group_all(self, first: int, end: int) -> None:
         """Fill a file's overlay membership, or reduce it to the main frame."""
         sset = self.structures
@@ -975,6 +998,7 @@ class Viewer:
         self._list_row_spans = []
         self._list_row_struct = []
         self._list_group_all_spans = []
+        self._list_path_hover_spans = []
         self._measure_header_spans = []
         self._subset_header_spans = []
         self._subset_remove_spans = []
@@ -1034,6 +1058,10 @@ class Viewer:
                     (button, button_style)]
             if not put(row0, self._list_line(segs, total_w)):
                 return False
+            entry = sset[group_i]
+            if entry.path is not None:
+                self._list_path_hover_spans.append(
+                    (row0, 1, 1 + len(name), entry.path))
             self._list_group_all_spans.append(
                 (row0, button_col, button_col + len(button), group_i, end))
             return True
@@ -1151,13 +1179,14 @@ class Viewer:
             # and the background is already saying which row is active.
             label_fg = (self._sgr_fg(tint) if entry.marked
                         else self._sgr_fg(self.theme.list_label_fg if active else self.theme.list_dim_fg))
+            visible_label = self._truncate_middle(text, label_w)
             segs = [
                 (" ", ""),
                 ("\u2588" if entry.visible else "\u2591", dim + self._sgr_fg(tint)),
                 (" ", ""),
                 (f"{i + 1:>{idx_w}}", dim + muted),
                 (" ", ""),
-                (self._truncate_middle(text, label_w).ljust(label_w), dim + label_fg),
+                (visible_label.ljust(label_w), dim + label_fg),
             ]
             if layout:
                 segs += measure_segs(row0, [vals[i] for _h, _w, vals, _r in layout], "right")
@@ -1169,6 +1198,11 @@ class Viewer:
             # activates it exactly like clicking its label.
             self._list_row_spans.append((row0, 0, total_w))
             self._list_row_struct.append(i)
+            frame_tip = self._list_frame_path_tip(i)
+            if frame_tip:
+                label_col = 4 + idx_w
+                self._list_path_hover_spans.append(
+                    (row0, label_col, label_col + len(visible_label), frame_tip))
 
         row0 = _LIST_ROWS_ABOVE + drawn_rows
         rule = "\u2500" * max(0, list_w - 2)
@@ -2105,7 +2139,8 @@ class Viewer:
         # the middle of the bar sits empty.
         align_prompt = ("subset %d picked · Enter align · Esc cancel"
                         % len(self.widget.align_sel) if self.widget.align_mode else "")
-        raw_left = (self._subset_hover_tip or align_prompt or measure
+        raw_left = (self._subset_hover_tip or self._list_path_hover_tip
+                    or align_prompt or measure
                     or self.widget.pick_refusal or hov or (self._msg or
                     f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"))
         rep = self.style.representation
@@ -2417,6 +2452,10 @@ class Viewer:
                             if tip != self._subset_hover_tip:
                                 self._subset_hover_tip = tip
                                 changed = True
+                            path_tip = self._list_path_hover_hit(col, row)
+                            if path_tip != self._list_path_hover_tip:
+                                self._list_path_hover_tip = path_tip
+                                changed = True
                         # the wheel scrolls the strip; it must never fall
                         # through to the widget and zoom the 3D view.
                         if ev.action == "scroll" and ev.scroll in ("up", "down"):
@@ -2424,9 +2463,13 @@ class Viewer:
                             if self._list_scroll_by(step):
                                 changed = True
                         continue
-                    if ev.action == "move" and self._subset_hover_tip:
-                        self._subset_hover_tip = ""
-                        changed = True
+                    if ev.action == "move":
+                        if self._subset_hover_tip:
+                            self._subset_hover_tip = ""
+                            changed = True
+                        if self._list_path_hover_tip:
+                            self._list_path_hover_tip = ""
+                            changed = True
                     if self._in_status_zone(row):
                         continue
             if isinstance(ev, _input.KeyEvent) and ev.key in self._driver_keys:
