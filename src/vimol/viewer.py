@@ -1006,37 +1006,30 @@ class Viewer:
         already do, including the unsaved-changes prompt: discarding unsaved
         edits silently would be the one genuinely destructive reading here.
 
-        Both RMSD column kinds store absolute entry indices (``values`` is a
-        per-entry positional list, ``reference_index`` an absolute pointer),
-        so a column anchored inside the removed range is dropped -- its
-        reference no longer means anything -- and one anchored after it is
-        reindexed rather than left pointing at the wrong row.
+        The entries themselves (plus the active index and solo state that go
+        with them) are StructureSet's to re-base -- see
+        ``StructureSet.remove_range``. What stays here is the state only the
+        Viewer holds: the row cursor, and both RMSD column kinds, which store
+        absolute entry indices (``values`` is a per-entry positional list,
+        ``reference_index`` an absolute pointer). A column anchored inside
+        the removed range is dropped -- its reference no longer means
+        anything -- and one anchored after it is re-based with the same
+        arithmetic rather than left pointing at the wrong row.
         """
         sset = self.structures
-        n = end - first
-        if n >= len(sset):
+        if end - first >= len(sset):
             if self.editable and self.widget.dirty:
                 self._mode = "quit_confirm"
             else:
                 self._running = False
             return
         name = self._list_group_name(first, True)
-        was_active = sset.active_index
-        active_entry = sset.entries[was_active]
+        active_entry = sset.entries[sset.active_index]
 
-        del sset.entries[first:end]
-        if sset._solo_restore is not None:
-            del sset._solo_restore[first:end]
-
-        def _shift(i: int) -> int:
-            if i >= end:
-                return i - n
-            if i < first:
-                return i
-            return min(first, len(sset.entries) - 1)   # was inside the removed range
-
-        sset.active_index = _shift(was_active)
-        self._list_cursor = _shift(self._list_cursor)
+        sset.remove_range(first, end)
+        remaining = len(sset)
+        self._list_cursor = sset.index_after_removal(
+            self._list_cursor, first, end, remaining)
         self._list_scroll = min(self._list_scroll, self._list_max_scroll())
 
         def _reindex(columns):
@@ -1045,8 +1038,8 @@ class Viewer:
                 if first <= column.reference_index < end:
                     continue    # its reference frame is gone
                 del column.values[first:end]
-                if column.reference_index >= end:
-                    column.reference_index -= n
+                column.reference_index = sset.index_after_removal(
+                    column.reference_index, first, end, remaining)
                 kept.append(column)
             return kept
 
@@ -1061,7 +1054,6 @@ class Viewer:
         self._subset_hover_tip = ""
         self._full_rmsd_hover_tip = ""
 
-        sset.invalidate()
         self._measure_layout_cache = None
         self._refresh_measure_w()
         self._geometry_dirty = True
