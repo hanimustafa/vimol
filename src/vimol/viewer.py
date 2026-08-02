@@ -409,6 +409,11 @@ class Viewer:
         # entry in [first, end) from the pane. The global ALL (row 0, the
         # "STRUCTURES N" header) is drawn separately and never gets one.
         self._list_group_remove_spans: List[Tuple[int, int, int, int, int]] = []
+        # (screen row, col start, col end) for the global ALL button on the
+        # "STRUCTURES N" header row (design VIM-28) -- kept separate from
+        # _list_group_all_spans so existing per-file span indices/counts are
+        # untouched by its presence.
+        self._global_all_span: Optional[Tuple[int, int, int]] = None
         # Exact visible filename/frame-label hit boxes.  The associated text
         # is always the source path exactly as supplied by the caller (plus a
         # group-local ``#frame N`` suffix for frame rows), never the compact
@@ -876,6 +881,10 @@ class Viewer:
                 return first, end
         return None
 
+    def _global_all_hit(self, col: int, row: int) -> bool:
+        span = self._global_all_span
+        return bool(span is not None and row == span[0] and span[1] <= col < span[2])
+
     def _list_path_hover_hit(self, col: int, row: int) -> str:
         for r0, c0, c1, tip in self._list_path_hover_spans:
             if r0 == row and c0 <= col < c1:
@@ -935,9 +944,16 @@ class Viewer:
                 result.append(formatted + "↓")
         return result
 
-    def _toggle_list_group_all(self, first: int, end: int) -> None:
-        """Fill a file's overlay membership, or reduce it to the main frame."""
+    def _toggle_list_group_all(self, first: int, end: int,
+                               label: Optional[str] = None) -> None:
+        """Fill a file's overlay membership, or reduce it to the main frame.
+
+        *label* names the range in status messages; it defaults to the file
+        at *first*, but the global ALL (design VIM-28) calls this with
+        ``(0, len(structures))`` and its own label -- naming it after
+        whichever file happens to start the set would be misleading."""
         sset = self.structures
+        label = label if label is not None else self._list_group_name(first, True)
         all_selected = all(i == sset.active_index or sset[i].marked
                            for i in range(first, end))
         if all_selected:
@@ -949,12 +965,11 @@ class Viewer:
             # The main frame need not live in the file being cleared -- saying
             # it does would credit this file with a row it does not own.
             held = first <= sset.active_index < end
-            self._msg = "%s: %s" % (self._list_group_name(first, True),
-                                    "main frame only" if held else "hidden")
+            self._msg = "%s: %s" % (label, "main frame only" if held else "hidden")
         else:
             for i in range(first, end):
                 sset[i].marked = True
-            self._msg = f"{self._list_group_name(first, True)}: all selected"
+            self._msg = f"{label}: all selected"
         sset.overlay = True
         sset.invalidate()
         self._list_focused = True
@@ -1213,6 +1228,7 @@ class Viewer:
         self._list_row_struct = []
         self._list_group_all_spans = []
         self._list_group_remove_spans = []
+        self._global_all_span = None
         self._list_path_hover_spans = []
         self._list_group_toggle_spans = []
         self._list_group_summary_spans = []
@@ -1367,8 +1383,36 @@ class Viewer:
 
         marker = ("\u2191" if first > 0 else "") + ("\u2193" if first + cap < len(rows) else "")
         title = f" STRUCTURES {len(sset)}"
-        gap = max(0, list_w - len(title) - len(marker))
-        header_segs = [(title, head_fg), (" " * gap, ""), (marker, "\x1b[2m" + head_fg)]
+        # Global ALL (design VIM-28): fills/clears every loaded structure's
+        # overlay membership in one click, reusing the exact predicate and
+        # fill/clear logic the per-file button already uses (just over the
+        # whole set instead of one file's range). No \u00d7 of its own -- that
+        # only ever belongs to a single removable file (design VIM-32).
+        #
+        # The scroll marker is the more load-bearing affordance (design
+        # \u00a74.1) and keeps its reserved space at the right edge no matter
+        # what; the button only ever gets whatever room is left, and simply
+        # doesn't render on a strip too narrow for both -- it must never
+        # crowd the marker out.
+        global_button = " ALL "
+        available = max(0, list_w - len(title) - len(marker))
+        show_button = available >= len(global_button)
+        gap = available - len(global_button) if show_button else available
+        header_segs = [(title, head_fg), (" " * gap, "")]
+        self._global_all_span = None
+        if show_button:
+            global_selected = bool(sset.entries) and all(
+                k == sset.active_index or sset[k].marked for k in range(len(sset)))
+            global_button_style = (self._sgr_bg(
+                self.theme.measure_col_bg_a if global_selected
+                else self.theme.list_cap_bg)
+                + self._sgr_fg(self.theme.list_label_fg if global_selected
+                               else self.theme.list_muted_fg)
+                + ("\x1b[1m" if global_selected else ""))
+            button_col = len(title) + gap
+            header_segs.append((global_button, global_button_style))
+            self._global_all_span = (0, button_col, button_col + len(global_button))
+        header_segs.append((marker, "\x1b[2m" + head_fg))
         if layout:
             header_segs += measure_segs(0, [h for h, _w, _v, _r in layout], "left")
         put(0, self._list_line(header_segs, total_w))
@@ -2668,6 +2712,11 @@ class Viewer:
                         self._list_zone_press = True
                         if self._select_hint_hit(col, row):
                             self._open_selection_picker()
+                            changed = True
+                            continue
+                        if self._global_all_hit(col, row):
+                            self._toggle_list_group_all(
+                                0, len(self.structures), label="every structure")
                             changed = True
                             continue
                         # Checked before the ALL hit: the × sits flush

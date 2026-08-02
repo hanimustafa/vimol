@@ -1635,7 +1635,9 @@ def test_viewer_list_single_structure_files_get_overlay_sections(tmp_path):
         text = v._draw_list().decode("utf-8", "replace")
         assert text.count("methane.xyz") == 1 and text.count("water.xyz") == 1
         assert text.count("frame 1") == 2
-        assert text.count("ALL") == 2
+        # One per file, plus the global ALL on the "STRUCTURES N" header
+        # (design VIM-28).
+        assert text.count("ALL") == 3
         assert "/data/" not in text               # basenames only
         assert len(v._list_row_spans) == 2
         rows = v._list_display_rows()
@@ -1851,6 +1853,81 @@ def test_group_all_button_is_right_aligned_regardless_of_filename_length(tmp_pat
         assert x_c1 == v._list_w
         _row, _c0, all_c1, _first, _end = v._list_group_all_spans[0]
         assert all_c1 == next(iter(x_cols))
+    finally:
+        os.close(fd)
+
+
+def test_global_all_button_fills_then_clears_every_file(tmp_path):
+    """The global ALL (design VIM-28) reuses the per-file fill/clear logic
+    over the whole set: it must actually flip StructureSet.overlay/marked
+    (not just repaint), and clearing always retains the main frame."""
+    from vimol.input import MouseEvent
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="a.xyz", path="/d/a.xyz")
+    sset.append(mol, label="b.xyz", path="/d/b.xyz")
+    sset.append(mol, label="c.xyz", path="/d/c.xyz")
+    fd = os.open(str(tmp_path / "global-all.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+        assert v._global_all_span is not None
+        row, c0, c1 = v._global_all_span
+        assert row == 0
+
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert [e.marked for e in v.structures] == [True, True, True]
+        assert v.structures.overlay is True
+        assert "every structure" in v._msg
+
+        v._draw_list()
+        row, c0, c1 = v._global_all_span
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert [e.marked for e in v.structures] == [True, False, False]
+        assert "main frame only" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_global_all_button_has_no_remove_control(tmp_path):
+    """The × only ever belongs to a single removable file (design VIM-32) --
+    the global ALL on row 0 must never register one."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="a.xyz", path="/d/a.xyz")
+    sset.append(mol, label="b.xyz", path="/d/b.xyz")
+    fd = os.open(str(tmp_path / "global-all-no-x.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+        assert all(row != 0 for row, _c0, _c1, _first, _end
+                  in v._list_group_remove_spans)
+    finally:
+        os.close(fd)
+
+
+def test_global_all_button_yields_to_the_scroll_marker_when_narrow(tmp_path):
+    """The scroll marker is the more load-bearing affordance (design §4.1):
+    on a strip too narrow for both, the global ALL button simply doesn't
+    render rather than crowding the marker out."""
+    v, fd = _traj_viewer(tmp_path, n=60, fd_name="global-all-narrow.bin")
+    try:
+        v._list_w = 18   # _LIST_W_MIN -- the narrowest the strip ever gets
+        head = v._draw_list().decode("utf-8", "replace").split("\x1b[2;1H")[0]
+        assert "↓" in head
+        assert v._global_all_span is None
     finally:
         os.close(fd)
 
