@@ -3325,20 +3325,72 @@ def test_subset_column_disarms_when_the_reference_geometry_changes(tmp_path):
 
 def test_subset_column_header_marks_itself_stale_after_an_edit(tmp_path):
     """The numbers stay on screen (they were true once) but must not read as
-    current -- otherwise a stale RMSD is indistinguishable from a fresh one."""
+    current -- otherwise a stale RMSD is indistinguishable from a fresh one.
+
+    The sign and its stale marker live on the header's first line, the
+    #selectN id (and its ×) on the second (design VIM-29) -- so the star is
+    checked against ``layout``'s own header cell rather than the full
+    ``_draw_list()`` text, which never puts them on the same line."""
     from vimol import editor
 
     v, fd = _overlay_viewer(tmp_path)
     try:
         v._finish_subset_alignment((0, 1, 2))
         v._list_w = 40
-        assert "⊂RMSD #select1*" not in v._draw_list().decode("utf-8", "replace")
+        v._draw_list()
+        header_cell = v._measure_layout(v._list_w)[0][0]
+        assert header_cell == "⊂RMSD"
+        assert "#select1 ×" in v._measure_layout_header2
 
         entry = v.structures.active
         editor.delete_atom(entry.molecule, 4)
         entry.touch()
 
-        assert "⊂RMSD #select1*" in v._draw_list().decode("utf-8", "replace")
+        v._draw_list()
+        header_cell = v._measure_layout(v._list_w)[0][0]
+        assert header_cell == "⊂RMSD*"
+        assert "#select1 ×" in v._measure_layout_header2
+    finally:
+        os.close(fd)
+
+
+def test_rmsd_column_header_splits_across_two_rows_and_narrows_the_column(tmp_path):
+    """The sign lives on row 0 (the strip's own header row), the #selectN/
+    #allN id and its × on row 1 (design VIM-29) -- so the column need only
+    be as wide as the longer of the two header lines, not their
+    concatenation."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn, _SubsetRMSDColumn
+
+    sset = StructureSet()
+    sset.append(_measure_mol(0.0), label="a.xyz")
+    sset.append(_measure_mol(0.1), label="b.xyz")
+    fd = os.open(str(tmp_path / "rmsd-two-line.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+        v._cols, v._rows, v._list_w = 200, 30, 40
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.4]))
+        v._rmsd_columns.append(_SubsetRMSDColumn(
+            select_id=2, reference_index=0, reference_revision=0,
+            indices=(0, 1), labels=("C0", "N1"), values=[0.0, 0.5]))
+
+        layout = v._measure_layout(v._list_w)
+        assert [h for h, _w, _v, _r in layout] == ["∀RMSD", "⊂RMSD"]
+        assert v._measure_layout_header2 == ["#all1 ×", "#select2 ×"]
+        # Narrower than the old single-line "sign #idN ×" would have been:
+        # each column is only as wide as its longer header line / value.
+        for header_cell, width, cells, _removable in layout:
+            assert width < len(header_cell) + len(" #allN ×")
+
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "∀RMSD" in text and "⊂RMSD" in text
+        assert "#all1 ×" in text and "#select2 ×" in text
+        # Neither line was glued to the other -- the concatenation the old
+        # single-line header used to render is gone.
+        assert "∀RMSD #all1" not in text
+        assert "⊂RMSD #select2" not in text
     finally:
         os.close(fd)
 

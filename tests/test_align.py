@@ -416,8 +416,10 @@ def test_subset_rmsd_header_hover_click_and_R_recalculate(tmp_path):
         original = viewer._rmsd_columns[0].values[1]
 
         text = viewer._draw_list().decode("utf-8", "replace")
-        assert "⊂RMSD #select1" in text
-        assert len(viewer._subset_header_spans) == 1
+        assert "⊂RMSD" in text and "#select1" in text
+        # The header hit box spans both rows (design VIM-29): the sign on
+        # row 0, the id + × on row 1 -- either is a valid hover/click target.
+        assert len(viewer._subset_header_spans) == 2
         row, start, end, column_index = viewer._subset_header_spans[0]
         assert column_index == 0
         header_col = (start + end) // 2
@@ -664,7 +666,7 @@ def test_full_rmsd_column_accumulates_overlay_swaps_and_x_deletes(tmp_path):
         assert column.values[2] is not None
 
         text = viewer._draw_list().decode("utf-8", "replace")
-        assert "∀RMSD #all1" in text
+        assert "∀RMSD" in text and "#all1" in text
         assert len(viewer._full_rmsd_remove_spans) == 1
         row, start, _end, column_index = viewer._full_rmsd_remove_spans[0]
         assert column_index == 0
@@ -705,7 +707,11 @@ def test_aligning_onto_a_second_main_frame_opens_its_own_full_column(tmp_path):
 def test_full_rmsd_column_header_marks_itself_stale_after_an_edit(tmp_path):
     """The ⊂RMSD twin of this already exists. A ∀RMSD column is just as able
     to outlive the geometry it measured, and an unmarked stale number is
-    indistinguishable from a fresh one."""
+    indistinguishable from a fresh one.
+
+    The stale marker rides the sign line, not the #allN id (design VIM-29),
+    so it is checked against ``layout``'s own header cell rather than the
+    full ``_draw_list()`` text."""
     from vimol import editor
 
     viewer, fd = _overlay_viewer(tmp_path)
@@ -713,13 +719,15 @@ def test_full_rmsd_column_header_marks_itself_stale_after_an_edit(tmp_path):
         viewer.structures.overlay = True
         viewer._cols, viewer._rows, viewer._list_w = 200, 24, 40
         viewer._dispatch([KeyEvent("r")])
-        assert "∀RMSD #all1*" not in viewer._draw_list().decode("utf-8", "replace")
+        viewer._draw_list()
+        assert viewer._measure_layout(viewer._list_w)[0][0] == "∀RMSD"
 
         entry = viewer.structures.active
         editor.delete_atom(entry.molecule, 3)
         entry.touch()
 
-        assert "∀RMSD #all1*" in viewer._draw_list().decode("utf-8", "replace")
+        viewer._draw_list()
+        assert viewer._measure_layout(viewer._list_w)[0][0] == "∀RMSD*"
     finally:
         os.close(fd)
 

@@ -446,12 +446,19 @@ class Viewer:
         self._next_subset_id = 1
         self._active_subset_id: Optional[int] = None
         self._subset_hover_tip = ""
+        self._full_rmsd_hover_tip = ""
         self._measure_w = 0
         self._measure_header_spans: List[Tuple[int, int, int, int]] = []
         self._subset_header_spans: List[Tuple[int, int, int, int]] = []
         self._subset_remove_spans: List[Tuple[int, int, int, int]] = []
+        self._full_rmsd_header_spans: List[Tuple[int, int, int, int]] = []
         self._full_rmsd_remove_spans: List[Tuple[int, int, int, int]] = []
         self._measure_layout_sources: List[Tuple[str, int]] = []
+        # Second header line for RMSD columns only (design VIM-29): the sign
+        # ("⊂RMSD"/"∀RMSD" + stale marker) is `layout`'s own header cell on
+        # row 0; the #selectN/#allN id and its × live here, drawn on row 1,
+        # empty for every non-RMSD column so that row stays blank behind them.
+        self._measure_layout_header2: List[str] = []
         # (key, layout) memo for _measure_layout -- it's recomputed every
         # _update_geometry tick (see there) plus once per _draw_list, and
         # its body calls StructureSet.measure() per column, each of which
@@ -1131,6 +1138,7 @@ class Viewer:
         self._measure_header_spans = []
         self._subset_header_spans = []
         self._subset_remove_spans = []
+        self._full_rmsd_header_spans = []
         self._full_rmsd_remove_spans = []
         self._select_hint_span = None
         layout = self._measure_layout(list_w)
@@ -1168,8 +1176,14 @@ class Viewer:
         head_fg = self._sgr_fg(self.theme.list_header_fg)
         dim_fg = self._sgr_fg(self.theme.list_dim_fg)
 
-        def draw_group(row0: int, group_i: int, text: str) -> bool:
-            """Draw a file header plus ALL button and register its hit span."""
+        def draw_group(row0: int, group_i: int, text: str,
+                       extra_segs: Optional[list] = None) -> bool:
+            """Draw a file header plus ALL button and register its hit span.
+
+            *extra_segs* carries the sticky row's second RMSD header line
+            (design VIM-29) -- only ever passed for the row-1 sticky copy,
+            which otherwise draws nothing past the strip's own list_w
+            columns and would blank out that line instead."""
             end = self._list_group_end(group_i)
             all_selected = all(k == sset.active_index or sset[k].marked
                                for k in range(group_i, end))
@@ -1185,6 +1199,8 @@ class Viewer:
                 + ("\x1b[1m" if all_selected else ""))
             segs = [(" ", ""), (name, head_fg), (" ", ""),
                     (button, button_style)]
+            if extra_segs:
+                segs = segs + extra_segs
             if not put(row0, self._list_line(segs, total_w)):
                 return False
             entry = sset[group_i]
@@ -1227,10 +1243,14 @@ class Viewer:
                     segs.append((" ", style))
                 else:
                     segs.append((cell_text, style))
-                if align == "left" and removable:
+                # `raw` is empty for every non-RMSD column when this runs
+                # over the second header line (design VIM-29) -- guard every
+                # span below on it, or an empty cell registers a phantom
+                # 1-column hit at its own left edge.
+                if align == "left" and removable and raw:
                     x_col = col_offset + len(raw)   # raw ends in ' ×': × is its last char
                     self._measure_header_spans.append((row0, x_col, x_col + 1, k))
-                if (align == "left" and k < len(self._measure_layout_sources)
+                if (align == "left" and raw and k < len(self._measure_layout_sources)
                         and self._measure_layout_sources[k][0] == "subset"):
                     subset_idx = self._measure_layout_sources[k][1]
                     self._subset_header_spans.append(
@@ -1239,13 +1259,15 @@ class Viewer:
                         x_col = col_offset + len(raw)
                         self._subset_remove_spans.append(
                             (row0, x_col, x_col + 1, subset_idx))
-                if (align == "left" and k < len(self._measure_layout_sources)
-                        and self._measure_layout_sources[k][0] == "full_rmsd"
-                        and raw.endswith(" ×")):
+                if (align == "left" and raw and k < len(self._measure_layout_sources)
+                        and self._measure_layout_sources[k][0] == "full_rmsd"):
                     full_idx = self._measure_layout_sources[k][1]
-                    x_col = col_offset + len(raw)
-                    self._full_rmsd_remove_spans.append(
-                        (row0, x_col, x_col + 1, full_idx))
+                    self._full_rmsd_header_spans.append(
+                        (row0, col_offset, col_offset + len(cell_text), full_idx))
+                    if raw.endswith(" ×"):
+                        x_col = col_offset + len(raw)
+                        self._full_rmsd_remove_spans.append(
+                            (row0, x_col, x_col + 1, full_idx))
                 col_offset += len(cell_text)
                 if k != len(layout) - 1:
                     segs.append((" ", ""))          # untinted gap between columns
@@ -1273,10 +1295,11 @@ class Viewer:
                 if self._list_group_key(group_i) == self._list_group_key(struct_i):
                     sticky = rows[candidate]
                 break
+        row1_segs = measure_segs(1, self._measure_layout_header2, "left") if layout else []
         if sticky is None:
-            put(1, self._list_line([], total_w))
+            put(1, self._list_line(row1_segs, total_w))
         else:
-            draw_group(1, sticky[1], sticky[2])
+            draw_group(1, sticky[1], sticky[2], extra_segs=row1_segs)
 
         idx_w = max(2, len(str(len(sset))))
         label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
@@ -3381,13 +3404,13 @@ class Viewer:
         every row's layout, not just the table's.
         """
         columns = [
-            ("measure", i, header, indices, True, None)
+            ("measure", i, header, indices, True, None, "")
             for i, (header, indices) in enumerate(self._measure_columns)]
         live_sel = tuple(self.widget.measure_sel)
         already_frozen = any(live_sel == indices for _h, indices in self._measure_columns)
         if self.widget.measure_mode and len(live_sel) >= 2 and not already_frozen:
             columns.append(("measure_live", -1, self._measure_header_text(live_sel),
-                            live_sel, False, None))
+                            live_sel, False, None, ""))
         for i, column in enumerate(self._full_rmsd_columns):
             values = list(column.values[:len(self.structures)])
             if len(values) < len(self.structures):
@@ -3398,10 +3421,14 @@ class Viewer:
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
             cells = self._format_measure_extrema(values, 4)
-            header = column.header + (
-                "*" if self._full_rmsd_column_stale(column) else "")
-            columns.append(("full_rmsd", i, f"{header} ×", (),
-                            False, cells[:len(self.structures)]))
+            # Split across the two header rows (design VIM-29) so the column
+            # need only be as wide as the longer of the two, not their
+            # concatenation: the sign (+ stale marker) on row 0, the id and
+            # its × on row 1.
+            sign = "∀RMSD" + ("*" if self._full_rmsd_column_stale(column) else "")
+            columns.append(("full_rmsd", i, sign, (),
+                            False, cells[:len(self.structures)],
+                            f"#all{column.full_id} ×"))
         for i, column in enumerate(self._rmsd_columns):
             values = list(column.values[:len(self.structures)])
             if len(values) < len(self.structures):
@@ -3409,14 +3436,16 @@ class Viewer:
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
             cells = self._format_measure_extrema(values, 4)
-            # A '*' after the name is the design's stale marker (§4.4): the
+            # A '*' after the sign is the design's stale marker (§4.4): the
             # numbers were true once, so they stay readable, but they must
             # not be mistaken for a fit against the geometry on screen now.
-            header = column.header + ("*" if self._subset_column_stale(column) else "")
-            columns.append(("subset", i, f"{header} ×", column.indices,
-                            False, cells[:len(self.structures)]))
+            sign = "⊂RMSD" + ("*" if self._subset_column_stale(column) else "")
+            columns.append(("subset", i, sign, column.indices,
+                            False, cells[:len(self.structures)],
+                            f"#select{column.select_id} ×"))
         if not columns or len(self.structures) <= 1:
             self._measure_layout_sources = []
+            self._measure_layout_header2 = []
             return []
         key = (tuple(self._measure_columns), live_sel, self.widget.measure_mode,
                tuple((c.full_id, c.reference_index, c.reference_revision,
@@ -3427,12 +3456,14 @@ class Viewer:
                tuple((id(e.molecule), e.revision) for e in self.structures.entries))
         if self._measure_layout_cache is not None and self._measure_layout_cache[0] == key:
             self._measure_layout_sources = self._measure_layout_cache[2]
+            self._measure_layout_header2 = self._measure_layout_cache[3]
             return self._measure_layout_cache[1]
         available = max(0, self._cols - list_w - _MEASURE_MIN_VIEWPORT_COLS)
         out: List[Tuple[str, int, List[str], bool]] = []
         sources: List[Tuple[str, int]] = []
+        header2: List[str] = []
         used = 0
-        for source, source_index, header, indices, removable, saved_cells in columns:
+        for source, source_index, header, indices, removable, saved_cells, line2 in columns:
             if saved_cells is None:
                 kind = len(indices)
                 values = [v for _, v in self.structures.measure(indices)]
@@ -3441,15 +3472,18 @@ class Viewer:
             else:
                 cells = saved_cells
             header_cell = f"{header} ×" if removable else header
-            width = max(len(header_cell), max((len(c) for c in cells), default=1))
+            width = max(len(header_cell), len(line2),
+                        max((len(c) for c in cells), default=1))
             cost = width + 2 + (1 if out else 0)   # padding, plus the gap before it
             if used + cost > available:
                 break
             used += cost
             out.append((header_cell, width, cells, removable))
             sources.append((source, source_index))
+            header2.append(line2)
         self._measure_layout_sources = sources
-        self._measure_layout_cache = (key, out, sources)
+        self._measure_layout_header2 = header2
+        self._measure_layout_cache = (key, out, sources, header2)
         return out
 
     @staticmethod
