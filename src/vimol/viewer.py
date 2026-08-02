@@ -31,6 +31,8 @@ from . import templates
 from . import periodic_table
 from . import select as atom_selection
 from . import theme
+from . import file_dialog
+from .parsers import load_all
 from .parsers import xyz as xyz_parser
 
 # ANSI / terminal control -------------------------------------------------
@@ -145,6 +147,7 @@ _HELP_EDIT = [
     "     with 2+ structures: a table column tracks it live, click × to remove",
 ]
 _HELP_TAIL = [
+    "  A .................. add a structure file",
     "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
     "  t .................. transparent bg    g .................. hi-quality",
     "  ctrl-t ............. light/dark theme",
@@ -162,7 +165,7 @@ def _help_lines(editable: bool):
 
 # Keys the driver always claims. 'a' is here in both modes but means different
 # things: autospin when read-only, append when editable (see _driver_key).
-_BASE_DRIVER_KEYS = {"q", "escape", "a", "?", "d", "g", "t", "n", "p", "m", "r", "R", "S", "\x03", "\x14",
+_BASE_DRIVER_KEYS = {"q", "escape", "a", "A", "?", "d", "g", "t", "n", "p", "m", "r", "R", "S", "\x03", "\x14",
                       "alt+up", "alt+down"}
 # Extra keys claimed only when editing is enabled.
 _EDIT_DRIVER_KEYS = {"s", "u", "o", "x", "c"}
@@ -224,9 +227,12 @@ class Viewer:
                  transparent: bool = True, backend: str = "auto",
                  source_path: Optional[str] = None, editable: bool = False,
                  probe: Optional[kitty.TerminalProbe] = None,
-                 structures: Optional[StructureSet] = None):
+                 structures: Optional[StructureSet] = None,
+                 auto_bonds: bool = True, bond_tolerance: float = 0.45):
         self.source_path = source_path
         self.editable = editable
+        self._auto_bonds = auto_bonds
+        self._bond_tolerance = bond_tolerance
         # Frame 0 draws before the startup probe's OSC 11 reply can possibly
         # be in hand (the probe itself runs after the first paint -- see
         # _finish_startup), so this is a synchronous best guess: COLORFGBG, or
@@ -244,8 +250,9 @@ class Viewer:
             self.structures = structures
         else:
             frame_list = frames or [molecule]
-            for m in frame_list:
-                ensure_bonds(m)
+            if auto_bonds:
+                for m in frame_list:
+                    ensure_bonds(m, tolerance=bond_tolerance)
             self.structures = StructureSet()
             basename = os.path.basename(source_path) if source_path else None
             multi = len(frame_list) > 1
@@ -2686,6 +2693,8 @@ class Viewer:
                 self._pop_pointer()
             else:
                 self.autospin = not self.autospin        # classic binding
+        elif key == "A":
+            self._choose_and_add_file()
         elif key == "m":
             # measuring is read-only-safe, so 'm' works without --edit too.
             # Turning it off is "I'm done with this measurement", not
@@ -2785,6 +2794,82 @@ class Viewer:
             self._cycle_frame(1 if key in ("n", "alt+down") else -1)
         else:
             return False
+        return True
+
+    def _choose_and_add_file(self) -> bool:
+        """Pick one file and append it as though it was a CLI input.
+
+        The active/main frame is intentionally preserved.  The selected
+        file's first model joins the overlay (matching multi-file CLI
+        startup), while any later models are loaded as unmarked frames in
+        the same file section.
+        """
+        try:
+            path = file_dialog.choose_structure_file()
+        except file_dialog.FileDialogError as exc:
+            self._msg = str(exc)
+            return False
+        if path is None:
+            self._msg = "add file cancelled"
+            return False
+        return self._add_file(path)
+
+    def _unique_added_stem(self, path: str) -> str:
+        """Return a label stem unique among the live structure entries."""
+        base = os.path.basename(path) or path
+        occupied = set()
+        for entry in self.structures:
+            label = entry.label
+            occupied.add(label.rsplit("#", 1)[0] if "#" in label else label)
+        if base not in occupied:
+            return base
+        suffix = 2
+        while f"{base}~{suffix}" in occupied:
+            suffix += 1
+        return f"{base}~{suffix}"
+
+    def _add_file(self, path: str) -> bool:
+        """Load *path* into the running viewer without replacing its state."""
+        display_name = os.path.basename(path) or path
+        try:
+            molecules = load_all(path)
+            if not molecules:
+                raise ValueError("no molecules parsed")
+            if self._auto_bonds:
+                for molecule in molecules:
+                    ensure_bonds(molecule, tolerance=self._bond_tolerance)
+        except Exception as exc:  # parser and filesystem errors belong in the status bar
+            self._msg = f"could not add {display_name}: {exc}"
+            return False
+
+        old_count = len(self.structures)
+        stem = self._unique_added_stem(path)
+        multi = len(molecules) > 1
+        for offset, molecule in enumerate(molecules):
+            label = f"{stem}#{offset + 1}" if multi else stem
+            entry = self.structures.append(molecule, label=label, path=path)
+            entry.marked = offset == 0
+
+        # A one-file session becomes the same two-file overlay the CLI would
+        # have created.  In an established overlay, preserve the user's
+        # membership and simply add the new file's first model.
+        if old_count == 1:
+            self.structures[0].marked = True
+        self.structures.overlay = True
+        self.structures.invalidate()
+
+        added_count = len(molecules)
+        for column in self._full_rmsd_columns:
+            column.values.extend([None] * added_count)
+        for column in self._rmsd_columns:
+            column.values.extend([None] * added_count)
+        self._measure_layout_cache = None
+        self._refresh_measure_w()
+        self._list_scroll = min(self._list_scroll, self._list_max_scroll())
+        self.widget.scene.fit(keep_orientation=True)
+        self._last_interact = time.time()
+        self._msg = (f"added {display_name}" if added_count == 1
+                     else f"added {display_name} ({added_count} frames)")
         return True
 
     def _full_rmsd_column_stale(self, column: _FullRMSDColumn) -> bool:
