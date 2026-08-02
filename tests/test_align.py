@@ -350,6 +350,12 @@ def test_R_picks_reference_subset_and_enter_aligns_overlay(tmp_path, monkeypatch
         assert column.labels == ("C0", "N1", "O2", "H3")
         assert column.values[0] == 0.0
         assert column.values[1] < 1e-10
+        viewer._cols = 200
+        viewer._list_w = 20
+        cells = viewer._measure_layout(viewer._list_w)[0][2]
+        assert cells[column.reference_index] == "—"
+        assert any("↑" in cell for cell in cells)
+        assert any("↓" in cell for cell in cells)
         result = viewer.structures[1].alignment
         assert result is not None
         assert result.n_fitted == 4
@@ -448,7 +454,8 @@ def test_changing_main_frame_disarms_named_subset_before_global_r(
             viewer, "_align_overlay",
             lambda *args, **kwargs: calls.append((args, kwargs)) or True)
         assert viewer._dispatch([KeyEvent("r")]) is True
-        assert calls == [((), {})]
+        assert len(calls) == 1 and calls[0][0] == ()
+        assert calls[0][1]["rmsd_column"].header == "∀RMSD #all1"
         assert viewer.structures.active_index == 1
     finally:
         os.close(fd)
@@ -487,7 +494,8 @@ def test_global_r_rejects_stale_subset_after_external_active_change(
         assert viewer.structures.active_index == 1
         assert viewer._active_subset_id is None
         assert viewer.widget.align_sel == []
-        assert calls == [((), {})]
+        assert len(calls) == 1 and calls[0][0] == ()
+        assert calls[0][1]["rmsd_column"].header == "∀RMSD #all1"
     finally:
         os.close(fd)
 
@@ -576,6 +584,185 @@ def test_lowercase_r_aligns_complete_matching_overlay(tmp_path):
         result = viewer.structures[1].alignment
         assert result is not None and result.method == "permute"
         assert result.rmsd < 1e-10
+        assert viewer._rmsd_columns == []
+        assert len(viewer._full_rmsd_columns) == 1
+        column = viewer._full_rmsd_columns[0]
+        assert column.header == "∀RMSD #all1"
+        assert column.values[0] == 0.0
+        assert column.values[1] < 1e-10
+        viewer._cols = 200
+        viewer._list_w = 20
+        cells = viewer._measure_layout(viewer._list_w)[0][2]
+        assert cells[column.reference_index] == "—"
+        assert any("↑" in cell for cell in cells)
+        assert any("↓" in cell for cell in cells)
+    finally:
+        os.close(fd)
+
+
+def test_full_rmsd_column_accumulates_overlay_swaps_and_x_deletes(tmp_path):
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        source = viewer.structures[1].molecule
+        third = _mol(source.symbols, source.positions + [5.0, -4.0, 3.0], "third")
+        viewer.structures.append(third, label="third")
+        viewer.structures.overlay = True
+        viewer._cols = 200
+        viewer._rows = 24
+        viewer._list_w = 20
+
+        viewer.structures[1].marked = True
+        viewer.structures[2].marked = False
+        viewer._dispatch([KeyEvent("r")])
+        column = viewer._full_rmsd_columns[0]
+        previous = column.values[1]
+        assert previous is not None and column.values[2] is None
+
+        viewer.structures[1].marked = False
+        viewer.structures[2].marked = True
+        viewer._dispatch([KeyEvent("r")])
+        assert viewer._full_rmsd_columns == [column]
+        assert column.values[1] == previous
+        assert column.values[2] is not None
+
+        text = viewer._draw_list().decode("utf-8", "replace")
+        assert "∀RMSD #all1" in text
+        assert len(viewer._full_rmsd_remove_spans) == 1
+        row, start, _end, column_index = viewer._full_rmsd_remove_spans[0]
+        assert column_index == 0
+        assert viewer._dispatch([
+            MouseEvent("down", float(start), float(row), button=0)]) is True
+        assert viewer._full_rmsd_columns == []
+        assert viewer._msg == "#all1 deleted"
+    finally:
+        os.close(fd)
+
+
+def test_aligning_onto_a_second_main_frame_opens_its_own_full_column(tmp_path):
+    """A ∀RMSD column belongs to the main frame it was fitted against, so
+    switching main frame must open #all2 rather than overwrite #all1 with
+    numbers measured from somewhere else."""
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        source = viewer.structures[1].molecule
+        viewer.structures.append(
+            _mol(source.symbols, source.positions + [5.0, -4.0, 3.0], "third"),
+            label="third")
+        viewer.structures.overlay = True
+        viewer._cols, viewer._rows, viewer._list_w = 200, 24, 24
+        for entry in viewer.structures:
+            entry.marked = True
+
+        viewer._dispatch([KeyEvent("r")])
+        viewer.structures.set_active(1)
+        viewer._dispatch([KeyEvent("r")])
+
+        assert [c.header for c in viewer._full_rmsd_columns] == [
+            "∀RMSD #all1", "∀RMSD #all2"]
+        assert [c.reference_index for c in viewer._full_rmsd_columns] == [0, 1]
+    finally:
+        os.close(fd)
+
+
+def test_full_rmsd_column_header_marks_itself_stale_after_an_edit(tmp_path):
+    """The ⊂RMSD twin of this already exists. A ∀RMSD column is just as able
+    to outlive the geometry it measured, and an unmarked stale number is
+    indistinguishable from a fresh one."""
+    from vimol import editor
+
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer.structures.overlay = True
+        viewer._cols, viewer._rows, viewer._list_w = 200, 24, 40
+        viewer._dispatch([KeyEvent("r")])
+        assert "∀RMSD #all1*" not in viewer._draw_list().decode("utf-8", "replace")
+
+        entry = viewer.structures.active
+        editor.delete_atom(entry.molecule, 3)
+        entry.touch()
+
+        assert "∀RMSD #all1*" in viewer._draw_list().decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def test_full_alignment_reuses_correspondence_across_trajectory_frames(tmp_path):
+    """The correspondence cache covers plain 'r' as well as subset fits. Frame
+    one pays for the permutation search; its siblings must be reduced to a
+    keyed Kabsch rather than each repeating that search."""
+    reference = _mol(["C", "N", "O", "S"],
+                     [[0, 0, 0], [1.2, 0, 0], [0, 1.4, 0], [0, 0, 1.6]])
+    first = _mol(["C", "N", "O", "S"], _rigid(reference.positions))
+    # One atom only: a whole-molecule shift is rigid and would fit exactly,
+    # proving nothing about which atom was paired with which.
+    bent = reference.positions.copy()
+    bent[2] += [0.05, 0, 0]
+    second = _mol(["C", "N", "O", "S"], _rigid(bent))
+    structures = StructureSet()
+    structures.append(first, label="traj.xyz#1", path="/data/traj.xyz").marked = True
+    structures.append(second, label="traj.xyz#2", path="/data/traj.xyz").marked = True
+    structures.append(reference, label="reference.xyz",
+                      path="/data/reference.xyz").marked = True
+    structures.active_index = 2
+    structures.overlay = True
+    fd = os.open(str(tmp_path / "full-reuse.out"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        viewer = Viewer(reference, structures=structures, fd_out=fd, backend="cpu")
+        original = structures.align
+        calls = []
+
+        def recording_align(*args, **kwargs):
+            calls.append(kwargs)
+            return original(*args, **kwargs)
+
+        structures.align = recording_align
+        viewer._align_overlay()
+
+        assert len(calls) == 2
+        # Frame one discovers the correspondence...
+        assert calls[0].get("permute") is True
+        # ...frame two is handed it, so it never searches again.
+        assert "permute" not in calls[1]
+        assert calls[1]["select"] is not None and calls[1]["ref_select"] is not None
+        assert structures[0].alignment.rmsd < 1e-10
+        # The reused pairing still has to be the right one: a wrong pairing
+        # of four distinct elements would be far worse than the bend itself.
+        assert 0.0 < structures[1].alignment.rmsd < 0.05
+    finally:
+        os.close(fd)
+
+
+def test_overlay_subset_alignment_runs_past_the_old_three_hundred_atom_ceiling(
+        tmp_path):
+    """_align_overlay lifts permute_max_atoms on its subset branches, so a
+    structure the default cap used to refuse outright now produces a fit.
+
+    This pins reachability only. The branch is quadratic in the mobile atom
+    count, so how large it can go before it stops feeling interactive is a
+    separate question from whether it runs at all.
+    """
+    rng = np.random.default_rng(11)
+    n = 320                                   # just past the old default cap
+    reference_points = rng.normal(scale=8.0, size=(n + 5, 3))
+    reference = _mol(["C"] * n + ["N"] * 5, reference_points, "reference")
+    mobile = _mol(["C"] * n, _rigid(reference_points[:n]), "mobile")
+
+    # Refused by the library default, which _align_overlay deliberately drops.
+    with pytest.raises(ValueError, match="impractical above 300"):
+        superpose(mobile, reference, subset=True)
+
+    structures = StructureSet()
+    structures.append(reference, label="reference.xyz")
+    structures.append(mobile, label="mobile.xyz").marked = True
+    structures.overlay = True
+    fd = os.open(str(tmp_path / "uncapped.out"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        viewer = Viewer(reference, structures=structures, fd_out=fd, backend="cpu")
+        viewer._align_overlay()
+        assert "impractical" not in viewer._msg
+        result = structures[1].alignment
+        assert result is not None and result.n_fitted == n
+        assert result.rmsd < 1e-6
     finally:
         os.close(fd)
 

@@ -1365,6 +1365,35 @@ def test_viewer_list_single_structure_files_get_overlay_sections(tmp_path):
         os.close(fd)
 
 
+def test_viewer_list_climbs_parent_tree_until_file_headers_are_unique(tmp_path):
+    """Duplicate basenames gain only as much parent context as is needed.
+
+    These two paths still collide at ``shared/mol.xyz``, so disambiguation
+    must climb a second time.  An already-unique filename stays compact.
+    """
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="mol.xyz", path="/project/run-a/shared/mol.xyz")
+    sset.append(mol, label="mol.xyz~2", path="/project/run-b/shared/mol.xyz")
+    sset.append(mol, label="water.xyz", path="/project/unique/water.xyz")
+    fd = os.open(str(tmp_path / "unique-file-headers.bin"),
+                 os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        rows = v._list_display_rows()
+        headers = [text for kind, _i, text in rows if kind == "group"]
+        assert headers == [
+            "run-a/shared/mol.xyz",
+            "run-b/shared/mol.xyz",
+            "water.xyz",
+        ]
+    finally:
+        os.close(fd)
+
+
 def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
     """A grouped file followed by a lone one: the offset between display rows
     and structure indices CHANGES partway down the list, which is exactly
@@ -1438,6 +1467,134 @@ def test_viewer_list_group_all_button_fills_then_clears_to_main(tmp_path):
         assert v.structures.drawn_indices() == [0]
         assert v.structures.overlay is True
         assert "main frame only" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_keeps_current_file_header_sticky_while_scrolled(tmp_path):
+    v, fd = _traj_viewer(tmp_path, n=20)
+    try:
+        v._list_w = 28
+        v._list_scroll_to(8)
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "traj.xyz" in text
+        assert "ALL" in text
+        assert len(v._list_group_all_spans) == 1
+        row, _c0, _c1, first, end = v._list_group_all_spans[0]
+        assert row == 1
+        assert (first, end) == (0, 20)
+        assert all(span[0] >= 2 for span in v._list_row_spans)
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_sticky_header_follows_scrolling_into_the_next_file(tmp_path):
+    """The sticky row names whichever file the top visible frame belongs to,
+    not whichever header happened to be first. It must also stand down while
+    that file's own header is still on screen, or the name appears twice."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    for k in range(20):
+        sset.append(mol, label=f"a.xyz#{k}", path="/d/a.xyz")
+    for k in range(20):
+        sset.append(mol, label=f"b.xyz#{k}", path="/d/b.xyz")
+    # Pathless and unnumbered: gets no header of its own, so the nearest
+    # header above it belongs to somebody else.
+    sset.append(mol, label="scratch")
+    for k in range(20):
+        sset.append(mol, label=f"c.xyz#{k}", path="/d/c.xyz")
+    fd = os.open(str(tmp_path / "sticky-two-file.bin"),
+                 os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._rows = 14
+        v._list_w = 28
+        rows = v._list_display_rows()
+
+        def sticky_name(display_row):
+            v._list_scroll_to(display_row)
+            assert v._list_scroll == display_row      # not clamped short
+            v._draw_list()
+            spans = [s for s in v._list_group_all_spans if s[0] == 1]
+            return v._list_group_name(spans[0][3], True) if spans else None
+
+        def row_of(structure_index):
+            return next(r for r, (kind, i, _t) in enumerate(rows)
+                        if kind == "struct" and i == structure_index)
+
+        assert sticky_name(row_of(4)) == "a.xyz"      # inside the first file
+        assert sticky_name(row_of(24)) == "b.xyz"     # inside the second
+
+        # The sticky copy carries a live ALL button, not a picture of one --
+        # and it must fill the file it names rather than the first file.
+        from vimol.input import MouseEvent
+        row, c0, c1, first, end = [
+            s for s in v._list_group_all_spans if s[0] == 1][0]
+        assert (first, end) == (20, 40)
+        assert v._dispatch([
+            MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)]) is True
+        assert all(v.structures[i].marked for i in range(20, 40))
+        assert not any(v.structures[i].marked for i in range(1, 20))
+        # b.xyz's own header is the top row, so nothing may be duplicated.
+        assert rows[row_of(20) - 1][0] == "group"
+        assert sticky_name(row_of(20) - 1) is None
+
+        # Naming b.xyz over a row b.xyz does not own is worse than naming
+        # nothing, so the orphan row must clear the sticky header entirely.
+        orphan = row_of(40)
+        assert rows[orphan - 1][0] == "struct"        # no header introduced it
+        assert sticky_name(orphan) is None
+    finally:
+        os.close(fd)
+
+
+def test_viewer_list_path_names_terminate_on_indistinguishable_paths(tmp_path):
+    """Disambiguation climbs until names differ, so two spellings of the same
+    file have no parent left to climb to. That must end, not spin."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    def headers(paths):
+        sset = StructureSet()
+        mol = vimol.load(os.path.join(EX, "methane.xyz"))
+        for k, path in enumerate(paths):
+            sset.append(mol, label=f"m{k}", path=path)
+        fd = os.open(str(tmp_path / "paths.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            v = Viewer(mol, structures=sset, fd_out=fd)
+            names = v._list_path_display_names()
+            return [names[p] for p in paths]
+        finally:
+            os.close(fd)
+
+    # Same file, two spellings: no parent node distinguishes them.
+    assert headers(["/a/b/x.xyz", "/a//b/x.xyz"]) == ["/a/b/x.xyz", "/a//b/x.xyz"]
+    # A root-level file has no parent directory to prepend either.
+    assert headers(["/mol.xyz", "mol.xyz"]) == ["/mol.xyz", "mol.xyz"]
+    assert headers(["/x.xyz", "/y/x.xyz"]) == ["/x.xyz", "y/x.xyz"]
+
+
+def test_viewer_first_real_geometry_restores_startup_file_header(tmp_path):
+    """frame_index is assigned while terminal height is still zero. The real
+    first geometry pass must undo that placeholder-capacity scroll."""
+    from vimol.viewer import Viewer
+
+    frames = [vimol.load(os.path.join(EX, "methane.xyz")) for _ in range(8)]
+    fd = os.open(str(tmp_path / "startup-header.bin"),
+                 os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(frames[0], frames=frames, source_path="traj.xyz", fd_out=fd)
+        v.frame_index = 0
+        assert v._list_scroll == 1       # one-row placeholder hid the header
+        v._update_geometry()
+        assert v._list_scroll == 0
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "traj.xyz" in text and "ALL" in text
+        assert v._list_group_all_spans[0][0] == 2  # normal header, not sticky fallback
     finally:
         os.close(fd)
 
@@ -1767,6 +1924,8 @@ def test_measure_table_renders_values_and_degrades_for_mismatched_topology(tmp_p
     v, fd = _measure_viewer(tmp_path)
     try:
         v._freeze_measure_sel((0, 1))
+        layout = v._measure_layout(v._list_w)
+        assert layout[0][2] == ["1.000↓", "1.500↑", "—"]
         text = v._draw_list().decode("utf-8", "replace")
         assert "C0-N1 ×" in text
         # active (a.xyz) and b.xyz share topology -> real numbers;
@@ -1774,8 +1933,46 @@ def test_measure_table_renders_values_and_degrades_for_mismatched_topology(tmp_p
         assert "1.000" in text     # a.xyz: |C-N| == 1.0
         assert "1.500" in text     # b.xyz: dx=0.5 -> |C-N| == 1.5
         assert "—" in text
+        # The ANSI underline is applied only to each marked value, once for
+        # the minimum and once for the maximum.
+        assert text.count("\x1b[4m") == 2
     finally:
         os.close(fd)
+
+
+def test_measure_extrema_are_reviewed_when_a_structure_row_is_added(tmp_path):
+    """A pinned column must not retain the old maximum after it gains a row."""
+    v, fd = _measure_viewer(tmp_path)
+    try:
+        v._freeze_measure_sel((0, 1))
+        assert v._measure_layout(v._list_w)[0][2] == [
+            "1.000↓", "1.500↑", "—"]
+
+        v.structures.append(_measure_mol(1.0), label="d.xyz")
+        cells = v._measure_layout(v._list_w)[0][2]
+        assert cells == ["1.000↓", "1.500", "—", "2.000↑"]
+    finally:
+        os.close(fd)
+
+
+def test_measure_extrema_marks_all_ties_and_ignores_missing_values():
+    from vimol.viewer import Viewer
+
+    assert Viewer._format_measure_extrema([2.0, None, 2.0], 3) == [
+        "2.000↑↓", "—", "2.000↑↓"]
+
+
+def test_measure_extrema_treats_non_finite_values_as_missing():
+    """A NaN or an infinity must not become the column's marked maximum, and
+    must not drag every real value into looking like a joint minimum."""
+    from vimol.viewer import Viewer
+
+    cells = Viewer._format_measure_extrema(
+        [1.0, float("nan"), float("inf"), float("-inf"), 3.0], 3)
+    assert cells == ["1.000↓", "—", "—", "—", "3.000↑"]
+    # A column of nothing but non-finite values has no extrema at all.
+    assert Viewer._format_measure_extrema(
+        [float("nan"), float("inf")], 3) == ["—", "—"]
 
 
 def test_measure_click_header_x_removes_frozen_column(tmp_path):

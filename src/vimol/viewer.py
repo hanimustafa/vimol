@@ -9,13 +9,14 @@ capture the mouse in their own region should use the widget + decoder directly
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import select
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from .molecule import Molecule
 from .render import Style
@@ -97,6 +98,19 @@ class _SubsetRMSDColumn:
     def header(self) -> str:
         return f"⊂RMSD #select{self.select_id}"
 
+
+@dataclass
+class _FullRMSDColumn:
+    """One persistent all-atom fit against a particular main frame."""
+    full_id: int
+    reference_index: int
+    reference_revision: int
+    values: List[Optional[float]]
+
+    @property
+    def header(self) -> str:
+        return f"∀RMSD #all{self.full_id}"
+
 # Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
 # separator plus footer lines below. _list_capacity() derives what fits from
@@ -136,7 +150,7 @@ _HELP_TAIL = [
     "  t .................. transparent bg    g .................. hi-quality",
     "  ctrl-t ............. light/dark theme",
     "  f / z .............. re-fit / reset    ? .................. toggle help",
-    "  overlay: r .......... align all         R ... pick reference atoms, Enter",
+    "  overlay: r .......... align all → ∀RMSD  R ... pick atoms → ⊂RMSD",
     "     Shift+S / click select ... Backbone, Heavy atoms, or Ring system",
     "     option-click atom ........ additive manual subset selection",
     "     ⊂RMSD column: hover atoms · click arm selection · R recalculate",
@@ -393,7 +407,9 @@ class Viewer:
         # _measure_header_spans is the click hit-test for each FROZEN
         # column's × (the live column has none -- nothing to remove yet).
         self._measure_columns: List[Tuple[str, Tuple[int, ...]]] = []
+        self._full_rmsd_columns: List[_FullRMSDColumn] = []
         self._rmsd_columns: List[_SubsetRMSDColumn] = []
+        self._next_full_rmsd_id = 1
         self._next_subset_id = 1
         self._active_subset_id: Optional[int] = None
         self._subset_hover_tip = ""
@@ -401,6 +417,7 @@ class Viewer:
         self._measure_header_spans: List[Tuple[int, int, int, int]] = []
         self._subset_header_spans: List[Tuple[int, int, int, int]] = []
         self._subset_remove_spans: List[Tuple[int, int, int, int]] = []
+        self._full_rmsd_remove_spans: List[Tuple[int, int, int, int]] = []
         self._measure_layout_sources: List[Tuple[str, int]] = []
         # (key, layout) memo for _measure_layout -- it's recomputed every
         # _update_geometry tick (see there) plus once per _draw_list, and
@@ -690,14 +707,63 @@ class Viewer:
             return ("label", entry.label.rsplit("#", 1)[0])
         return ("index", i)          # nothing it could be grouped with
 
-    def _list_group_name(self, i: int, grouped: bool) -> str:
+    def _list_path_display_names(self) -> dict:
+        """Shortest unique trailing path for every path-backed file.
+
+        Start at the basename.  Whenever two displayed names still collide,
+        prepend one parent node to just those names and repeat.  Thus
+        ``a/run/mol.xyz`` and ``b/run/mol.xyz`` become
+        ``a/run/mol.xyz`` / ``b/run/mol.xyz``, while an unrelated
+        ``water.xyz`` stays exactly ``water.xyz``.
+        """
+        paths = list(dict.fromkeys(
+            entry.path for entry in self.structures if entry.path is not None))
+        normalized = {path: os.path.normpath(path) for path in paths}
+        names = {
+            path: os.path.basename(normalized[path]) or normalized[path]
+            for path in paths
+        }
+        parents = {path: os.path.dirname(normalized[path]) for path in paths}
+
+        while True:
+            counts = Counter(names.values())
+            colliding = [path for path in paths if counts[names[path]] > 1]
+            if not colliding:
+                break
+            changed = False
+            for path in colliding:
+                parent = parents[path]
+                node = os.path.basename(parent)
+                if node:
+                    names[path] = os.path.join(node, names[path])
+                    parents[path] = os.path.dirname(parent)
+                    changed = True
+                elif names[path] != normalized[path]:
+                    # Preserve a leading root separator when the complete
+                    # absolute path is the only remaining differentiator.
+                    names[path] = normalized[path]
+                    changed = True
+                elif names[path] != path:
+                    names[path] = path
+                    changed = True
+            if not changed:
+                # Repeated references to the exact same normalized path are
+                # one filename; there is no higher directory that can make
+                # them different, so do not loop forever.
+                break
+        return names
+
+    def _list_group_name(self, i: int, grouped: bool,
+                         path_names: Optional[dict] = None) -> str:
         """The display name for structure *i*'s file: its basename, or the
         '<stem>#k' label's stem when there is no path. A structure that is
         alone in its group and has no path keeps its full label -- the label
         is what identifies it, and nothing else on the strip repeats it."""
         entry = self.structures[i]
         if entry.path is not None:
-            return os.path.basename(entry.path) or entry.path
+            if path_names is None:
+                path_names = self._list_path_display_names()
+            return path_names[entry.path]
         if grouped and "#" in entry.label:
             return entry.label.rsplit("#", 1)[0]
         return entry.label
@@ -717,6 +783,7 @@ class Viewer:
         """
         rows: List[Tuple[str, Optional[int], str]] = []
         n = len(self.structures)
+        path_names = self._list_path_display_names()
         path_groups = set()
         for k in range(n):
             key = self._list_group_key(k)
@@ -732,10 +799,12 @@ class Viewer:
                          or (key[0] == "path"
                              and (self.structures.overlay or len(path_groups) > 1)))
             if sectioned:
-                rows.append(("group", i, self._list_group_name(i, True)))
+                rows.append(("group", i, self._list_group_name(
+                    i, True, path_names)))
                 rows.extend(("struct", m, f"frame {m - i + 1}") for m in range(i, j))
             else:
-                rows.append(("struct", i, self._list_group_name(i, False)))
+                rows.append(("struct", i, self._list_group_name(
+                    i, False, path_names)))
             i = j
         return rows
 
@@ -909,6 +978,7 @@ class Viewer:
         self._measure_header_spans = []
         self._subset_header_spans = []
         self._subset_remove_spans = []
+        self._full_rmsd_remove_spans = []
         self._select_hint_span = None
         layout = self._measure_layout(list_w)
         total_w = list_w + self._layout_width(layout)
@@ -945,6 +1015,29 @@ class Viewer:
         head_fg = self._sgr_fg(self.theme.list_header_fg)
         dim_fg = self._sgr_fg(self.theme.list_dim_fg)
 
+        def draw_group(row0: int, group_i: int, text: str) -> bool:
+            """Draw a file header plus ALL button and register its hit span."""
+            end = self._list_group_end(group_i)
+            all_selected = all(k == sset.active_index or sset[k].marked
+                               for k in range(group_i, end))
+            button = " ALL "
+            name = self._truncate_middle(
+                text, max(1, list_w - len(button) - 2))
+            button_col = 1 + len(name) + 1
+            button_style = (self._sgr_bg(
+                self.theme.measure_col_bg_a if all_selected
+                else self.theme.list_cap_bg)
+                + self._sgr_fg(self.theme.list_label_fg if all_selected
+                               else self.theme.list_muted_fg)
+                + ("\x1b[1m" if all_selected else ""))
+            segs = [(" ", ""), (name, head_fg), (" ", ""),
+                    (button, button_style)]
+            if not put(row0, self._list_line(segs, total_w)):
+                return False
+            self._list_group_all_spans.append(
+                (row0, button_col, button_col + len(button), group_i, end))
+            return True
+
         def measure_segs(row0: int, raw_cells: List[str], align: str) -> list:
             """Tinted measurement-column segments for one row (design
             2026-07-30 rev. 2). *raw_cells[k]* is column k's unpadded content
@@ -964,7 +1057,17 @@ class Viewer:
                 padded = raw.ljust(width) if align == "left" else raw.rjust(width)
                 cell_text = f" {padded} "
                 fg = head_fg if align == "left" else (muted if raw == "—" else dim_fg)
-                segs.append((cell_text, self._sgr_bg(bg) + fg))
+                style = self._sgr_bg(bg) + fg
+                # Extrema are recomputed by _measure_layout on every data
+                # revision.  Keep the underline tight around the value and
+                # its arrow rather than underlining the cell's padding too.
+                if align == "right" and ("↑" in raw or "↓" in raw):
+                    left_pad = " " + (" " * (width - len(raw)))
+                    segs.append((left_pad, style))
+                    segs.append((raw, style + "\x1b[4m"))
+                    segs.append((" ", style))
+                else:
+                    segs.append((cell_text, style))
                 if align == "left" and removable:
                     x_col = col_offset + len(raw)   # raw ends in ' ×': × is its last char
                     self._measure_header_spans.append((row0, x_col, x_col + 1, k))
@@ -977,6 +1080,13 @@ class Viewer:
                         x_col = col_offset + len(raw)
                         self._subset_remove_spans.append(
                             (row0, x_col, x_col + 1, subset_idx))
+                if (align == "left" and k < len(self._measure_layout_sources)
+                        and self._measure_layout_sources[k][0] == "full_rmsd"
+                        and raw.endswith(" ×")):
+                    full_idx = self._measure_layout_sources[k][1]
+                    x_col = col_offset + len(raw)
+                    self._full_rmsd_remove_spans.append(
+                        (row0, x_col, x_col + 1, full_idx))
                 col_offset += len(cell_text)
                 if k != len(layout) - 1:
                     segs.append((" ", ""))          # untinted gap between columns
@@ -990,7 +1100,23 @@ class Viewer:
         if layout:
             header_segs += measure_segs(0, [h for h, _w, _v, _r in layout], "left")
         put(0, self._list_line(header_segs, total_w))
-        put(1, self._list_line([], total_w))          # air under the header
+        # The second chrome row is normally breathing room. Once a file's
+        # header scrolls away, it becomes a sticky copy instead, keeping both
+        # the source name and its ALL control visible throughout the file.
+        sticky = None
+        if 0 < first < len(rows) and rows[first][0] == "struct":
+            struct_i = rows[first][1]
+            for candidate in range(first - 1, -1, -1):
+                if rows[candidate][0] != "group":
+                    continue
+                group_i = rows[candidate][1]
+                if self._list_group_key(group_i) == self._list_group_key(struct_i):
+                    sticky = rows[candidate]
+                break
+        if sticky is None:
+            put(1, self._list_line([], total_w))
+        else:
+            draw_group(1, sticky[1], sticky[2])
 
         idx_w = max(2, len(str(len(sset))))
         label_w = max(1, list_w - (4 + idx_w))       # pad+swatch+sp+idx+sp
@@ -998,25 +1124,8 @@ class Viewer:
         for n_row, (kind, i, text) in enumerate(visible):
             row0 = _LIST_ROWS_ABOVE + n_row
             if kind == "group":
-                end = self._list_group_end(i)
-                all_selected = all(k == sset.active_index or sset[k].marked
-                                   for k in range(i, end))
-                button = " ALL "
-                name = self._truncate_middle(
-                    text, max(1, list_w - len(button) - 2))
-                button_col = 1 + len(name) + 1
-                button_style = (self._sgr_bg(
-                    self.theme.measure_col_bg_a if all_selected
-                    else self.theme.list_cap_bg)
-                    + self._sgr_fg(self.theme.list_label_fg if all_selected
-                                   else self.theme.list_muted_fg)
-                    + ("\x1b[1m" if all_selected else ""))
-                segs = [(" ", ""), (name, head_fg), (" ", ""),
-                        (button, button_style)]
-                if not put(row0, self._list_line(segs, total_w)):
+                if not draw_group(row0, i, text):
                     break
-                self._list_group_all_spans.append(
-                    (row0, button_col, button_col + len(button), i, end))
                 drawn_rows += 1
                 continue
             entry = sset[i]
@@ -1113,6 +1222,7 @@ class Viewer:
                    or list_w != self._list_w or measure_w != self._measure_w
                    or self._geometry_dirty)
         if changed:
+            first_geometry = not self._geometry_established
             self._list_w = list_w
             self._measure_w = measure_w
             total_w = list_w + measure_w
@@ -1127,8 +1237,14 @@ class Viewer:
             # zoom that was fit for the placeholder. Every later resize (the
             # user actually resizing their terminal) preserves the view as usual.
             self.widget.set_pixel_size(max(w, 16), max(h, 16),
-                                       refit=not self._geometry_established)
+                                       refit=first_geometry)
             self._geometry_established = True
+            if first_geometry:
+                # frame_index is applied before the terminal's real height is
+                # known. Re-run visibility now: the placeholder one-row
+                # capacity otherwise scrolls frame 1's file header away at
+                # startup, and a nonzero --frame cannot be positioned well.
+                self._list_ensure_visible(self.structures.active_index)
             self._geometry_dirty = False
         return changed
 
@@ -2253,6 +2369,11 @@ class Viewer:
                             self._remove_subset_column(removed_subset)
                             changed = True
                             continue
+                        removed_full = self._full_rmsd_remove_hit(col, row)
+                        if removed_full is not None:
+                            self._remove_full_rmsd_column(removed_full)
+                            changed = True
+                            continue
                         subset_col = self._subset_header_hit(col, row)
                         if subset_col is not None:
                             self._activate_subset_column(subset_col)
@@ -2402,7 +2523,7 @@ class Viewer:
             if self.widget.align_mode:
                 self._msg = "select one or more main-frame atoms first"
                 return True
-            return self._align_overlay()
+            return self._finish_full_alignment()
         elif key == "R":
             if not self.structures.overlay:
                 self._msg = "subset align needs overlay mode"
@@ -2464,6 +2585,34 @@ class Viewer:
         else:
             return False
         return True
+
+    def _full_rmsd_column_stale(self, column: _FullRMSDColumn) -> bool:
+        if column.reference_index >= len(self.structures):
+            return True
+        return (self.structures[column.reference_index].revision
+                != column.reference_revision)
+
+    def _finish_full_alignment(self) -> bool:
+        """Run an all-atom alignment and persist/update its ∀RMSD column."""
+        reference_i = self.structures.active_index
+        column = next(
+            (candidate for candidate in self._full_rmsd_columns
+             if candidate.reference_index == reference_i
+             and not self._full_rmsd_column_stale(candidate)),
+            None,
+        )
+        if column is None:
+            column = _FullRMSDColumn(
+                full_id=self._next_full_rmsd_id,
+                reference_index=reference_i,
+                reference_revision=self.structures[reference_i].revision,
+                values=[None] * len(self.structures),
+            )
+            self._next_full_rmsd_id += 1
+            self._full_rmsd_columns.append(column)
+        result = self._align_overlay(rmsd_column=column)
+        self._refresh_measure_w()
+        return result
 
     def _subset_column_stale(self, column: _SubsetRMSDColumn) -> bool:
         """True once the reference geometry moved out from under the pick."""
@@ -2567,7 +2716,8 @@ class Viewer:
                      + " · R recalculates · Option-click derives")
 
     def _align_overlay(self, ref_select=None,
-                       rmsd_column: Optional[_SubsetRMSDColumn] = None) -> bool:
+                       rmsd_column: Optional[Union[
+                           _SubsetRMSDColumn, _FullRMSDColumn]] = None) -> bool:
         """Align every tinted/drawn structure onto the active untinted one."""
         sset = self.structures
         reference_i = sset.active_index
@@ -2602,28 +2752,23 @@ class Viewer:
             mobile = sset[i].molecule
             mobile_counts = Counter(mobile.symbols)
             try:
-                if ref_select is not None:
-                    # Bond perception can legitimately fluctuate as a
-                    # trajectory moves through a distance cutoff; atom order
-                    # within one source trajectory does not. PDB identity is
-                    # even stronger when available.
-                    identity = (tuple(mobile.atom_keys)
-                                if len(mobile.atom_keys) == mobile.n_atoms
-                                else tuple(mobile.symbols))
-                    cache_key = (self._list_group_key(i), identity)
-                    correspondence = correspondence_cache.get(cache_key)
-                    if correspondence is None:
-                        result = sset.align_to_reference_subset(
-                            i, onto=reference_i, ref_select=ref_select)
-                        if (result.select is not None
-                                and result.ref_select is not None):
-                            correspondence_cache[cache_key] = (
-                                result.select.copy(), result.ref_select.copy())
-                    else:
-                        mobile_select, matched_reference = correspondence
-                        result = sset.align(
-                            i, onto=reference_i, select=mobile_select,
-                            ref_select=matched_reference)
+                # Bond perception can legitimately fluctuate as a trajectory
+                # moves through a distance cutoff; atom order within one
+                # source trajectory does not. PDB identity is stronger when
+                # available. This applies to both ∀RMSD and ⊂RMSD runs.
+                identity = (tuple(mobile.atom_keys)
+                            if len(mobile.atom_keys) == mobile.n_atoms
+                            else tuple(mobile.symbols))
+                cache_key = (self._list_group_key(i), identity)
+                correspondence = correspondence_cache.get(cache_key)
+                if correspondence is not None:
+                    mobile_select, matched_reference = correspondence
+                    result = sset.align(
+                        i, onto=reference_i, select=mobile_select,
+                        ref_select=matched_reference)
+                elif ref_select is not None:
+                    result = sset.align_to_reference_subset(
+                        i, onto=reference_i, ref_select=ref_select)
                 elif (mobile.symbols == reference.symbols
                       and mobile.n_atoms > 300):
                     # Protein-scale permutation is inherently quadratic and
@@ -2637,14 +2782,29 @@ class Viewer:
                     result = sset.align(i, onto=reference_i, permute=True)
                 elif all(count <= ref_counts[el]
                          for el, count in mobile_counts.items()):
-                    result = sset.align(i, onto=reference_i, subset=True)
+                    result = sset.align(
+                        i, onto=reference_i, subset=True,
+                        permute_max_atoms=None)
                 elif all(count <= mobile_counts[el]
                          for el, count in ref_counts.items()):
                     result = sset.align_to_reference_subset(
                         i, onto=reference_i,
-                        ref_select=list(range(reference.n_atoms)))
+                        ref_select=list(range(reference.n_atoms)),
+                        permute_max_atoms=None)
                 else:
                     raise ValueError("no element-compatible complete/subset match")
+                if correspondence is None:
+                    if result.select is not None and result.ref_select is not None:
+                        paired_mobile = result.select
+                        paired_reference = result.ref_select
+                    elif result.mapping is not None:
+                        paired_mobile = (result.mapping >= 0).nonzero()[0]
+                        paired_reference = result.mapping[paired_mobile]
+                    else:
+                        paired_mobile = paired_reference = None
+                    if paired_mobile is not None and len(paired_mobile):
+                        correspondence_cache[cache_key] = (
+                            paired_mobile.copy(), paired_reference.copy())
                 fitted.append((sset[i].label, result.rmsd, result.n_fitted))
                 rmsd_values[i] = result.rmsd
             except (ValueError, IndexError) as exc:
@@ -2734,6 +2894,18 @@ class Viewer:
                 return column_index
         return None
 
+    def _full_rmsd_remove_hit(self, col: int, row: int) -> Optional[int]:
+        """Saved full-RMSD column index whose ``×`` was clicked."""
+        for r0, c0, c1, column_index in self._full_rmsd_remove_spans:
+            if r0 == row and c0 <= col < c1:
+                return column_index
+        return None
+
+    def _remove_full_rmsd_column(self, column_index: int) -> None:
+        column = self._full_rmsd_columns.pop(column_index)
+        self._msg = f"#all{column.full_id} deleted"
+        self._refresh_measure_w()
+
     def _remove_subset_column(self, column_index: int) -> None:
         """Delete one saved subset and disarm it if it was active."""
         column = self._rmsd_columns.pop(column_index)
@@ -2777,11 +2949,27 @@ class Viewer:
         if self.widget.measure_mode and len(live_sel) >= 2 and not already_frozen:
             columns.append(("measure_live", -1, self._measure_header_text(live_sel),
                             live_sel, False, None))
+        for i, column in enumerate(self._full_rmsd_columns):
+            values = list(column.values[:len(self.structures)])
+            if len(values) < len(self.structures):
+                values.extend([None] * (len(self.structures) - len(values)))
+            # The reference-to-itself RMSD is not a measurement.  Hide it
+            # before finding extrema so its synthetic zero neither renders
+            # nor permanently claims the column's minimum marker.
+            if 0 <= column.reference_index < len(values):
+                values[column.reference_index] = None
+            cells = self._format_measure_extrema(values, 4)
+            header = column.header + (
+                "*" if self._full_rmsd_column_stale(column) else "")
+            columns.append(("full_rmsd", i, f"{header} ×", (),
+                            False, cells[:len(self.structures)]))
         for i, column in enumerate(self._rmsd_columns):
-            cells = ["—" if value is None else f"{value:.4f}"
-                     for value in column.values]
-            if len(cells) < len(self.structures):
-                cells.extend(["—"] * (len(self.structures) - len(cells)))
+            values = list(column.values[:len(self.structures)])
+            if len(values) < len(self.structures):
+                values.extend([None] * (len(self.structures) - len(values)))
+            if 0 <= column.reference_index < len(values):
+                values[column.reference_index] = None
+            cells = self._format_measure_extrema(values, 4)
             # A '*' after the name is the design's stale marker (§4.4): the
             # numbers were true once, so they stay readable, but they must
             # not be mistaken for a fit against the geometry on screen now.
@@ -2792,6 +2980,8 @@ class Viewer:
             self._measure_layout_sources = []
             return []
         key = (tuple(self._measure_columns), live_sel, self.widget.measure_mode,
+               tuple((c.full_id, c.reference_index, c.reference_revision,
+                      tuple(c.values)) for c in self._full_rmsd_columns),
                tuple((c.select_id, c.reference_index, c.indices,
                       tuple(c.values)) for c in self._rmsd_columns),
                list_w, self._cols, self.structures.active_index,
@@ -2807,8 +2997,8 @@ class Viewer:
             if saved_cells is None:
                 kind = len(indices)
                 values = [v for _, v in self.structures.measure(indices)]
-                cells = ["—" if v is None else (f"{v:.3f}" if kind == 2 else f"{v:.1f}")
-                         for v in values]
+                cells = self._format_measure_extrema(
+                    values, 3 if kind == 2 else 1)
             else:
                 cells = saved_cells
             header_cell = f"{header} ×" if removable else header
@@ -2822,6 +3012,37 @@ class Viewer:
         self._measure_layout_sources = sources
         self._measure_layout_cache = (key, out, sources)
         return out
+
+    @staticmethod
+    def _format_measure_extrema(values: List[Optional[float]],
+                                decimals: int) -> List[str]:
+        """Format a measurement column and decorate its current extrema.
+
+        Every finite value tied for the maximum receives ``↑`` and every
+        value tied for the minimum receives ``↓``.  A sole value (or a
+        completely tied column) is correctly both and therefore receives
+        ``↑↓``.  Missing and non-finite values remain an undecorated dash.
+
+        This deliberately derives the markers from *values* during layout,
+        instead of persisting extrema on a column: adding or updating any
+        structure row immediately reviews the whole column on the next draw.
+        """
+        finite = [float(value) for value in values
+                  if value is not None and math.isfinite(float(value))]
+        if not finite:
+            return ["—"] * len(values)
+        lowest = min(finite)
+        highest = max(finite)
+        cells: List[str] = []
+        for value in values:
+            if value is None or not math.isfinite(float(value)):
+                cells.append("—")
+                continue
+            number = float(value)
+            marker = ("↑" if number == highest else "")
+            marker += ("↓" if number == lowest else "")
+            cells.append(f"{number:.{decimals}f}{marker}")
+        return cells
 
     @staticmethod
     def _layout_width(layout: List[Tuple[str, int, List[str], bool]]) -> int:

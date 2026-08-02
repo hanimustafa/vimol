@@ -478,6 +478,16 @@ structure, so only their `ALL` button is interactive. Grouping runs over *consec
 structures — they load in file order, and grouping across a gap would reorder
 the strip behind the user's back.
 
+The otherwise-empty chrome row directly below `STRUCTURES N` becomes a sticky
+copy of the current file header once its ordinary header scrolls away. The
+filename and `ALL` control therefore remain visible throughout a trajectory.
+
+Full alignment with `r` freezes a measurement-style `∀RMSD #allN` column;
+atom-subset alignment freezes `⊂RMSD #selectN`. Repeating either operation
+against the same main frame updates its existing column and fills newly
+overlaid rows without discarding values for structures currently outside the
+overlay. Every frozen RMSD column has an independent `×` control.
+
 **The strip scrolls.** `Viewer._list_scroll` is the first visible display row.
 `_list_capacity()` — terminal height minus the header above and the separator
 and footer below — is the single source of truth for what fits: `_draw_list`
