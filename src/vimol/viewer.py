@@ -1190,14 +1190,18 @@ class Viewer:
             button = " ALL "
             name = self._truncate_middle(
                 text, max(1, list_w - len(button) - 2))
-            button_col = 1 + len(name) + 1
+            # Right-aligned (design VIM-27): flush against list_w rather than
+            # immediately after the name, so every file's button lines up in
+            # the same column regardless of its filename's length.
+            button_col = max(1 + len(name) + 1, list_w - len(button))
+            gap = button_col - (1 + len(name))
             button_style = (self._sgr_bg(
                 self.theme.measure_col_bg_a if all_selected
                 else self.theme.list_cap_bg)
                 + self._sgr_fg(self.theme.list_label_fg if all_selected
                                else self.theme.list_muted_fg)
                 + ("\x1b[1m" if all_selected else ""))
-            segs = [(" ", ""), (name, head_fg), (" ", ""),
+            segs = [(" ", ""), (name, head_fg), (" " * gap, ""),
                     (button, button_style)]
             if extra_segs:
                 segs = segs + extra_segs

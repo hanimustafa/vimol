@@ -1821,6 +1821,33 @@ def test_viewer_list_group_all_button_fills_then_clears_to_main(tmp_path):
         os.close(fd)
 
 
+def test_group_all_button_is_right_aligned_regardless_of_filename_length(tmp_path):
+    """The ALL badge sits flush against the strip's right edge (design
+    VIM-27): a short and a long filename must land their buttons in exactly
+    the same column instead of the button trailing right after the name."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="a.xyz", path="/data/a.xyz")
+    sset.append(mol, label="a-much-longer-filename-here.xyz",
+                path="/data/a-much-longer-filename-here.xyz")
+    fd = os.open(str(tmp_path / "all-align.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+        assert len(v._list_group_all_spans) == 2
+        cols = {c0 for _row, c0, _c1, _first, _end in v._list_group_all_spans}
+        assert len(cols) == 1                     # same start column both times
+        _row, c0, c1, _first, _end = v._list_group_all_spans[0]
+        assert c1 == v._list_w                    # flush against the strip's edge
+    finally:
+        os.close(fd)
+
+
 def test_viewer_list_keeps_current_file_header_sticky_while_scrolled(tmp_path):
     v, fd = _traj_viewer(tmp_path, n=20)
     try:
