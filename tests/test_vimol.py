@@ -1842,8 +1842,182 @@ def test_group_all_button_is_right_aligned_regardless_of_filename_length(tmp_pat
         assert len(v._list_group_all_spans) == 2
         cols = {c0 for _row, c0, _c1, _first, _end in v._list_group_all_spans}
         assert len(cols) == 1                     # same start column both times
-        _row, c0, c1, _first, _end = v._list_group_all_spans[0]
-        assert c1 == v._list_w                    # flush against the strip's edge
+        # The per-file × (design VIM-32) sits flush against the strip's
+        # right edge; the ALL button ends exactly where the × begins.
+        assert len(v._list_group_remove_spans) == 2
+        x_cols = {c0 for _row, c0, _c1, _first, _end in v._list_group_remove_spans}
+        assert len(x_cols) == 1
+        _row, _c0, x_c1, _first, _end = v._list_group_remove_spans[0]
+        assert x_c1 == v._list_w
+        _row, _c0, all_c1, _first, _end = v._list_group_all_spans[0]
+        assert all_c1 == next(iter(x_cols))
+    finally:
+        os.close(fd)
+
+
+def _click_group_remove(v, first: int):
+    """Click the × of the file group starting at structure index *first*."""
+    row, c0, c1, _first, _end = next(
+        span for span in v._list_group_remove_spans if span[3] == first)
+    from vimol.input import MouseEvent
+    return v._dispatch([MouseEvent(
+        "down", float((c0 + c1) // 2), float(row), button=0)])
+
+
+def test_group_remove_x_deletes_all_frames_of_that_file(tmp_path):
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    for i in range(3):
+        sset.append(mol, label=f"a.xyz#{i + 1}", path="/d/a.xyz")
+    sset.append(mol, label="b.xyz", path="/d/b.xyz")
+    fd = os.open(str(tmp_path / "remove-file.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+
+        assert _click_group_remove(v, 0) is True
+        assert len(v.structures) == 1
+        assert v.structures[0].label == "b.xyz"
+        assert v.structures.active_index == 0
+        assert "a.xyz" in v._msg and "removed" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_reindexes_rmsd_columns_across_the_gap(tmp_path):
+    """Both RMSD column kinds store absolute entry indices. Removing a file
+    that sits before a column's reference must shift it down, not leave it
+    pointing at whatever slid into the old slot."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn, _SubsetRMSDColumn
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="doomed1", path="/d/doomed.xyz")
+    sset.append(mol, label="doomed2", path="/d/doomed.xyz")
+    sset.append(mol, label="ref", path="/d/ref.xyz")
+    sset.append(mol, label="other", path="/d/other.xyz")
+    fd = os.open(str(tmp_path / "reindex.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=2, reference_revision=0,
+            values=[None, None, 0.0, 0.4]))
+        v._rmsd_columns.append(_SubsetRMSDColumn(
+            select_id=1, reference_index=2, reference_revision=0,
+            indices=(0,), labels=("C0",), values=[None, None, 0.0, 0.5]))
+        v._draw_list()
+
+        assert _click_group_remove(v, 0) is True     # deletes doomed1+doomed2
+        assert [e.label for e in v.structures] == ["ref", "other"]
+
+        full = v._full_rmsd_columns[0]
+        assert full.reference_index == 0
+        assert full.values == [0.0, 0.4]
+        subset = v._rmsd_columns[0]
+        assert subset.reference_index == 0
+        assert subset.values == [0.0, 0.5]
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_drops_rmsd_column_whose_reference_was_removed(tmp_path):
+    """A column anchored on the file being removed no longer means anything
+    -- it must be dropped, not linger with a reference index into thin air."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="ref", path="/d/ref.xyz")
+    sset.append(mol, label="other", path="/d/other.xyz")
+    fd = os.open(str(tmp_path / "drop-column.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.4]))
+        v._active_subset_id = None
+        v._draw_list()
+
+        assert _click_group_remove(v, 0) is True     # removes "ref" itself
+        assert v._full_rmsd_columns == []
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_unrelated_file_keeps_active_editor_state(tmp_path):
+    """Removing a file that is not the active one must not discard the
+    active file's dirty flag or undo history -- refitting the camera and
+    resetting editor state is only for when the active structure itself
+    changes identity."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="active.xyz", path="/d/active.xyz")
+    sset.append(mol, label="other.xyz", path="/d/other.xyz")
+    fd = os.open(str(tmp_path / "unrelated-remove.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd, editable=True)
+        v._update_geometry()
+        v._list_w = 28
+        v.widget.dirty = True
+        v.widget._undo_stack.append(("marker",))
+        v._draw_list()
+
+        assert _click_group_remove(v, 1) is True     # removes "other.xyz"
+        assert len(v.structures) == 1
+        assert v.widget.dirty is True
+        assert v.widget._undo_stack == [("marker",)]
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_last_file_exits_without_prompt_when_clean(tmp_path):
+    """A single-structure viewer never shows the strip at all (len <= 1), so
+    the only way to reach "the last file" through the × is a lone file that
+    still has 2+ frames -- removing its whole group empties the pane."""
+    v, fd = _traj_viewer(tmp_path, n=3, fd_name="last-file-clean.bin")
+    try:
+        v._running = True
+        v._list_w = 28
+        v._draw_list()
+
+        _click_group_remove(v, 0)
+        assert v._running is False
+        assert v._mode != "quit_confirm"
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_last_file_prompts_when_dirty(tmp_path):
+    """Removing the last file with unsaved edits pending must ask first --
+    the same gate 'Escape' already uses -- rather than silently discarding
+    them by exiting outright."""
+    v, fd = _traj_viewer(tmp_path, n=3, fd_name="last-file-dirty.bin")
+    try:
+        # _traj_viewer builds a read-only Viewer; editing must be on for
+        # dirty/quit_confirm to mean anything.
+        v.editable = True
+        v._running = True
+        v._list_w = 28
+        v.widget.dirty = True
+        v._draw_list()
+
+        _click_group_remove(v, 0)
+        assert v._mode == "quit_confirm"
+        assert v._running is True             # still alive, waiting for y/n/Esc
     finally:
         os.close(fd)
 

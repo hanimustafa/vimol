@@ -405,6 +405,10 @@ class Viewer:
         # (screen row, col start/end, first/last structure index) for each
         # visible per-file ALL button.
         self._list_group_all_spans: List[Tuple[int, int, int, int, int]] = []
+        # Same shape, for each per-file × (design VIM-32): removes every
+        # entry in [first, end) from the pane. The global ALL (row 0, the
+        # "STRUCTURES N" header) is drawn separately and never gets one.
+        self._list_group_remove_spans: List[Tuple[int, int, int, int, int]] = []
         # Exact visible filename/frame-label hit boxes.  The associated text
         # is always the source path exactly as supplied by the caller (plus a
         # group-local ``#frame N`` suffix for frame rows), never the compact
@@ -866,6 +870,12 @@ class Viewer:
                 return first, end
         return None
 
+    def _list_group_remove_hit(self, col: int, row: int):
+        for r0, c0, c1, first, end in self._list_group_remove_spans:
+            if r0 == row and c0 <= col < c1:
+                return first, end
+        return None
+
     def _list_path_hover_hit(self, col: int, row: int) -> str:
         for r0, c0, c1, tip in self._list_path_hover_spans:
             if r0 == row and c0 <= col < c1:
@@ -948,6 +958,76 @@ class Viewer:
         sset.overlay = True
         sset.invalidate()
         self._list_focused = True
+
+    def _remove_file(self, first: int, end: int) -> None:
+        """Delete every entry in one file group -- all its frames disappear
+        from the pane in one step (design VIM-32).
+
+        Removing the very last file exits the viewer exactly as 'q'/Escape
+        already do, including the unsaved-changes prompt: discarding unsaved
+        edits silently would be the one genuinely destructive reading here.
+
+        Both RMSD column kinds store absolute entry indices (``values`` is a
+        per-entry positional list, ``reference_index`` an absolute pointer),
+        so a column anchored inside the removed range is dropped -- its
+        reference no longer means anything -- and one anchored after it is
+        reindexed rather than left pointing at the wrong row.
+        """
+        sset = self.structures
+        n = end - first
+        if n >= len(sset):
+            if self.editable and self.widget.dirty:
+                self._mode = "quit_confirm"
+            else:
+                self._running = False
+            return
+        name = self._list_group_name(first, True)
+        was_active = sset.active_index
+        active_entry = sset.entries[was_active]
+
+        del sset.entries[first:end]
+        if sset._solo_restore is not None:
+            del sset._solo_restore[first:end]
+
+        def _shift(i: int) -> int:
+            if i >= end:
+                return i - n
+            if i < first:
+                return i
+            return min(first, len(sset.entries) - 1)   # was inside the removed range
+
+        sset.active_index = _shift(was_active)
+        self._list_cursor = _shift(self._list_cursor)
+        self._list_scroll = min(self._list_scroll, self._list_max_scroll())
+
+        def _reindex(columns):
+            kept = []
+            for column in columns:
+                if first <= column.reference_index < end:
+                    continue    # its reference frame is gone
+                del column.values[first:end]
+                if column.reference_index >= end:
+                    column.reference_index -= n
+                kept.append(column)
+            return kept
+
+        self._full_rmsd_columns = _reindex(self._full_rmsd_columns)
+        self._rmsd_columns = _reindex(self._rmsd_columns)
+        if self._active_subset_id is not None and not any(
+                c.select_id == self._active_subset_id for c in self._rmsd_columns):
+            self._active_subset_id = None
+            self.widget.align_sel = []
+
+        sset.invalidate()
+        self._measure_layout_cache = None
+        self._refresh_measure_w()
+        self._geometry_dirty = True
+        # Only refit the camera / reset editor state (undo, dirty, hover) if
+        # the active STRUCTURE itself changed identity -- an unrelated file's
+        # removal must not discard the active file's edit history.
+        if sset.entries[sset.active_index] is not active_entry:
+            self.widget.refresh_active()
+        self._msg = f"{name}: removed"
 
     # -- strip scrolling ---------------------------------------------------
     def _list_capacity(self) -> int:
@@ -1132,6 +1212,7 @@ class Viewer:
         self._list_row_spans = []
         self._list_row_struct = []
         self._list_group_all_spans = []
+        self._list_group_remove_spans = []
         self._list_path_hover_spans = []
         self._list_group_toggle_spans = []
         self._list_group_summary_spans = []
@@ -1188,21 +1269,25 @@ class Viewer:
             all_selected = all(k == sset.active_index or sset[k].marked
                                for k in range(group_i, end))
             button = " ALL "
+            x_glyph = "×"
+            tail = button + x_glyph   # " ALL ×" -- the × removes the whole file
             name = self._truncate_middle(
-                text, max(1, list_w - len(button) - 2))
+                text, max(1, list_w - len(tail) - 2))
             # Right-aligned (design VIM-27): flush against list_w rather than
-            # immediately after the name, so every file's button lines up in
-            # the same column regardless of its filename's length.
-            button_col = max(1 + len(name) + 1, list_w - len(button))
+            # immediately after the name, so every file's controls line up
+            # in the same column regardless of its filename's length.
+            button_col = max(1 + len(name) + 1, list_w - len(tail))
             gap = button_col - (1 + len(name))
+            x_col = button_col + len(button)
             button_style = (self._sgr_bg(
                 self.theme.measure_col_bg_a if all_selected
                 else self.theme.list_cap_bg)
                 + self._sgr_fg(self.theme.list_label_fg if all_selected
                                else self.theme.list_muted_fg)
                 + ("\x1b[1m" if all_selected else ""))
+            x_style = self._sgr_fg(self.theme.list_muted_fg)
             segs = [(" ", ""), (name, head_fg), (" " * gap, ""),
-                    (button, button_style)]
+                    (button, button_style), (x_glyph, x_style)]
             if extra_segs:
                 segs = segs + extra_segs
             if not put(row0, self._list_line(segs, total_w)):
@@ -1211,6 +1296,8 @@ class Viewer:
             if entry.path is not None:
                 self._list_path_hover_spans.append(
                     (row0, 1, 1 + len(name), entry.path))
+            self._list_group_remove_spans.append(
+                (row0, x_col, x_col + len(x_glyph), group_i, end))
             self._list_group_toggle_spans.append(
                 (row0, 1, 1 + len(name), group_i, end))
             self._list_group_all_spans.append(
@@ -2581,6 +2668,14 @@ class Viewer:
                         self._list_zone_press = True
                         if self._select_hint_hit(col, row):
                             self._open_selection_picker()
+                            changed = True
+                            continue
+                        # Checked before the ALL hit: the × sits flush
+                        # against it (design VIM-32), and must win any
+                        # boundary ambiguity between the two.
+                        group = self._list_group_remove_hit(col, row)
+                        if group is not None:
+                            self._remove_file(*group)
                             changed = True
                             continue
                         group = self._list_group_all_hit(col, row)
