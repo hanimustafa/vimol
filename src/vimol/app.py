@@ -264,6 +264,8 @@ def main(argv: List[str] | None = None) -> int:
     viewer = Viewer(mol, frames=frames, structures=structures, style=style,
                     autospin=args.spin, backend=args.backend,
                     source_path=source_path, editable=True,
+                    auto_bonds=not args.no_bonds,
+                    bond_tolerance=args.bond_tolerance,
                     probe=probe)   # reuse the detection probe: no second round trip
     viewer.frame_index = idx
     # apply initial rotation
