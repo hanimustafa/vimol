@@ -31,7 +31,7 @@ from . import templates
 from . import periodic_table
 from . import select as atom_selection
 from . import theme
-from . import file_dialog
+from . import file_browser
 from .parsers import load_all
 from .parsers import xyz as xyz_parser
 
@@ -62,6 +62,7 @@ _SELECTION_OPTIONS = (
     "Manual", "Backbone", "Backbone + Cβ", "Heavy atoms", "Largest ring system",
 )
 _SELECTION_HINT = " ↑↓ move · Enter/click select · Esc cancel"
+_BROWSER_HINT = " ↑↓ move · Enter open · ~ home · Esc cancel"
 # Fallback visible width of the status bar's left-hand (hover/molecule-info)
 # field, used ONLY before the terminal size is known (_cols == 0, i.e. before
 # the first _update_geometry). Once it is known the field is sized
@@ -308,6 +309,14 @@ class Viewer:
         self._geom_opts: List = []
         self._geom_idx = 0
         self._selection_menu_idx = 0
+        # file browser: the directory on screen, the cursor in it, and
+        # the first visible row. _browser_last_dir survives a cancel so
+        # reopening resumes where you were rather than jumping back.
+        self._browser_dir = ""
+        self._browser_entries: List[file_browser.Entry] = []
+        self._browser_idx = 0
+        self._browser_scroll = 0
+        self._browser_last_dir: Optional[str] = None
         self._select_hint_span = None
         # True from a mouse-down that landed in the status-bar zone (see
         # _in_status_zone) until the matching up -- keeps a drag that started
@@ -1676,6 +1685,8 @@ class Viewer:
             self._draw_geometry_picker()
         elif self._mode == "selection_picker":
             self._draw_selection_picker()
+        elif self._mode == "file_browser":
+            self._draw_file_browser()
 
     def _draw_help(self):
         out = bytearray()
@@ -2448,6 +2459,10 @@ class Viewer:
                     self._button_held = True
                 elif ev.action == "up":
                     self._button_held = False
+            if self._mode == "file_browser":
+                if self._handle_file_browser_event(ev):
+                    changed = True
+                continue
             if self._mode == "selection_picker":
                 if isinstance(ev, _input.MouseEvent) and ev.action == "down":
                     col, row = self._event_cell(ev)
@@ -2694,7 +2709,7 @@ class Viewer:
             else:
                 self.autospin = not self.autospin        # classic binding
         elif key == "A":
-            self._choose_and_add_file()
+            self._open_file_browser()
         elif key == "m":
             # measuring is read-only-safe, so 'm' works without --edit too.
             # Turning it off is "I'm done with this measurement", not
@@ -2796,23 +2811,161 @@ class Viewer:
             return False
         return True
 
-    def _choose_and_add_file(self) -> bool:
-        """Pick one file and append it as though it was a CLI input.
+    def _open_file_browser(self) -> None:
+        """Browse for a structure to add, starting somewhere useful.
 
-        The active/main frame is intentionally preserved.  The selected
-        file's first model joins the overlay (matching multi-file CLI
-        startup), while any later models are loaded as unmarked frames in
-        the same file section.
+        Where you were last beats the active structure's directory, which in
+        turn beats the process cwd: reopening after a cancel should resume,
+        not send you back to the top of the walk you just did.
         """
-        try:
-            path = file_dialog.choose_structure_file()
-        except file_dialog.FileDialogError as exc:
-            self._msg = str(exc)
+        start = self._browser_last_dir
+        if start is None:
+            active = self.structures.active.path if len(self.structures) else None
+            start = os.path.dirname(os.path.abspath(active or self.source_path or "."))
+        self._mode = "file_browser"
+        self._list_zone_press = False
+        self._msg = ""
+        self._browser_goto(start)
+
+    def _browser_goto(self, path: str) -> None:
+        """Show *path*, resetting the cursor to the top of its listing."""
+        self._browser_dir = os.path.abspath(path)
+        self._browser_last_dir = self._browser_dir
+        self._browser_entries = file_browser.list_directory(self._browser_dir)
+        self._browser_idx = 0
+        self._browser_scroll = 0
+
+    def _file_browser_geometry(self) -> Tuple[int, int, int, int]:
+        """(top, left, width, height) of the centred browser overlay."""
+        widest = max((len(e.name) for e in self._browser_entries), default=0)
+        inner = max(widest + 4, len(_BROWSER_HINT), 32)
+        inner = min(inner, max(16, self._cols - 4))
+        width = inner + 2
+        # top border + rows + hint + bottom border, never taller than the screen
+        rows_for_entries = max(1, min(len(self._browser_entries) or 1,
+                                      max(1, self._rows - 5)))
+        height = rows_for_entries + 3
+        top = max(0, (self._rows - height) // 2)
+        left = max(0, (self._cols - width) // 2)
+        return top, left, width, height
+
+    def _browser_visible_rows(self) -> int:
+        return max(1, self._file_browser_geometry()[3] - 3)
+
+    def _browser_scroll_to_cursor(self) -> None:
+        visible = self._browser_visible_rows()
+        self._browser_scroll = min(self._browser_scroll, self._browser_idx)
+        if self._browser_idx >= self._browser_scroll + visible:
+            self._browser_scroll = self._browser_idx - visible + 1
+        self._browser_scroll = max(0, min(
+            self._browser_scroll, max(0, len(self._browser_entries) - visible)))
+
+    def _browser_move(self, step: int) -> None:
+        if not self._browser_entries:
+            return
+        self._browser_idx = max(0, min(len(self._browser_entries) - 1,
+                                       self._browser_idx + step))
+        self._browser_scroll_to_cursor()
+
+    def _browser_row_at(self, row: int, col: int) -> Optional[int]:
+        top, left, width, _height = self._file_browser_geometry()
+        if not (left <= col < left + width):
+            return None
+        offset = row - (top + 1)
+        if not 0 <= offset < self._browser_visible_rows():
+            return None
+        index = self._browser_scroll + offset
+        return index if index < len(self._browser_entries) else None
+
+    def _browser_activate(self) -> None:
+        """Descend into the highlighted directory, or add the file and close."""
+        if not self._browser_entries:
+            return
+        entry = self._browser_entries[self._browser_idx]
+        if entry.is_dir:
+            self._browser_goto(entry.path)
+            return
+        self._close_file_browser()
+        self._add_file(entry.path)
+
+    def _close_file_browser(self) -> None:
+        top, _left, _width, height = self._file_browser_geometry()
+        self._mode = "normal"
+        self._erase_rows(top, height)
+
+    def _draw_file_browser(self) -> None:
+        top, left, width, _height = self._file_browser_geometry()
+        inner_w = width - 2
+        border = (f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+                  f"\x1b[38;2;{self.theme.pt_border_fg[0]};{self.theme.pt_border_fg[1]};{self.theme.pt_border_fg[2]}m")
+        bg = f"\x1b[48;2;{self.theme.pt_bg[0]};{self.theme.pt_bg[1]};{self.theme.pt_bg[2]}m"
+        fg = f"\x1b[38;2;{self.theme.pt_text_fg[0]};{self.theme.pt_text_fg[1]};{self.theme.pt_text_fg[2]}m"
+        out = bytearray()
+
+        def put(row0: int, text: str) -> None:
+            out.extend(b"\x1b[%d;%dH" % (row0 + 1, left + 1))
+            out.extend(text.encode("utf-8", "replace"))
+
+        title = f" {self._truncate_middle(self._browser_dir, inner_w - 2)} "
+        put(top, f"{border}┌{title.center(inner_w, '─')}┐\x1b[0m")
+        visible = self._browser_visible_rows()
+        for offset in range(visible):
+            index = self._browser_scroll + offset
+            if index < len(self._browser_entries):
+                entry = self._browser_entries[index]
+                name = entry.name + ("/" if entry.is_dir and entry.name != ".." else "")
+                label = f"  {self._truncate_middle(name, inner_w - 3)}".ljust(inner_w)
+            else:
+                label = " " * inner_w
+            if index == self._browser_idx and index < len(self._browser_entries):
+                content = f"{bg}\x1b[1m\x1b[7m{label}\x1b[27m\x1b[22m"
+            else:
+                content = f"{bg}{fg}{label}"
+            put(top + 1 + offset,
+                f"{border}│\x1b[0m{content}\x1b[0m{border}│\x1b[0m")
+        hint_row = top + 1 + visible
+        put(hint_row,
+            f"{border}│\x1b[0m{bg}{fg}{_BROWSER_HINT.ljust(inner_w)}"
+            f"\x1b[0m{border}│\x1b[0m")
+        put(hint_row + 1, f"{border}└{'─' * inner_w}┘\x1b[0m")
+        kitty.write_bytes(bytes(out), self.fd_out)
+
+    def _handle_file_browser_event(self, ev) -> bool:
+        if isinstance(ev, _input.KeyEvent):
+            if ev.key in ("escape", "\x03", "A"):
+                self._close_file_browser()
+                return True
+            if ev.key in ("up", "k"):
+                self._browser_move(-1)
+                return True
+            if ev.key in ("down", "j"):
+                self._browser_move(1)
+                return True
+            if ev.key == "enter":
+                self._browser_activate()
+                return True
+            if ev.key == "~":
+                self._browser_goto(os.path.expanduser("~"))
+                return True
             return False
-        if path is None:
-            self._msg = "add file cancelled"
-            return False
-        return self._add_file(path)
+        if isinstance(ev, _input.MouseEvent):
+            col, row = self._event_cell(ev)
+            if ev.action == "scroll" and ev.scroll in ("up", "down"):
+                self._browser_move(-3 if ev.scroll == "up" else 3)
+                return True
+            index = self._browser_row_at(row, col)
+            if index is None:
+                return False
+            if ev.action == "move":
+                if index != self._browser_idx:
+                    self._browser_idx = index
+                    return True
+                return False
+            if ev.action == "down":
+                self._browser_idx = index
+                self._browser_activate()
+                return True
+        return False
 
     def _unique_added_stem(self, path: str) -> str:
         """Return a label stem unique among the live structure entries."""
