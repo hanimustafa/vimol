@@ -197,9 +197,49 @@ class StructureSet:
 
     def remove(self, key) -> None:
         idx = self._index_of_label(key) if isinstance(key, str) else int(key)
-        del self.entries[idx]
-        if self.active_index >= len(self.entries):
-            self.active_index = max(0, len(self.entries) - 1)
+        self.remove_range(idx, idx + 1)
+
+    def remove_range(self, first: int, end: int) -> None:
+        """Delete ``entries[first:end]``, keeping every per-set thing that is
+        indexed BY entry position aligned with what survives.
+
+        A file contributes a consecutive run of entries (one per frame), so
+        closing one is a range removal rather than N single removals: done in
+        one step, the active index and the solo-restore snapshot are re-based
+        once, against indices that all still mean the same thing.
+
+        Callers holding their own entry-indexed state -- a row cursor, a
+        column of per-entry values -- re-base it with
+        :meth:`index_after_removal`, which is the same arithmetic this uses.
+        """
+        first = max(0, int(first))
+        end = min(len(self.entries), int(end))
+        if end <= first:
+            return
+        del self.entries[first:end]
+        # solo() zips this against entries, so a snapshot left longer than
+        # the rows it describes would restore visibility onto the wrong ones.
+        if self._solo_restore is not None:
+            del self._solo_restore[first:end]
+        self.active_index = self.index_after_removal(
+            self.active_index, first, end, len(self.entries))
+        self.invalidate()
+
+    @staticmethod
+    def index_after_removal(i: int, first: int, end: int, remaining: int) -> int:
+        """Where entry index *i* lands once ``[first, end)`` has been removed.
+
+        An index BELOW the range is untouched and one above it slides down by
+        the range's width -- both still name the entry they always named. An
+        index INSIDE it has no entry of its own left to follow, so it
+        collapses onto *first*, whatever slid into that slot, clamped to the
+        last survivor when the removal took the tail.
+        """
+        if i >= end:
+            return i - (end - first)
+        if i < first:
+            return i
+        return min(first, max(0, remaining - 1))
 
     # -- marks / visibility ------------------------------------------------
     @property

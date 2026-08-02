@@ -61,7 +61,21 @@ _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 _SELECTION_OPTIONS = (
     "Manual", "Backbone", "Backbone + Cβ", "Heavy atoms", "Largest ring system",
 )
+# English phrasing for a ⊂RMSD hover tip (design 2026-08-02, VIM-30) --
+# "Manual" has no entry, so a hand-picked/derived selection always falls
+# back to its raw atom list instead.
+_SELECTION_PHRASES = {
+    "Backbone": "the backbone",
+    "Backbone + Cβ": "the backbone + Cβ",
+    "Heavy atoms": "heavy atoms",
+    "Largest ring system": "the largest ring system",
+}
 _SELECTION_HINT = " ↑↓ move · Enter/click select · Esc cancel"
+# What an RMSD column shows on the row it was fitted ONTO. Distinct from the
+# em-dash every other blank cell uses (design 2026-08-02): a reference row is
+# not a measurement that failed or never ran, it is the frame everything else
+# was measured against, and the two must not look alike.
+_SELF_CELL = "Self"
 _BROWSER_HINT = " ↑↓ move · Enter open · ~ home · Esc cancel"
 # Fallback visible width of the status bar's left-hand (hover/molecule-info)
 # field, used ONLY before the terminal size is known (_cols == 0, i.e. before
@@ -95,10 +109,18 @@ class _SubsetRMSDColumn:
     indices: Tuple[int, ...]
     labels: Tuple[str, ...]
     values: List[Optional[float]]
+    # Which selection preset produced ``indices`` (a name from
+    # _SELECTION_OPTIONS), if any and if it hasn't since been hand-edited --
+    # None for a manual/option-click pick. Lets the hover tip read like
+    # English ("aligning on the backbone") instead of a raw atom dump
+    # (design 2026-08-02, VIM-30).
+    preset_label: Optional[str] = None
 
     @property
     def header(self) -> str:
-        return f"⊂RMSD #select{self.select_id}"
+        # select_id/full_id share one counter (Viewer._next_rmsd_id)
+        # precisely so a ⊂RMSD and a ∀RMSD column can never collide.
+        return f"⊂RMSD#{self.select_id}"
 
 
 @dataclass
@@ -111,7 +133,7 @@ class _FullRMSDColumn:
 
     @property
     def header(self) -> str:
-        return f"∀RMSD #all{self.full_id}"
+        return f"∀RMSD#{self.full_id}"
 
 # Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
@@ -153,10 +175,10 @@ _HELP_TAIL = [
     "  t .................. transparent bg    g .................. hi-quality",
     "  ctrl-t ............. light/dark theme",
     "  f / z .............. re-fit / reset    ? .................. toggle help",
-    "  overlay: r .......... align all → ∀RMSD  R ... pick atoms → ⊂RMSD",
+    "  overlay: r .......... align all → ∀RMSD#N  R ... pick atoms → ⊂RMSD#N",
     "     Shift+S / click select ... Backbone, Heavy atoms, or Ring system",
     "     option-click atom ........ additive manual subset selection",
-    "     ⊂RMSD column: hover atoms · click arm selection · R recalculate",
+    "     RMSD#N column: hover title for spec · click arm selection · R recalculate",
     "  q / Esc ............ quit",
 ]
 
@@ -427,6 +449,15 @@ class Viewer:
         # (screen row, col start/end, first/last structure index) for each
         # visible per-file ALL button.
         self._list_group_all_spans: List[Tuple[int, int, int, int, int]] = []
+        # Same shape, for each per-file × (design VIM-32): removes every
+        # entry in [first, end) from the pane. The global ALL (row 0, the
+        # "STRUCTURES N" header) is drawn separately and never gets one.
+        self._list_group_remove_spans: List[Tuple[int, int, int, int, int]] = []
+        # (screen row, col start, col end) for the global ALL button on the
+        # "STRUCTURES N" header row (design VIM-28) -- kept separate from
+        # _list_group_all_spans so existing per-file span indices/counts are
+        # untouched by its presence.
+        self._global_all_span: Optional[Tuple[int, int, int]] = None
         # Exact visible filename/frame-label hit boxes.  The associated text
         # is always the source path exactly as supplied by the caller (plus a
         # group-local ``#frame N`` suffix for frame rows), never the compact
@@ -464,14 +495,23 @@ class Viewer:
         self._measure_columns: List[Tuple[str, Tuple[int, ...]]] = []
         self._full_rmsd_columns: List[_FullRMSDColumn] = []
         self._rmsd_columns: List[_SubsetRMSDColumn] = []
-        self._next_full_rmsd_id = 1
-        self._next_subset_id = 1
+        # One counter shared by both column kinds (design 2026-08-02): a
+        # ∀RMSD and a ⊂RMSD column must never be numbered alike.
+        self._next_rmsd_id = 1
+        # Set by _activate_selection_preset when a real preset (not Manual)
+        # is chosen; consumed (and cleared) by _finish_subset_alignment onto
+        # the new column's own preset_label. Cleared early if the pick is
+        # hand-edited before it's ever committed, so a since-modified
+        # selection never gets credited to the preset that started it.
+        self._pending_selection_label: Optional[str] = None
         self._active_subset_id: Optional[int] = None
         self._subset_hover_tip = ""
+        self._full_rmsd_hover_tip = ""
         self._measure_w = 0
         self._measure_header_spans: List[Tuple[int, int, int, int]] = []
         self._subset_header_spans: List[Tuple[int, int, int, int]] = []
         self._subset_remove_spans: List[Tuple[int, int, int, int]] = []
+        self._full_rmsd_header_spans: List[Tuple[int, int, int, int]] = []
         self._full_rmsd_remove_spans: List[Tuple[int, int, int, int]] = []
         self._measure_layout_sources: List[Tuple[str, int]] = []
         # (key, layout) memo for _measure_layout -- it's recomputed every
@@ -881,6 +921,16 @@ class Viewer:
                 return first, end
         return None
 
+    def _list_group_remove_hit(self, col: int, row: int):
+        for r0, c0, c1, first, end in self._list_group_remove_spans:
+            if r0 == row and c0 <= col < c1:
+                return first, end
+        return None
+
+    def _global_all_hit(self, col: int, row: int) -> bool:
+        span = self._global_all_span
+        return bool(span is not None and row == span[0] and span[1] <= col < span[2])
+
     def _list_path_hover_hit(self, col: int, row: int) -> str:
         for r0, c0, c1, tip in self._list_path_hover_spans:
             if r0 == row and c0 <= col < c1:
@@ -940,9 +990,16 @@ class Viewer:
                 result.append(formatted + "↓")
         return result
 
-    def _toggle_list_group_all(self, first: int, end: int) -> None:
-        """Fill a file's overlay membership, or reduce it to the main frame."""
+    def _toggle_list_group_all(self, first: int, end: int,
+                               label: Optional[str] = None) -> None:
+        """Fill a file's overlay membership, or reduce it to the main frame.
+
+        *label* names the range in status messages; it defaults to the file
+        at *first*, but the global ALL (design VIM-28) calls this with
+        ``(0, len(structures))`` and its own label -- naming it after
+        whichever file happens to start the set would be misleading."""
         sset = self.structures
+        label = label if label is not None else self._list_group_name(first, True)
         all_selected = all(i == sset.active_index or sset[i].marked
                            for i in range(first, end))
         if all_selected:
@@ -954,15 +1011,80 @@ class Viewer:
             # The main frame need not live in the file being cleared -- saying
             # it does would credit this file with a row it does not own.
             held = first <= sset.active_index < end
-            self._msg = "%s: %s" % (self._list_group_name(first, True),
-                                    "main frame only" if held else "hidden")
+            self._msg = "%s: %s" % (label, "main frame only" if held else "hidden")
         else:
             for i in range(first, end):
                 sset[i].marked = True
-            self._msg = f"{self._list_group_name(first, True)}: all selected"
+            self._msg = f"{label}: all selected"
         sset.overlay = True
         sset.invalidate()
         self._list_focused = True
+
+    def _remove_file(self, first: int, end: int) -> None:
+        """Delete every entry in one file group -- all its frames disappear
+        from the pane in one step (design VIM-32).
+
+        Removing the very last file exits the viewer exactly as 'q'/Escape
+        already do, including the unsaved-changes prompt: discarding unsaved
+        edits silently would be the one genuinely destructive reading here.
+
+        The entries themselves (plus the active index and solo state that go
+        with them) are StructureSet's to re-base -- see
+        ``StructureSet.remove_range``. What stays here is the state only the
+        Viewer holds: the row cursor, and both RMSD column kinds, which store
+        absolute entry indices (``values`` is a per-entry positional list,
+        ``reference_index`` an absolute pointer). A column anchored inside
+        the removed range is dropped -- its reference no longer means
+        anything -- and one anchored after it is re-based with the same
+        arithmetic rather than left pointing at the wrong row.
+        """
+        sset = self.structures
+        if end - first >= len(sset):
+            if self.editable and self.widget.dirty:
+                self._mode = "quit_confirm"
+            else:
+                self._running = False
+            return
+        name = self._list_group_name(first, True)
+        active_entry = sset.entries[sset.active_index]
+
+        sset.remove_range(first, end)
+        remaining = len(sset)
+        self._list_cursor = sset.index_after_removal(
+            self._list_cursor, first, end, remaining)
+        self._list_scroll = min(self._list_scroll, self._list_max_scroll())
+
+        def _reindex(columns):
+            kept = []
+            for column in columns:
+                if first <= column.reference_index < end:
+                    continue    # its reference frame is gone
+                del column.values[first:end]
+                column.reference_index = sset.index_after_removal(
+                    column.reference_index, first, end, remaining)
+                kept.append(column)
+            return kept
+
+        self._full_rmsd_columns = _reindex(self._full_rmsd_columns)
+        self._rmsd_columns = _reindex(self._rmsd_columns)
+        if self._active_subset_id is not None and not any(
+                c.select_id == self._active_subset_id for c in self._rmsd_columns):
+            self._active_subset_id = None
+            self.widget.align_sel = []
+        # A tip left over from a column this removal just dropped would
+        # otherwise sit in the status bar until the next mouse move.
+        self._subset_hover_tip = ""
+        self._full_rmsd_hover_tip = ""
+
+        self._measure_layout_cache = None
+        self._refresh_measure_w()
+        self._geometry_dirty = True
+        # Only refit the camera / reset editor state (undo, dirty, hover) if
+        # the active STRUCTURE itself changed identity -- an unrelated file's
+        # removal must not discard the active file's edit history.
+        if sset.entries[sset.active_index] is not active_entry:
+            self.widget.refresh_active()
+        self._msg = f"{name}: removed"
 
     # -- strip scrolling ---------------------------------------------------
     def _list_capacity(self) -> int:
@@ -1147,12 +1269,15 @@ class Viewer:
         self._list_row_spans = []
         self._list_row_struct = []
         self._list_group_all_spans = []
+        self._list_group_remove_spans = []
+        self._global_all_span = None
         self._list_path_hover_spans = []
         self._list_group_toggle_spans = []
         self._list_group_summary_spans = []
         self._measure_header_spans = []
         self._subset_header_spans = []
         self._subset_remove_spans = []
+        self._full_rmsd_header_spans = []
         self._full_rmsd_remove_spans = []
         self._select_hint_span = None
         layout = self._measure_layout(list_w)
@@ -1196,23 +1321,33 @@ class Viewer:
             all_selected = all(k == sset.active_index or sset[k].marked
                                for k in range(group_i, end))
             button = " ALL "
+            x_glyph = "×"
+            tail = button + x_glyph   # " ALL ×" -- the × removes the whole file
             name = self._truncate_middle(
-                text, max(1, list_w - len(button) - 2))
-            button_col = 1 + len(name) + 1
+                text, max(1, list_w - len(tail) - 2))
+            # Right-aligned (design VIM-27): flush against list_w rather than
+            # immediately after the name, so every file's controls line up
+            # in the same column regardless of its filename's length.
+            button_col = max(1 + len(name) + 1, list_w - len(tail))
+            gap = button_col - (1 + len(name))
+            x_col = button_col + len(button)
             button_style = (self._sgr_bg(
                 self.theme.measure_col_bg_a if all_selected
                 else self.theme.list_cap_bg)
                 + self._sgr_fg(self.theme.list_label_fg if all_selected
                                else self.theme.list_muted_fg)
                 + ("\x1b[1m" if all_selected else ""))
-            segs = [(" ", ""), (name, head_fg), (" ", ""),
-                    (button, button_style)]
+            x_style = self._sgr_fg(self.theme.list_muted_fg)
+            segs = [(" ", ""), (name, head_fg), (" " * gap, ""),
+                    (button, button_style), (x_glyph, x_style)]
             if not put(row0, self._list_line(segs, total_w)):
                 return False
             entry = sset[group_i]
             if entry.path is not None:
                 self._list_path_hover_spans.append(
                     (row0, 1, 1 + len(name), entry.path))
+            self._list_group_remove_spans.append(
+                (row0, x_col, x_col + len(x_glyph), group_i, end))
             self._list_group_toggle_spans.append(
                 (row0, 1, 1 + len(name), group_i, end))
             self._list_group_all_spans.append(
@@ -1237,7 +1372,10 @@ class Viewer:
                 raw = raw_cells[k]
                 padded = raw.ljust(width) if align == "left" else raw.rjust(width)
                 cell_text = f" {padded} "
-                fg = head_fg if align == "left" else (muted if raw == "—" else dim_fg)
+                # "Self" and the em-dash are both non-values: keep them muted
+                # so the eye lands on the actual numbers.
+                fg = (head_fg if align == "left"
+                      else muted if raw in ("—", _SELF_CELL) else dim_fg)
                 style = self._sgr_bg(bg) + fg
                 # Extrema are recomputed by _measure_layout on every data
                 # revision.  Keep the underline tight around the value and
@@ -1262,12 +1400,14 @@ class Viewer:
                         self._subset_remove_spans.append(
                             (row0, x_col, x_col + 1, subset_idx))
                 if (align == "left" and k < len(self._measure_layout_sources)
-                        and self._measure_layout_sources[k][0] == "full_rmsd"
-                        and raw.endswith(" ×")):
+                        and self._measure_layout_sources[k][0] == "full_rmsd"):
                     full_idx = self._measure_layout_sources[k][1]
-                    x_col = col_offset + len(raw)
-                    self._full_rmsd_remove_spans.append(
-                        (row0, x_col, x_col + 1, full_idx))
+                    self._full_rmsd_header_spans.append(
+                        (row0, col_offset, col_offset + len(cell_text), full_idx))
+                    if raw.endswith(" ×"):
+                        x_col = col_offset + len(raw)
+                        self._full_rmsd_remove_spans.append(
+                            (row0, x_col, x_col + 1, full_idx))
                 col_offset += len(cell_text)
                 if k != len(layout) - 1:
                     segs.append((" ", ""))          # untinted gap between columns
@@ -1276,8 +1416,36 @@ class Viewer:
 
         marker = ("\u2191" if first > 0 else "") + ("\u2193" if first + cap < len(rows) else "")
         title = f" STRUCTURES {len(sset)}"
-        gap = max(0, list_w - len(title) - len(marker))
-        header_segs = [(title, head_fg), (" " * gap, ""), (marker, "\x1b[2m" + head_fg)]
+        # Global ALL (design VIM-28): fills/clears every loaded structure's
+        # overlay membership in one click, reusing the exact predicate and
+        # fill/clear logic the per-file button already uses (just over the
+        # whole set instead of one file's range). No \u00d7 of its own -- that
+        # only ever belongs to a single removable file (design VIM-32).
+        #
+        # The scroll marker is the more load-bearing affordance (design
+        # \u00a74.1) and keeps its reserved space at the right edge no matter
+        # what; the button only ever gets whatever room is left, and simply
+        # doesn't render on a strip too narrow for both -- it must never
+        # crowd the marker out.
+        global_button = " ALL "
+        available = max(0, list_w - len(title) - len(marker))
+        show_button = available >= len(global_button)
+        gap = available - len(global_button) if show_button else available
+        header_segs = [(title, head_fg), (" " * gap, "")]
+        self._global_all_span = None
+        if show_button:
+            global_selected = bool(sset.entries) and all(
+                k == sset.active_index or sset[k].marked for k in range(len(sset)))
+            global_button_style = (self._sgr_bg(
+                self.theme.measure_col_bg_a if global_selected
+                else self.theme.list_cap_bg)
+                + self._sgr_fg(self.theme.list_label_fg if global_selected
+                               else self.theme.list_muted_fg)
+                + ("\x1b[1m" if global_selected else ""))
+            button_col = len(title) + gap
+            header_segs.append((global_button, global_button_style))
+            self._global_all_span = (0, button_col, button_col + len(global_button))
+        header_segs.append((marker, "\x1b[2m" + head_fg))
         if layout:
             header_segs += measure_segs(0, [h for h, _w, _v, _r in layout], "left")
         put(0, self._list_line(header_segs, total_w))
@@ -1717,6 +1885,16 @@ class Viewer:
             gap_ms = ((frame_start - self._t_last_draw_end) * 1000
                       if self._t_last_draw_end is not None else 0.0)
             self._t_last_draw_end = t_now
+            # VIM-31 (blur at small pane sizes): the transmitted image's own
+            # pixel size vs. the cell grid it's placed into -- if these
+            # disagree at rest (ss=2, scale=1.0), the terminal is rescaling
+            # the image on display, not vimol. cell_px_exact is the RAW
+            # xpx/cols ratio (kitty.cell_size_px rounds it before this point),
+            # so a real mismatch there -- as opposed to _cell_px, the
+            # terminal's own CSI-16t answer when it replied -- points at that
+            # rounding rather than the render_scale/idle_scale controllers.
+            cw, ch = self._cell_px or kitty.cell_size_px(self.fd_out)
+            cols, rows, xpx, ypx = kitty.terminal_size_px(self.fd_out)
             self._tline("frame",
                         kind=("interact" if interacting else "SETTLE"),
                         ss=want_ss, scale=round(scene.render_scale, 3),
@@ -1724,7 +1902,15 @@ class Viewer:
                         render_ms=(t_render - frame_start) * 1000,
                         encode_ms=(t_encode - t_render) * 1000,
                         write_ms=(t_now - t_encode) * 1000,
-                        gap_ms=gap_ms)
+                        gap_ms=gap_ms,
+                        img_px=f"{img.shape[1]}x{img.shape[0]}",
+                        target_px=f"{int(self._img_cols * cw)}x{int(self._img_rows * ch)}",
+                        cell_px=f"{cw:.3f}x{ch:.3f}",
+                        cell_px_exact=(f"{xpx / cols:.3f}x{ypx / rows:.3f}"
+                                      if xpx and cols and ypx and rows else "?"),
+                        queried_cell_px=("yes" if self._cell_px else "no"),
+                        idle_scale=round(self._idle_scale, 3),
+                        interact_scale=round(self._interact_scale, 3))
         if self._paced:
             # Every frame gets a fence: its ack both feeds the matching
             # resolution controller with the TRUE delivery time and gates
@@ -2088,13 +2274,14 @@ class Viewer:
             parent = self._selected_subset_column()
             self.widget.set_alignment_mode(True, preserve=True)
             self._active_subset_id = None
-            inherited = (f" from #select{parent.select_id}"
-                         if parent is not None else "")
+            self._pending_selection_label = None      # explicitly hand-picked
+            inherited = f" from {parent.header}" if parent is not None else ""
             self._msg = (f"Manual additive selection{inherited}: click atoms"
                          " / Option-click · whitespace clears · r saves after RMSD")
             return
 
         self._active_subset_id = None
+        self._pending_selection_label = None
         self.widget.set_alignment_mode(True)
         molecule = self.structures.active.molecule
         if label == "Heavy atoms":
@@ -2115,6 +2302,7 @@ class Viewer:
             self._msg = missing
             return
         self.widget.align_sel = indices.tolist()
+        self._pending_selection_label = label
         inferred = (" (inferred)"
                     if label.startswith("Backbone")
                     and len(molecule.atom_names) != molecule.n_atoms else "")
@@ -2361,7 +2549,8 @@ class Viewer:
         # the middle of the bar sits empty.
         align_prompt = ("subset %d picked · Enter align · Esc cancel"
                         % len(self.widget.align_sel) if self.widget.align_mode else "")
-        raw_left = (self._subset_hover_tip or self._list_path_hover_tip
+        raw_left = (self._subset_hover_tip or self._full_rmsd_hover_tip
+                    or self._list_path_hover_tip
                     or align_prompt or measure
                     or self.widget.pick_refusal or hov or (self._msg or
                     f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"))
@@ -2614,6 +2803,19 @@ class Viewer:
                             self._open_selection_picker()
                             changed = True
                             continue
+                        if self._global_all_hit(col, row):
+                            self._toggle_list_group_all(
+                                0, len(self.structures), label="every structure")
+                            changed = True
+                            continue
+                        # Checked before the ALL hit: the × sits flush
+                        # against it (design VIM-32), and must win any
+                        # boundary ambiguity between the two.
+                        group = self._list_group_remove_hit(col, row)
+                        if group is not None:
+                            self._remove_file(*group)
+                            changed = True
+                            continue
                         group = self._list_group_all_hit(col, row)
                         if group is not None:
                             self._toggle_list_group_all(*group)
@@ -2691,6 +2893,13 @@ class Viewer:
                             if tip != self._subset_hover_tip:
                                 self._subset_hover_tip = tip
                                 changed = True
+                            full_col = (None if subset_col is not None
+                                       else self._full_rmsd_header_hit(col, row))
+                            full_tip = (self._full_rmsd_tip(self._full_rmsd_columns[full_col])
+                                       if full_col is not None else "")
+                            if full_tip != self._full_rmsd_hover_tip:
+                                self._full_rmsd_hover_tip = full_tip
+                                changed = True
                             path_tip = self._list_path_hover_hit(col, row)
                             if path_tip != self._list_path_hover_tip:
                                 self._list_path_hover_tip = path_tip
@@ -2705,6 +2914,9 @@ class Viewer:
                     if ev.action == "move":
                         if self._subset_hover_tip:
                             self._subset_hover_tip = ""
+                            changed = True
+                        if self._full_rmsd_hover_tip:
+                            self._full_rmsd_hover_tip = ""
                             changed = True
                         if self._list_path_hover_tip:
                             self._list_path_hover_tip = ""
@@ -2735,9 +2947,15 @@ class Viewer:
                     # Option/manual edit turns its loaded atoms into an
                     # unsaved derived selection; r/Enter creates a new column.
                     if parent_subset_id is not None:
+                        parent = next((c for c in self._rmsd_columns
+                                      if c.select_id == parent_subset_id), None)
                         self._active_subset_id = None
-                        self._msg = (f"derived from #select{parent_subset_id}: "
+                        self._msg = (f"derived from {parent.header if parent else '?'}: "
                                      f"{len(new_align_sel)} atoms · r saves after RMSD")
+                    # Whatever produced this pick (a preset, a saved column),
+                    # it no longer describes what's now selected -- a hand
+                    # edit must not get credited to it (design 2026-08-02).
+                    self._pending_selection_label = None
                     self._push_pointer("cell")
                 if prev_sel is not None and len(prev_sel) >= 2:
                     new_sel = tuple(self.widget.measure_sel)
@@ -2823,6 +3041,7 @@ class Viewer:
                 return True
             self._list_focused = False
             self.widget.set_alignment_mode(True)
+            self._pending_selection_label = None      # a fresh manual pick
             self._push_pointer("cell")
             self._msg = "pick untinted reference atoms, then press Enter"
         elif key == "S":
@@ -3101,12 +3320,12 @@ class Viewer:
         )
         if column is None:
             column = _FullRMSDColumn(
-                full_id=self._next_full_rmsd_id,
+                full_id=self._next_rmsd_id,
                 reference_index=reference_i,
                 reference_revision=self.structures[reference_i].revision,
                 values=[None] * len(self.structures),
             )
-            self._next_full_rmsd_id += 1
+            self._next_rmsd_id += 1
             self._full_rmsd_columns.append(column)
         result = self._align_overlay(rmsd_column=column)
         self._refresh_measure_w()
@@ -3138,14 +3357,29 @@ class Viewer:
             # so disarm and make the user re-pick.
             self._active_subset_id = None
             self.widget.align_sel = []
-            self._msg = (f"#select{column.select_id} is stale — the main frame "
+            self._msg = (f"{column.header} is stale — the main frame "
                          "was edited; pick the atoms again")
             return None
         return column
 
-    @staticmethod
-    def _subset_tip(column: _SubsetRMSDColumn) -> str:
-        return "aligning on " + ",".join(column.labels)
+    def _subset_tip(self, column: _SubsetRMSDColumn) -> str:
+        """Status-bar spec for a ⊂RMSD header hover (design VIM-30): the
+        reference frame this fit is anchored to, plus what it fit on.
+
+        Read like English when the selection came from a known preset
+        untouched since ("the backbone", "heavy atoms", ...) -- otherwise
+        (Manual, or a preset since hand-edited) the raw atom list is the
+        only thing that's actually true, so that's what shows."""
+        ref_label = self.structures[column.reference_index].label
+        phrase = _SELECTION_PHRASES.get(column.preset_label)
+        what = phrase if phrase is not None else ",".join(column.labels)
+        return f"{ref_label} · aligning on {what}"
+
+    def _full_rmsd_tip(self, column: _FullRMSDColumn) -> str:
+        """Status-bar spec for a ∀RMSD header hover: the reference frame only
+        -- a whole-molecule fit has no atom subset to name."""
+        ref_label = self.structures[column.reference_index].label
+        return f"{ref_label} · aligning on all atoms"
 
     def _finish_subset_alignment(self, indices: Tuple[int, ...]) -> bool:
         """Persist a newly picked subset, align, and expose its RMSD column.
@@ -3172,26 +3406,30 @@ class Viewer:
             # Selection identity is its owning main frame plus atom set, not
             # the click/preset action that happened to request the RMSD. This
             # is the normal path after adding another structure to an overlay:
-            # refill #selectN for every current row instead of cloning it.
+            # refill its RMSD#N for every current row instead of cloning it.
             self._align_overlay(ref_select=indices, rmsd_column=existing)
             self._active_subset_id = None
+            self._pending_selection_label = None
             self._refresh_measure_w()
             return True
         symbols = self.structures[reference_i].molecule.symbols
         labels = tuple(f"{symbols[i]}{i}" for i in indices)
         column = _SubsetRMSDColumn(
-            select_id=self._next_subset_id,
+            select_id=self._next_rmsd_id,
             reference_index=reference_i,
             reference_revision=self.structures[reference_i].revision,
             indices=indices,
             labels=labels,
             values=[None] * len(self.structures),
+            preset_label=self._pending_selection_label,
         )
-        self._next_subset_id += 1
+        self._next_rmsd_id += 1
+        self._pending_selection_label = None
         self._rmsd_columns.append(column)
         self._align_overlay(ref_select=indices, rmsd_column=column)
         # A completed pick is saved but not armed. This keeps plain R available
-        # for creating #select2; clicking a saved header arms it for a rerun.
+        # for creating the next RMSD#N; clicking a saved header arms it for
+        # a rerun.
         self._active_subset_id = None
         self._refresh_measure_w()
         return True
@@ -3202,16 +3440,17 @@ class Viewer:
         if self._active_subset_id == column.select_id:
             self._active_subset_id = None
             self.widget.align_sel = []
-            self._msg = f"#select{column.select_id} disabled"
+            self._msg = f"{column.header} disabled"
             return
         if self.structures.active_index != column.reference_index:
             self._activate_structure(column.reference_index)
         self.widget.set_alignment_mode(False)
         self.widget.align_sel = list(column.indices)
         self._active_subset_id = column.select_id
-        self._msg = (f"#select{column.select_id} enabled · "
-                     + ",".join(column.labels)
-                     + " · R recalculates · Option-click derives")
+        phrase = _SELECTION_PHRASES.get(column.preset_label)
+        what = phrase if phrase is not None else ",".join(column.labels)
+        self._msg = (f"{column.header} enabled · {what}"
+                     " · R recalculates · Option-click derives")
 
     def _align_overlay(self, ref_select=None,
                        rmsd_column: Optional[Union[
@@ -3399,9 +3638,17 @@ class Viewer:
                 return column_index
         return None
 
+    def _full_rmsd_header_hit(self, col: int, row: int) -> Optional[int]:
+        """Saved full-RMSD column index under a header hover, if any."""
+        for r0, c0, c1, column_index in self._full_rmsd_header_spans:
+            if r0 == row and c0 <= col < c1:
+                return column_index
+        return None
+
     def _remove_full_rmsd_column(self, column_index: int) -> None:
         column = self._full_rmsd_columns.pop(column_index)
-        self._msg = f"#all{column.full_id} deleted"
+        self._full_rmsd_hover_tip = ""
+        self._msg = f"{column.header} deleted"
         self._refresh_measure_w()
 
     def _remove_subset_column(self, column_index: int) -> None:
@@ -3411,7 +3658,7 @@ class Viewer:
             self._active_subset_id = None
             self.widget.align_sel = []
         self._subset_hover_tip = ""
-        self._msg = f"#select{column.select_id} deleted"
+        self._msg = f"{column.header} deleted"
         self._refresh_measure_w()
 
     def _measure_layout(self, list_w: int) -> List[Tuple[str, int, List[str], bool]]:
@@ -3451,12 +3698,18 @@ class Viewer:
             values = list(column.values[:len(self.structures)])
             if len(values) < len(self.structures):
                 values.extend([None] * (len(self.structures) - len(values)))
-            # The reference-to-itself RMSD is not a measurement.  Hide it
-            # before finding extrema so its synthetic zero neither renders
-            # nor permanently claims the column's minimum marker.
+            # The reference-to-itself RMSD is not a measurement.  Mask it
+            # before finding extrema so its synthetic zero never claims the
+            # column's minimum marker, then label the cell "Self" rather than
+            # leaving the em-dash that means "no result here".
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
-            cells = self._format_measure_extrema(values, 4)
+            cells = self._format_measure_extrema(values, 2)
+            if 0 <= column.reference_index < len(cells):
+                cells[column.reference_index] = _SELF_CELL
+            # Just "RMSD#N" (design 2026-08-02) -- which fit produced it and
+            # what it's aligned on is hover-only detail (_full_rmsd_tip,
+            # VIM-30), not part of the permanent label.
             header = column.header + (
                 "*" if self._full_rmsd_column_stale(column) else "")
             columns.append(("full_rmsd", i, f"{header} ×", (),
@@ -3467,8 +3720,10 @@ class Viewer:
                 values.extend([None] * (len(self.structures) - len(values)))
             if 0 <= column.reference_index < len(values):
                 values[column.reference_index] = None
-            cells = self._format_measure_extrema(values, 4)
-            # A '*' after the name is the design's stale marker (§4.4): the
+            cells = self._format_measure_extrema(values, 2)
+            if 0 <= column.reference_index < len(cells):
+                cells[column.reference_index] = _SELF_CELL
+            # A '*' after the id is the design's stale marker (§4.4): the
             # numbers were true once, so they stay readable, but they must
             # not be mistaken for a fit against the geometry on screen now.
             header = column.header + ("*" if self._subset_column_stale(column) else "")
@@ -3598,6 +3853,7 @@ class Viewer:
         """
         self._active_subset_id = None
         self._subset_hover_tip = ""
+        self._full_rmsd_hover_tip = ""
         if self.widget.align_mode:
             self.widget.set_alignment_mode(False)
             self._pop_pointer()

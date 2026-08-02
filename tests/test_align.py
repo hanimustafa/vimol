@@ -384,14 +384,15 @@ def test_R_picks_reference_subset_and_enter_aligns_overlay(tmp_path, monkeypatch
         assert viewer.widget.align_mode is False
         assert len(viewer._rmsd_columns) == 1
         column = viewer._rmsd_columns[0]
-        assert column.header == "⊂RMSD #select1"
+        assert column.header == "⊂RMSD#1"
         assert column.labels == ("C0", "N1", "O2", "H3")
         assert column.values[0] == 0.0
         assert column.values[1] < 1e-10
         viewer._cols = 200
         viewer._list_w = 20
         cells = viewer._measure_layout(viewer._list_w)[0][2]
-        assert cells[column.reference_index] == "—"
+        assert cells[column.reference_index] == "Self"   # not "—": it IS the
+        # frame everything else was fitted onto, not a missing result.
         assert any("↑" in cell for cell in cells)
         assert any("↓" in cell for cell in cells)
         result = viewer.structures[1].alignment
@@ -401,6 +402,58 @@ def test_R_picks_reference_subset_and_enter_aligns_overlay(tmp_path, monkeypatch
         moved = viewer.structures[1].transform.apply(
             viewer.structures[1].molecule.positions[:4])
         assert np.allclose(moved, viewer.structures[0].molecule.positions)
+    finally:
+        os.close(fd)
+
+
+def test_subset_hover_tip_reads_preset_name_when_untouched(tmp_path):
+    """A selection committed straight from a preset, with no hand edit in
+    between, should read like English in the hover tip -- the preset name,
+    not a raw atom dump (design 2026-08-02)."""
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer.structures.overlay = True
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 3   # Heavy atoms -> C0, N1, O2 (not H3)
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_sel == [0, 1, 2]
+
+        assert viewer._dispatch([KeyEvent("enter")]) is True
+        column = viewer._rmsd_columns[0]
+        assert column.preset_label == "Heavy atoms"
+        assert viewer._subset_tip(column) == "reference · aligning on heavy atoms"
+    finally:
+        os.close(fd)
+
+
+def test_subset_hover_tip_falls_back_to_atoms_once_a_preset_is_hand_edited(
+        tmp_path, monkeypatch):
+    """Option-clicking one more atom onto a preset selection makes it a
+    different set than the preset actually produces -- the tip must stop
+    crediting the preset and fall back to naming the real atoms."""
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer._cols = 100
+        viewer._rows = 30
+        viewer._list_w = 20
+        viewer.structures.overlay = True
+        viewer._open_selection_picker()
+        viewer._selection_menu_idx = 3   # Heavy atoms -> [0, 1, 2]
+        viewer._activate_selection_preset()
+        assert viewer.widget.align_sel == [0, 1, 2]
+
+        monkeypatch.setattr(viewer.widget, "_active_local_pick", lambda _x, _y: 3)
+        monkeypatch.setattr(viewer.widget, "_pick_active_only", lambda _x, _y: 3)
+        viewer._dispatch([MouseEvent(
+            "down", 40.0, 5.0, button=0, alt=True, pixel=False)])
+        assert viewer._dispatch([MouseEvent(
+            "up", 40.0, 5.0, button=0, alt=True, pixel=False)]) is True
+        assert viewer.widget.align_sel == [0, 1, 2, 3]
+
+        assert viewer._dispatch([KeyEvent("enter")]) is True
+        column = viewer._rmsd_columns[0]
+        assert column.preset_label is None
+        assert viewer._subset_tip(column) == "reference · aligning on C0,N1,O2,H3"
     finally:
         os.close(fd)
 
@@ -416,7 +469,7 @@ def test_subset_rmsd_header_hover_click_and_R_recalculate(tmp_path):
         original = viewer._rmsd_columns[0].values[1]
 
         text = viewer._draw_list().decode("utf-8", "replace")
-        assert "⊂RMSD #select1" in text
+        assert "⊂RMSD#1" in text
         assert len(viewer._subset_header_spans) == 1
         row, start, end, column_index = viewer._subset_header_spans[0]
         assert column_index == 0
@@ -424,16 +477,16 @@ def test_subset_rmsd_header_hover_click_and_R_recalculate(tmp_path):
 
         assert viewer._dispatch([
             MouseEvent("move", float(header_col), float(row), button=0)]) is True
-        assert viewer._subset_hover_tip == "aligning on C0,N1,O2,H3"
-        assert "aligning on C0,N1,O2,H3" in viewer._status_bar()
+        assert viewer._subset_hover_tip == "reference · aligning on C0,N1,O2,H3"
+        assert "reference · aligning on C0,N1,O2,H3" in viewer._status_bar()
 
         assert viewer._dispatch([
             MouseEvent("down", float(header_col), float(row), button=0)]) is True
         assert viewer._active_subset_id == 1
         assert viewer.widget.align_sel == [0, 1, 2, 3]
 
-        # Change a fitted source atom. R must update #select1 in place, not
-        # create #select2 or enter a fresh picking session.
+        # Change a fitted source atom. R must update RMSD#1 in place, not
+        # create RMSD#2 or enter a fresh picking session.
         viewer.structures[1].molecule.positions[1] += [0.25, 0.0, 0.0]
         viewer.structures[1].touch()
         assert viewer._dispatch([KeyEvent("R")]) is True
@@ -464,7 +517,7 @@ def test_subset_rmsd_column_x_deletes_saved_selection(tmp_path):
         assert viewer._rmsd_columns == []
         assert viewer._active_subset_id is None
         assert viewer.widget.align_sel == []
-        assert viewer._msg == "#select1 deleted"
+        assert viewer._msg == "⊂RMSD#1 deleted"
     finally:
         os.close(fd)
 
@@ -493,7 +546,9 @@ def test_changing_main_frame_disarms_named_subset_before_global_r(
             lambda *args, **kwargs: calls.append((args, kwargs)) or True)
         assert viewer._dispatch([KeyEvent("r")]) is True
         assert len(calls) == 1 and calls[0][0] == ()
-        assert calls[0][1]["rmsd_column"].header == "∀RMSD #all1"
+        # The subset column already claimed id 1 (design 2026-08-02: one
+        # shared counter for both column kinds), so this ∀RMSD fit is #2.
+        assert calls[0][1]["rmsd_column"].header == "∀RMSD#2"
         assert viewer.structures.active_index == 1
     finally:
         os.close(fd)
@@ -533,7 +588,9 @@ def test_global_r_rejects_stale_subset_after_external_active_change(
         assert viewer._active_subset_id is None
         assert viewer.widget.align_sel == []
         assert len(calls) == 1 and calls[0][0] == ()
-        assert calls[0][1]["rmsd_column"].header == "∀RMSD #all1"
+        # The subset column already claimed id 1 (design 2026-08-02: one
+        # shared counter for both column kinds), so this ∀RMSD fit is #2.
+        assert calls[0][1]["rmsd_column"].header == "∀RMSD#2"
     finally:
         os.close(fd)
 
@@ -553,7 +610,7 @@ def test_clicking_active_subset_header_disables_it_for_a_new_R_pick(tmp_path):
         viewer.widget.align_sel = [0, 1, 3]
         assert viewer._dispatch([KeyEvent("enter")]) is True
         assert [column.header for column in viewer._rmsd_columns] == [
-            "⊂RMSD #select1", "⊂RMSD #select2"]
+            "⊂RMSD#1", "⊂RMSD#2"]
     finally:
         os.close(fd)
 
@@ -564,7 +621,7 @@ def test_repeating_same_subset_after_adding_overlay_updates_column_in_place(tmp_
         viewer.structures.overlay = True
         viewer._finish_subset_alignment((0, 1, 2))
         column = viewer._rmsd_columns[0]
-        assert viewer._next_subset_id == 2
+        assert viewer._next_rmsd_id == 2
         assert len(column.values) == 2
 
         source = viewer.structures[1].molecule
@@ -575,7 +632,7 @@ def test_repeating_same_subset_after_adding_overlay_updates_column_in_place(tmp_
 
         viewer._finish_subset_alignment((2, 1, 0))  # same set, different pick order
         assert viewer._rmsd_columns == [column]
-        assert viewer._next_subset_id == 2
+        assert viewer._next_rmsd_id == 2
         assert column.indices == (0, 1, 2)
         assert len(column.values) == 3
         assert column.values[2] is not None
@@ -625,13 +682,14 @@ def test_lowercase_r_aligns_complete_matching_overlay(tmp_path):
         assert viewer._rmsd_columns == []
         assert len(viewer._full_rmsd_columns) == 1
         column = viewer._full_rmsd_columns[0]
-        assert column.header == "∀RMSD #all1"
+        assert column.header == "∀RMSD#1"
         assert column.values[0] == 0.0
         assert column.values[1] < 1e-10
         viewer._cols = 200
         viewer._list_w = 20
         cells = viewer._measure_layout(viewer._list_w)[0][2]
-        assert cells[column.reference_index] == "—"
+        assert cells[column.reference_index] == "Self"   # not "—": it IS the
+        # frame everything else was fitted onto, not a missing result.
         assert any("↑" in cell for cell in cells)
         assert any("↓" in cell for cell in cells)
     finally:
@@ -664,21 +722,50 @@ def test_full_rmsd_column_accumulates_overlay_swaps_and_x_deletes(tmp_path):
         assert column.values[2] is not None
 
         text = viewer._draw_list().decode("utf-8", "replace")
-        assert "∀RMSD #all1" in text
+        assert "∀RMSD#1" in text
         assert len(viewer._full_rmsd_remove_spans) == 1
         row, start, _end, column_index = viewer._full_rmsd_remove_spans[0]
         assert column_index == 0
         assert viewer._dispatch([
             MouseEvent("down", float(start), float(row), button=0)]) is True
         assert viewer._full_rmsd_columns == []
-        assert viewer._msg == "#all1 deleted"
+        assert viewer._msg == "∀RMSD#1 deleted"
+    finally:
+        os.close(fd)
+
+
+def test_full_rmsd_header_hover_shows_reference_and_all_atoms(tmp_path):
+    """A ∀RMSD header hover has no atom subset to name (design VIM-30) -- it
+    shows only the reference frame it is fitted against."""
+    viewer, fd = _overlay_viewer(tmp_path)
+    try:
+        viewer._cols = 200
+        viewer._rows = 24
+        viewer._list_w = 20
+        viewer.structures.overlay = True
+        viewer._dispatch([KeyEvent("r")])
+
+        viewer._draw_list()
+        assert len(viewer._full_rmsd_header_spans) == 1
+        row, start, end, column_index = viewer._full_rmsd_header_spans[0]
+        assert column_index == 0
+        header_col = (start + end) // 2
+
+        assert viewer._dispatch([
+            MouseEvent("move", float(header_col), float(row), button=0)]) is True
+        assert viewer._full_rmsd_hover_tip == "reference · aligning on all atoms"
+        assert "reference · aligning on all atoms" in viewer._status_bar()
+
+        assert viewer._dispatch([
+            MouseEvent("move", 1.0, 1.0, button=0)]) is True
+        assert viewer._full_rmsd_hover_tip == ""
     finally:
         os.close(fd)
 
 
 def test_aligning_onto_a_second_main_frame_opens_its_own_full_column(tmp_path):
     """A ∀RMSD column belongs to the main frame it was fitted against, so
-    switching main frame must open #all2 rather than overwrite #all1 with
+    switching main frame must open RMSD#2 rather than overwrite RMSD#1 with
     numbers measured from somewhere else."""
     viewer, fd = _overlay_viewer(tmp_path)
     try:
@@ -696,7 +783,7 @@ def test_aligning_onto_a_second_main_frame_opens_its_own_full_column(tmp_path):
         viewer._dispatch([KeyEvent("r")])
 
         assert [c.header for c in viewer._full_rmsd_columns] == [
-            "∀RMSD #all1", "∀RMSD #all2"]
+            "∀RMSD#1", "∀RMSD#2"]
         assert [c.reference_index for c in viewer._full_rmsd_columns] == [0, 1]
     finally:
         os.close(fd)
@@ -705,7 +792,8 @@ def test_aligning_onto_a_second_main_frame_opens_its_own_full_column(tmp_path):
 def test_full_rmsd_column_header_marks_itself_stale_after_an_edit(tmp_path):
     """The ⊂RMSD twin of this already exists. A ∀RMSD column is just as able
     to outlive the geometry it measured, and an unmarked stale number is
-    indistinguishable from a fresh one."""
+    indistinguishable from a fresh one. The stale marker rides right after
+    the id, before the ×."""
     from vimol import editor
 
     viewer, fd = _overlay_viewer(tmp_path)
@@ -713,13 +801,15 @@ def test_full_rmsd_column_header_marks_itself_stale_after_an_edit(tmp_path):
         viewer.structures.overlay = True
         viewer._cols, viewer._rows, viewer._list_w = 200, 24, 40
         viewer._dispatch([KeyEvent("r")])
-        assert "∀RMSD #all1*" not in viewer._draw_list().decode("utf-8", "replace")
+        viewer._draw_list()
+        assert viewer._measure_layout(viewer._list_w)[0][0] == "∀RMSD#1 ×"
 
         entry = viewer.structures.active
         editor.delete_atom(entry.molecule, 3)
         entry.touch()
 
-        assert "∀RMSD #all1*" in viewer._draw_list().decode("utf-8", "replace")
+        viewer._draw_list()
+        assert viewer._measure_layout(viewer._list_w)[0][0] == "∀RMSD#1* ×"
     finally:
         os.close(fd)
 
