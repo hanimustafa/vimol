@@ -104,6 +104,45 @@ def test_subset_search_finds_query_inside_larger_shuffled_target():
     assert np.allclose(query @ rotation.T + translation, target[mapping])
 
 
+def test_reference_subset_errors_name_the_structure_that_is_actually_short():
+    """superpose_to_reference_subset searches for the reference selection
+    INSIDE the mobile, so subset_search sees the two structures swapped. Its
+    errors reach the user verbatim next to a structure label, so naming them
+    the wrong way round sends the user to inspect the wrong file."""
+    reference = _mol(["C", "C", "O"], [[0, 0, 0], [1.5, 0, 0], [0, 1.4, 0]])
+    mobile = _mol(["C"] * 5, [[0, 0, 0], [1.5, 0, 0], [3, 0, 0],
+                              [4.5, 0, 0], [6, 0, 0]])
+    with pytest.raises(ValueError) as excinfo:
+        superpose_to_reference_subset(mobile, reference, [0, 1, 2])
+    # The MOBILE is the one with no oxygen.
+    assert "mobile has 0 O atom(s)" in str(excinfo.value)
+    assert "reference selection requires 1" in str(excinfo.value)
+
+    wide_reference = _mol(["C"] * 4, [[0, 0, 0], [1.5, 0, 0], [3, 0, 0], [4.5, 0, 0]])
+    narrow_mobile = _mol(["C", "C"], [[0, 0, 0], [1.5, 0, 0]])
+    with pytest.raises(ValueError) as excinfo:
+        superpose_to_reference_subset(narrow_mobile, wide_reference, [0, 1, 2, 3])
+    # The SELECTION is the one that is too large.
+    assert "reference selection to be no larger than mobile" in str(excinfo.value)
+
+
+def test_direct_subset_errors_keep_the_plain_mobile_onto_reference_wording():
+    """The guard for the fix above: every other caller passes the structures
+    the natural way round, so renaming the two sides inside the shared helper
+    -- rather than at the one inverted call site -- would break them here."""
+    reference = _mol(["C", "C", "O"], [[0, 0, 0], [1.5, 0, 0], [0, 1.4, 0]])
+    mobile = _mol(["C", "C", "N"], [[0, 0, 0], [1.5, 0, 0], [0, 1.4, 0]])
+    with pytest.raises(ValueError) as excinfo:
+        superpose(mobile, reference, subset=True)
+    assert "reference has 0 N atom(s)" in str(excinfo.value)
+    assert "mobile requires 1" in str(excinfo.value)
+
+    wide_mobile = _mol(["C"] * 4, [[0, 0, 0], [1.5, 0, 0], [3, 0, 0], [4.5, 0, 0]])
+    with pytest.raises(ValueError) as excinfo:
+        superpose(wide_mobile, reference, subset=True)
+    assert "requires mobile to be no larger than reference" in str(excinfo.value)
+
+
 def test_reference_subset_alignment_moves_whole_larger_mobile():
     reference_points = np.array(
         [[0, 0, 0], [1, 0, 0], [0, 2, 0], [0, 0, 3], [8, 8, 8]], dtype=float)

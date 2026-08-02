@@ -137,8 +137,15 @@ def _lsa(cost: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return _linear_sum_assignment_numpy(cost)
 
 
-def _symbol_blocks(mobile_symbols: Sequence[str], reference_symbols: Sequence[str]
+def _symbol_blocks(mobile_symbols: Sequence[str], reference_symbols: Sequence[str],
+                   *, need: str = "mobile", have: str = "reference"
                    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Pair up same-element atoms, requiring *have* to cover *need*.
+
+    ``need``/``have`` name the two sides in the raised message. Callers that
+    search in the inverted direction -- passing a reference selection as the
+    mobile side -- must say so, or the error names the wrong structure.
+    """
     p_symbols = np.asarray(mobile_symbols, dtype=object)
     q_symbols = np.asarray(reference_symbols, dtype=object)
     blocks = []
@@ -148,8 +155,8 @@ def _symbol_blocks(mobile_symbols: Sequence[str], reference_symbols: Sequence[st
         qi = np.flatnonzero(q_symbols == symbol)
         if len(qi) < len(pi):
             raise ValueError(
-                "reference has %d %s atom(s), but mobile requires %d"
-                % (len(qi), symbol, len(pi)))
+                "%s has %d %s atom(s), but %s requires %d"
+                % (have, len(qi), symbol, need, len(pi)))
         blocks.append((pi, qi))
     return blocks
 
@@ -437,21 +444,28 @@ def _transform_lower_bounds(P: np.ndarray, Q: np.ndarray, rotations: np.ndarray,
 
 
 def subset_search(P, Q, mobile_symbols: Sequence[str],
-                  reference_symbols: Sequence[str], candidates: int = 64
+                  reference_symbols: Sequence[str], candidates: int = 64,
+                  *, need: str = "mobile", have: str = "reference"
                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Match every mobile atom to an element-compatible subset of reference.
 
     The search uses distance-invariant, high-area triangle anchors to generate
     translations and rotations, screens them in one vectorized pass, then runs
     exact rectangular assignment + Kabsch refinement on the best basins.
+
+    ``need``/``have`` name the two sides in raised messages. Some callers
+    search in the inverted direction -- ``P`` is a reference selection being
+    located inside the whole mobile ``Q`` -- and must rename them to match.
     """
     P = _points(P, "P")
     Q = _points(Q, "Q")
     if not len(P):
-        raise ValueError("at least one mobile atom is required")
+        raise ValueError("at least one %s atom is required" % need)
     if len(P) > len(Q):
-        raise ValueError("subset search requires mobile to be no larger than reference")
-    blocks = _symbol_blocks(mobile_symbols, reference_symbols)
+        raise ValueError("subset search requires %s to be no larger than %s"
+                         % (need, have))
+    blocks = _symbol_blocks(mobile_symbols, reference_symbols,
+                            need=need, have=have)
     candidates = max(1, int(candidates))
 
     if len(P) == 1:
@@ -863,9 +877,12 @@ def superpose_to_reference_subset(mobile: Molecule, reference: Molecule,
                          % permute_max_atoms)
     query = reference.positions[ref_indices]
     query_symbols = [reference.symbols[i] for i in ref_indices]
+    # The search runs inverted here -- the picked reference atoms are the
+    # thing being located, and the whole mobile is what must accommodate them
+    # -- so the two sides are renamed to keep raised messages truthful.
     rotation_qm, translation_qm, ref_to_mobile, rmsd = subset_search(
         query, mobile.positions, query_symbols, mobile.symbols,
-        candidates=candidates)
+        candidates=candidates, need="the reference selection", have="mobile")
     query_to_mobile = Transform(rotation=rotation_qm, translation=translation_qm)
     mobile_to_reference = query_to_mobile.inverse()
     mapping = np.full(mobile.n_atoms, -1, dtype=np.int64)
