@@ -61,6 +61,15 @@ _GEOM_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 _SELECTION_OPTIONS = (
     "Manual", "Backbone", "Backbone + Cβ", "Heavy atoms", "Largest ring system",
 )
+# English phrasing for a ⊂RMSD hover tip (design 2026-08-02, VIM-30) --
+# "Manual" has no entry, so a hand-picked/derived selection always falls
+# back to its raw atom list instead.
+_SELECTION_PHRASES = {
+    "Backbone": "the backbone",
+    "Backbone + Cβ": "the backbone + Cβ",
+    "Heavy atoms": "heavy atoms",
+    "Largest ring system": "the largest ring system",
+}
 _SELECTION_HINT = " ↑↓ move · Enter/click select · Esc cancel"
 _BROWSER_HINT = " ↑↓ move · Enter open · ~ home · Esc cancel"
 # Fallback visible width of the status bar's left-hand (hover/molecule-info)
@@ -95,15 +104,18 @@ class _SubsetRMSDColumn:
     indices: Tuple[int, ...]
     labels: Tuple[str, ...]
     values: List[Optional[float]]
+    # Which selection preset produced ``indices`` (a name from
+    # _SELECTION_OPTIONS), if any and if it hasn't since been hand-edited --
+    # None for a manual/option-click pick. Lets the hover tip read like
+    # English ("aligning on the backbone") instead of a raw atom dump
+    # (design 2026-08-02, VIM-30).
+    preset_label: Optional[str] = None
 
     @property
     def header(self) -> str:
-        # Just "RMSD#N" (design 2026-08-02): the action (whole-molecule vs.
-        # subset) and what it's fitted on are hover-only detail (VIM-30), not
-        # part of the column's permanent label. select_id/full_id share one
-        # counter (Viewer._next_rmsd_id) precisely so this can't collide with
-        # a ∀RMSD column's number.
-        return f"RMSD#{self.select_id}"
+        # select_id/full_id share one counter (Viewer._next_rmsd_id)
+        # precisely so a ⊂RMSD and a ∀RMSD column can never collide.
+        return f"⊂RMSD#{self.select_id}"
 
 
 @dataclass
@@ -116,7 +128,7 @@ class _FullRMSDColumn:
 
     @property
     def header(self) -> str:
-        return f"RMSD#{self.full_id}"
+        return f"∀RMSD#{self.full_id}"
 
 # Structure-list strip layout (design §4.1) -- colors live in theme.py now.
 # Strip rows spent on chrome rather than entries: the header above, and the
@@ -158,7 +170,7 @@ _HELP_TAIL = [
     "  t .................. transparent bg    g .................. hi-quality",
     "  ctrl-t ............. light/dark theme",
     "  f / z .............. re-fit / reset    ? .................. toggle help",
-    "  overlay: r .......... align all → RMSD#N  R ... pick atoms → RMSD#N",
+    "  overlay: r .......... align all → ∀RMSD#N  R ... pick atoms → ⊂RMSD#N",
     "     Shift+S / click select ... Backbone, Heavy atoms, or Ring system",
     "     option-click atom ........ additive manual subset selection",
     "     RMSD#N column: hover title for spec · click arm selection · R recalculate",
@@ -456,10 +468,15 @@ class Viewer:
         self._measure_columns: List[Tuple[str, Tuple[int, ...]]] = []
         self._full_rmsd_columns: List[_FullRMSDColumn] = []
         self._rmsd_columns: List[_SubsetRMSDColumn] = []
-        # One counter shared by both column kinds (design 2026-08-02): they
-        # all render as plain "RMSD#N", so a ∀RMSD and a ⊂RMSD column must
-        # never be numbered alike.
+        # One counter shared by both column kinds (design 2026-08-02): a
+        # ∀RMSD and a ⊂RMSD column must never be numbered alike.
         self._next_rmsd_id = 1
+        # Set by _activate_selection_preset when a real preset (not Manual)
+        # is chosen; consumed (and cleared) by _finish_subset_alignment onto
+        # the new column's own preset_label. Cleared early if the pick is
+        # hand-edited before it's ever committed, so a since-modified
+        # selection never gets credited to the preset that started it.
+        self._pending_selection_label: Optional[str] = None
         self._active_subset_id: Optional[int] = None
         self._subset_hover_tip = ""
         self._full_rmsd_hover_tip = ""
@@ -2194,13 +2211,14 @@ class Viewer:
             parent = self._selected_subset_column()
             self.widget.set_alignment_mode(True, preserve=True)
             self._active_subset_id = None
-            inherited = (f" from RMSD#{parent.select_id}"
-                         if parent is not None else "")
+            self._pending_selection_label = None      # explicitly hand-picked
+            inherited = f" from {parent.header}" if parent is not None else ""
             self._msg = (f"Manual additive selection{inherited}: click atoms"
                          " / Option-click · whitespace clears · r saves after RMSD")
             return
 
         self._active_subset_id = None
+        self._pending_selection_label = None
         self.widget.set_alignment_mode(True)
         molecule = self.structures.active.molecule
         if label == "Heavy atoms":
@@ -2221,6 +2239,7 @@ class Viewer:
             self._msg = missing
             return
         self.widget.align_sel = indices.tolist()
+        self._pending_selection_label = label
         inferred = (" (inferred)"
                     if label.startswith("Backbone")
                     and len(molecule.atom_names) != molecule.n_atoms else "")
@@ -2865,9 +2884,15 @@ class Viewer:
                     # Option/manual edit turns its loaded atoms into an
                     # unsaved derived selection; r/Enter creates a new column.
                     if parent_subset_id is not None:
+                        parent = next((c for c in self._rmsd_columns
+                                      if c.select_id == parent_subset_id), None)
                         self._active_subset_id = None
-                        self._msg = (f"derived from RMSD#{parent_subset_id}: "
+                        self._msg = (f"derived from {parent.header if parent else '?'}: "
                                      f"{len(new_align_sel)} atoms · r saves after RMSD")
+                    # Whatever produced this pick (a preset, a saved column),
+                    # it no longer describes what's now selected -- a hand
+                    # edit must not get credited to it (design 2026-08-02).
+                    self._pending_selection_label = None
                     self._push_pointer("cell")
                 if prev_sel is not None and len(prev_sel) >= 2:
                     new_sel = tuple(self.widget.measure_sel)
@@ -2953,6 +2978,7 @@ class Viewer:
                 return True
             self._list_focused = False
             self.widget.set_alignment_mode(True)
+            self._pending_selection_label = None      # a fresh manual pick
             self._push_pointer("cell")
             self._msg = "pick untinted reference atoms, then press Enter"
         elif key == "S":
@@ -3268,16 +3294,23 @@ class Viewer:
             # so disarm and make the user re-pick.
             self._active_subset_id = None
             self.widget.align_sel = []
-            self._msg = (f"RMSD#{column.select_id} is stale — the main frame "
+            self._msg = (f"{column.header} is stale — the main frame "
                          "was edited; pick the atoms again")
             return None
         return column
 
     def _subset_tip(self, column: _SubsetRMSDColumn) -> str:
         """Status-bar spec for a ⊂RMSD header hover (design VIM-30): the
-        reference frame this fit is anchored to, plus the atoms it fit on."""
+        reference frame this fit is anchored to, plus what it fit on.
+
+        Read like English when the selection came from a known preset
+        untouched since ("the backbone", "heavy atoms", ...) -- otherwise
+        (Manual, or a preset since hand-edited) the raw atom list is the
+        only thing that's actually true, so that's what shows."""
         ref_label = self.structures[column.reference_index].label
-        return f"{ref_label} · aligning on " + ",".join(column.labels)
+        phrase = _SELECTION_PHRASES.get(column.preset_label)
+        what = phrase if phrase is not None else ",".join(column.labels)
+        return f"{ref_label} · aligning on {what}"
 
     def _full_rmsd_tip(self, column: _FullRMSDColumn) -> str:
         """Status-bar spec for a ∀RMSD header hover: the reference frame only
@@ -3313,6 +3346,7 @@ class Viewer:
             # refill its RMSD#N for every current row instead of cloning it.
             self._align_overlay(ref_select=indices, rmsd_column=existing)
             self._active_subset_id = None
+            self._pending_selection_label = None
             self._refresh_measure_w()
             return True
         symbols = self.structures[reference_i].molecule.symbols
@@ -3324,8 +3358,10 @@ class Viewer:
             indices=indices,
             labels=labels,
             values=[None] * len(self.structures),
+            preset_label=self._pending_selection_label,
         )
         self._next_rmsd_id += 1
+        self._pending_selection_label = None
         self._rmsd_columns.append(column)
         self._align_overlay(ref_select=indices, rmsd_column=column)
         # A completed pick is saved but not armed. This keeps plain R available
@@ -3341,16 +3377,17 @@ class Viewer:
         if self._active_subset_id == column.select_id:
             self._active_subset_id = None
             self.widget.align_sel = []
-            self._msg = f"RMSD#{column.select_id} disabled"
+            self._msg = f"{column.header} disabled"
             return
         if self.structures.active_index != column.reference_index:
             self._activate_structure(column.reference_index)
         self.widget.set_alignment_mode(False)
         self.widget.align_sel = list(column.indices)
         self._active_subset_id = column.select_id
-        self._msg = (f"RMSD#{column.select_id} enabled · "
-                     + ",".join(column.labels)
-                     + " · R recalculates · Option-click derives")
+        phrase = _SELECTION_PHRASES.get(column.preset_label)
+        what = phrase if phrase is not None else ",".join(column.labels)
+        self._msg = (f"{column.header} enabled · {what}"
+                     " · R recalculates · Option-click derives")
 
     def _align_overlay(self, ref_select=None,
                        rmsd_column: Optional[Union[
@@ -3548,7 +3585,7 @@ class Viewer:
     def _remove_full_rmsd_column(self, column_index: int) -> None:
         column = self._full_rmsd_columns.pop(column_index)
         self._full_rmsd_hover_tip = ""
-        self._msg = f"RMSD#{column.full_id} deleted"
+        self._msg = f"{column.header} deleted"
         self._refresh_measure_w()
 
     def _remove_subset_column(self, column_index: int) -> None:
@@ -3558,7 +3595,7 @@ class Viewer:
             self._active_subset_id = None
             self.widget.align_sel = []
         self._subset_hover_tip = ""
-        self._msg = f"RMSD#{column.select_id} deleted"
+        self._msg = f"{column.header} deleted"
         self._refresh_measure_w()
 
     def _measure_layout(self, list_w: int) -> List[Tuple[str, int, List[str], bool]]:

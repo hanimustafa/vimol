@@ -3613,7 +3613,7 @@ def test_subset_column_header_marks_itself_stale_after_an_edit(tmp_path):
         v._list_w = 40
         v._draw_list()
         header_cell = v._measure_layout(v._list_w)[0][0]
-        assert header_cell == "RMSD#1 ×"
+        assert header_cell == "⊂RMSD#1 ×"
 
         entry = v.structures.active
         editor.delete_atom(entry.molecule, 4)
@@ -3621,17 +3621,18 @@ def test_subset_column_header_marks_itself_stale_after_an_edit(tmp_path):
 
         v._draw_list()
         header_cell = v._measure_layout(v._list_w)[0][0]
-        assert header_cell == "RMSD#1* ×"
+        assert header_cell == "⊂RMSD#1* ×"
     finally:
         os.close(fd)
 
 
-def test_rmsd_columns_share_one_id_sequence_round_to_2_decimals_and_stay_narrow(tmp_path):
-    """Both column kinds render as plain "RMSD#N" (design 2026-08-02): no
-    ⊂/∀ sign and no select/all distinction in the label -- that detail is
-    hover-only (VIM-30). select_id/full_id share one counter so a ∀RMSD and
-    a ⊂RMSD column can never be numbered alike. Values round to 2 decimals,
-    keeping the column as narrow as the id/× header allows."""
+def test_rmsd_columns_share_one_id_sequence_and_round_to_2_decimals(tmp_path):
+    """Both column kinds render as "signRMSD#N" (design 2026-08-02): the ⊂/∀
+    sign glyph stays (it's informative at a glance), but there's no more
+    select/all word in the label -- that detail is hover-only (VIM-30).
+    select_id/full_id share one counter so a ∀RMSD and a ⊂RMSD column can
+    never be numbered alike. Values round to 2 decimals, keeping the column
+    as narrow as the sign+id/× header allows."""
     from vimol.structures import StructureSet
     from vimol.viewer import Viewer, _FullRMSDColumn, _SubsetRMSDColumn
 
@@ -3650,7 +3651,7 @@ def test_rmsd_columns_share_one_id_sequence_round_to_2_decimals_and_stay_narrow(
             indices=(0, 1), labels=("C0", "N1"), values=[0.0, 0.987654]))
 
         layout = v._measure_layout(v._list_w)
-        assert [h for h, _w, _v, _r in layout] == ["RMSD#1 ×", "RMSD#2 ×"]
+        assert [h for h, _w, _v, _r in layout] == ["∀RMSD#1 ×", "⊂RMSD#2 ×"]
         # The reference-to-itself value is masked to None (not a real
         # measurement); the sole remaining value is trivially both extrema.
         assert [cells for _h, _w, cells, _r in layout] == [
@@ -3659,8 +3660,7 @@ def test_rmsd_columns_share_one_id_sequence_round_to_2_decimals_and_stay_narrow(
             assert width == max(len(header_cell), max(len(c) for c in cells))
 
         text = v._draw_list().decode("utf-8", "replace")
-        assert "RMSD#1 ×" in text and "RMSD#2 ×" in text
-        assert "⊂" not in text and "∀" not in text
+        assert "∀RMSD#1 ×" in text and "⊂RMSD#2 ×" in text
     finally:
         os.close(fd)
 
