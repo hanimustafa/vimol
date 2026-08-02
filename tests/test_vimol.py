@@ -576,6 +576,59 @@ def test_png_roundtrip_header():
     assert png.rstrip().endswith(b"IEND".rjust(4)) or b"IEND" in png
 
 
+def test_clipboard_set_text_uses_osc52_in_one_base64_payload():
+    """OSC 52 is what terminals actually implement -- Ghostty parses Kitty's
+    OSC 5522 without acting on it, so a 5522 write silently does nothing."""
+    from vimol import kitty
+
+    text = "2\ncomment\nH 0.0 0.0 0.0\nH 1.0 0.0 0.0\n"
+    seq = kitty.clipboard_set_text(text)
+    assert seq.startswith(b"\x1b]52;c;")
+    assert seq.endswith(b"\x07")
+    payload = seq[len(b"\x1b]52;c;"):-1]
+    assert base64.standard_b64decode(payload).decode("utf-8") == text
+
+
+def test_clipboard_set_text_survives_non_ascii_and_empty_input():
+    from vimol import kitty
+
+    seq = kitty.clipboard_set_text("\u00c5\u2014\u00e5ngstr\u00f6m\n")
+    payload = seq[len(b"\x1b]52;c;"):-1]
+    assert (base64.standard_b64decode(payload).decode("utf-8")
+            == "\u00c5\u2014\u00e5ngstr\u00f6m\n")
+    # An empty selection clears the clipboard rather than emitting junk.
+    assert kitty.clipboard_set_text("") == b"\x1b]52;c;\x07"
+
+
+def test_input_decoder_swallows_split_clipboard_status_reply():
+    from vimol.input import InputDecoder, KeyEvent
+
+    decoder = InputDecoder()
+    assert decoder.feed(b"\x1b]5522;type=write:status=") == []
+    events = decoder.feed(b"DONE\x1b\\x")
+    assert events == [KeyEvent("x")]
+
+
+def test_input_decoder_recovers_from_an_unterminated_osc_introducer():
+    """Alt+] sends a bare ESC ] in most terminals, and a terminal reply can
+    be truncated. Holding those bytes forever swallows every later keystroke
+    -- including q -- leaving no way out of the viewer but killing it."""
+    from vimol.input import InputDecoder, KeyEvent
+
+    decoder = InputDecoder()
+    assert decoder.feed(b"\x1b]") == []          # nothing to emit yet: could be a real OSC
+    decoder.feed(b"qqq")
+    # An idle read is the terminal saying no terminator is coming.
+    decoder.flush()
+    assert decoder.feed(b"q") == [KeyEvent("q")]
+
+    # A partial OSC that never terminates must not eat the keys behind it.
+    decoder = InputDecoder()
+    decoder.feed(b"\x1b]5522;type=wri")
+    decoder.flush()
+    assert decoder.feed(b"z") == [KeyEvent("z")]
+
+
 def test_backend_auto_never_raises():
     """`backend="auto"` must silently fall back to CPU with zero GL deps
     installed -- the "never breaks the zero-dependency default" guarantee."""
@@ -1316,6 +1369,75 @@ def _traj_viewer(tmp_path, n=3, path="traj.xyz", fd_name="traj.bin"):
     v = Viewer(frames[0], frames=frames, source_path=path, fd_out=fd)
     v._update_geometry()
     return v, fd
+
+
+def test_copy_xyz_control_is_right_anchored_and_writes_osc52(tmp_path, monkeypatch):
+    from vimol import kitty
+    from vimol.input import MouseEvent
+
+    v, fd = _traj_viewer(tmp_path, n=2, fd_name="copy-controls.bin")
+    try:
+        v._cols, v._rows = 100, 30
+        rendered = _visible(v._draw_copy_controls().decode("utf-8", "replace"))
+        assert "\u29c9 XYZ" in rendered
+        assert "PNG" not in rendered
+        assert v._copy_xyz_span[0] == 0
+        assert v._copy_xyz_span[2] == v._cols - 1
+
+        written = []
+        monkeypatch.setattr(kitty, "write_bytes",
+                            lambda data, fd=1: written.append((data, fd)))
+
+        row, start, _end = v._copy_xyz_span
+        assert v._dispatch([MouseEvent(
+            "down", float(start), float(row), button=0)]) is True
+        payload, target = written[-1]
+        assert target == fd
+        assert payload.startswith(b"\x1b]52;c;") and payload.endswith(b"\x07")
+        text = base64.standard_b64decode(
+            payload[len(b"\x1b]52;c;"):-1]).decode("utf-8")
+        assert text.startswith("5\n")
+        assert v._msg == "current XYZ copied"
+    finally:
+        os.close(fd)
+
+
+def test_copy_control_is_suppressed_when_the_strip_would_be_overpainted(tmp_path):
+    v, fd = _traj_viewer(tmp_path, n=2, fd_name="copy-narrow.bin")
+    try:
+        v._cols, v._rows = 100, 30
+        assert v._draw_copy_controls() != b""
+        v._list_w = v._cols            # strip claims the whole width
+        assert v._draw_copy_controls() == b""
+        assert v._copy_xyz_span is None
+    finally:
+        os.close(fd)
+
+
+def test_current_xyz_copies_drawn_frames_transformed_with_original_comments(tmp_path):
+    from vimol.parsers import xyz as xyz_parser
+    from vimol.structures import Transform
+
+    v, fd = _traj_viewer(tmp_path, n=3, fd_name="copy-xyz-frames.bin")
+    try:
+        for i, entry in enumerate(v.structures):
+            entry.molecule.name = f"original xyz comment {i + 1}"
+            entry.marked = i != 2
+        v.structures.overlay = True
+        v.structures[1].transform = Transform(
+            translation=np.array([3.0, -2.0, 1.0]))
+
+        text = v._current_xyz_text()
+        frames = xyz_parser.parse(text)
+        assert [frame.name for frame in frames] == [
+            "original xyz comment 1", "original xyz comment 2"]
+        assert np.allclose(frames[0].positions,
+                           v.structures[0].molecule.positions)
+        assert np.allclose(frames[1].positions,
+                           v.structures[1].molecule.positions + [3.0, -2.0, 1.0])
+        assert "original xyz comment 3" not in text
+    finally:
+        os.close(fd)
 
 
 def test_viewer_list_groups_a_multi_model_file_under_one_header(tmp_path):

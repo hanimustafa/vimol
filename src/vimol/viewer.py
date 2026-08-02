@@ -31,6 +31,7 @@ from . import templates
 from . import periodic_table
 from . import select as atom_selection
 from . import theme
+from .parsers import xyz as xyz_parser
 
 # ANSI / terminal control -------------------------------------------------
 _ALT_SCREEN_ON = b"\x1b[?1049h"
@@ -76,8 +77,6 @@ _LIST_W_MAX = 28
 # beyond that are silently dropped (_measure_layout) rather than shrinking
 # the viewport to nothing or negative.
 _MEASURE_MIN_VIEWPORT_COLS = 20
-
-
 @dataclass
 class _SubsetRMSDColumn:
     """One persistent subset fit shown beside the structure list.
@@ -296,6 +295,8 @@ class Viewer:
         # the last drawn status bar, 0-based cell coords; None when not shown.
         self._elem_button_span = None
         self._geom_button_span = None
+        # Top-right copy control, in terminal-cell coords.
+        self._copy_xyz_span = None
         # geometry/hybridization picker: the options list and cursor index
         self._geom_opts: List = []
         self._geom_idx = 0
@@ -955,6 +956,53 @@ class Viewer:
             [(" Shft+S to ", muted), ("select", select_style)],
         ]
 
+    def _draw_copy_controls(self) -> bytes:
+        """Draw the right-anchored copy pill and publish its hit box."""
+        self._copy_xyz_span = None
+        xyz = " ⧉ XYZ "
+        right = max(self._cols - 1, 0)  # one quiet cell at the terminal edge
+        left = right - len(xyz)
+        # Never paint over the structure/measurement header on a terminal too
+        # narrow to accommodate both regions honestly.
+        if left < self._list_w + self._measure_w or self._rows <= 1:
+            return b""
+
+        bg_b = self._sgr_bg(self.theme.measure_col_bg_b)
+        fg = self._sgr_fg(self.theme.list_label_fg)
+        text = f"{bg_b}{fg}\x1b[1m{xyz}\x1b[22m\x1b[0m"
+        self._copy_xyz_span = (0, left, left + len(xyz))
+        return (b"\x1b[1;%dH" % (left + 1)
+                + text.encode("utf-8", "replace"))
+
+    @staticmethod
+    def _plain_span_hit(span, col: int, row: int) -> bool:
+        return bool(span is not None and row == span[0]
+                    and span[1] <= col < span[2])
+
+    def _current_xyz_text(self) -> str:
+        """Extended XYZ for exactly the frames currently drawn.
+
+        Alignment transforms are baked into the copied coordinates so a
+        pasted multi-frame XYZ reproduces the view's geometry.  Each source
+        molecule's original XYZ comment remains its frame comment.
+        """
+        chunks = []
+        for i in self.structures.drawn_indices():
+            entry = self.structures[i]
+            source = entry.molecule
+            copied = Molecule(
+                symbols=list(source.symbols),
+                positions=entry.transform.apply(source.positions),
+                name=source.name,
+            )
+            chunks.append(xyz_parser.dumps(copied))
+        return "".join(chunks)
+
+    def _copy_current_xyz(self) -> None:
+        kitty.write_bytes(
+            kitty.clipboard_set_text(self._current_xyz_text()), self.fd_out)
+        self._msg = "current XYZ copied"
+
     def _draw_list(self) -> bytes:
         """Render the structure-list strip (design §4.1): ANSI text written
         straight into terminal cells, the same technique as the periodic-
@@ -1454,6 +1502,7 @@ class Viewer:
         out += data
         if self._list_w:
             out += self._draw_list()
+        out += self._draw_copy_controls()
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
@@ -2339,6 +2388,10 @@ class Viewer:
             if isinstance(ev, _input.MouseEvent):
                 if ev.action == "down":
                     col, row = self._event_cell(ev)
+                    if self._plain_span_hit(self._copy_xyz_span, col, row):
+                        self._copy_current_xyz()
+                        changed = True
+                        continue
                     # The list zone is checked BEFORE the status zone: the
                     # strip's footer rows can land inside the status zone's
                     # bottom-of-screen margin on a short terminal, and a

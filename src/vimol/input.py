@@ -169,6 +169,22 @@ class InputDecoder:
         if len(self._buf) == 1 and self._buf[0] == 0x1B:
             self._buf.clear()
             return [KeyEvent("escape")]
+        if len(self._buf) >= 2 and self._buf[0] == 0x1B and self._buf[1] == ord("]"):
+            # An OSC that is still unterminated once the terminal has gone
+            # quiet is never going to terminate: Alt+] sends a bare ESC ],
+            # and replies do get truncated. Holding it would swallow every
+            # keystroke behind it, q included, with no way out but SIGKILL.
+            # Drop the introducer and re-read the rest as ordinary input.
+            del self._buf[:2]
+            events: List[Event] = []
+            while self._buf:
+                ev, consumed = self._parse_one()
+                if consumed == 0:
+                    break
+                if ev is not None:
+                    events.append(ev)
+                del self._buf[:consumed]
+            return events
         return []
 
     # -- internals --------------------------------------------------------
@@ -180,6 +196,22 @@ class InputDecoder:
         # escape sequence
         if len(b) < 2:
             return None, 0  # wait; flush() handles a lingering lone ESC
+        if b[1] == ord("]"):  # OSC terminal reply (clipboard, color, title...)
+            # OSC ends in BEL or ST (ESC backslash), and may be split across
+            # arbitrary reads.  It is terminal control traffic, never user
+            # keystrokes; hold an incomplete packet and consume a complete
+            # one without emitting the disastrous Alt+] + text key stream.
+            k = 2
+            while k < len(b):
+                if b[k] == 0x07:
+                    return None, k + 1
+                if b[k] == 0x1B:
+                    if k + 1 >= len(b):
+                        return None, 0
+                    if b[k + 1] == ord("\\"):
+                        return None, k + 2
+                k += 1
+            return None, 0
         if b[1] == ord("["):
             return self._parse_csi()
         if b[1] == ord("O"):  # SS3 (application arrows)
