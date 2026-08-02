@@ -1635,7 +1635,9 @@ def test_viewer_list_single_structure_files_get_overlay_sections(tmp_path):
         text = v._draw_list().decode("utf-8", "replace")
         assert text.count("methane.xyz") == 1 and text.count("water.xyz") == 1
         assert text.count("frame 1") == 2
-        assert text.count("ALL") == 2
+        # One per file, plus the global ALL on the "STRUCTURES N" header
+        # (design VIM-28).
+        assert text.count("ALL") == 3
         assert "/data/" not in text               # basenames only
         assert len(v._list_row_spans) == 2
         rows = v._list_display_rows()
@@ -1817,6 +1819,282 @@ def test_viewer_list_group_all_button_fills_then_clears_to_main(tmp_path):
         assert v.structures.drawn_indices() == [0]
         assert v.structures.overlay is True
         assert "main frame only" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_group_all_button_is_right_aligned_regardless_of_filename_length(tmp_path):
+    """The ALL badge sits flush against the strip's right edge (design
+    VIM-27): a short and a long filename must land their buttons in exactly
+    the same column instead of the button trailing right after the name."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="a.xyz", path="/data/a.xyz")
+    sset.append(mol, label="a-much-longer-filename-here.xyz",
+                path="/data/a-much-longer-filename-here.xyz")
+    fd = os.open(str(tmp_path / "all-align.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+        assert len(v._list_group_all_spans) == 2
+        cols = {c0 for _row, c0, _c1, _first, _end in v._list_group_all_spans}
+        assert len(cols) == 1                     # same start column both times
+        # The per-file × (design VIM-32) sits flush against the strip's
+        # right edge; the ALL button ends exactly where the × begins.
+        assert len(v._list_group_remove_spans) == 2
+        x_cols = {c0 for _row, c0, _c1, _first, _end in v._list_group_remove_spans}
+        assert len(x_cols) == 1
+        _row, _c0, x_c1, _first, _end = v._list_group_remove_spans[0]
+        assert x_c1 == v._list_w
+        _row, _c0, all_c1, _first, _end = v._list_group_all_spans[0]
+        assert all_c1 == next(iter(x_cols))
+    finally:
+        os.close(fd)
+
+
+def test_global_all_button_fills_then_clears_every_file(tmp_path):
+    """The global ALL (design VIM-28) reuses the per-file fill/clear logic
+    over the whole set: it must actually flip StructureSet.overlay/marked
+    (not just repaint), and clearing always retains the main frame."""
+    from vimol.input import MouseEvent
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="a.xyz", path="/d/a.xyz")
+    sset.append(mol, label="b.xyz", path="/d/b.xyz")
+    sset.append(mol, label="c.xyz", path="/d/c.xyz")
+    fd = os.open(str(tmp_path / "global-all.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+        assert v._global_all_span is not None
+        row, c0, c1 = v._global_all_span
+        assert row == 0
+
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert [e.marked for e in v.structures] == [True, True, True]
+        assert v.structures.overlay is True
+        assert "every structure" in v._msg
+
+        v._draw_list()
+        row, c0, c1 = v._global_all_span
+        click = MouseEvent("down", float((c0 + c1) // 2), float(row), button=0)
+        assert v._dispatch([click]) is True
+        assert [e.marked for e in v.structures] == [True, False, False]
+        assert "main frame only" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_global_all_button_has_no_remove_control(tmp_path):
+    """The × only ever belongs to a single removable file (design VIM-32) --
+    the global ALL on row 0 must never register one."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="a.xyz", path="/d/a.xyz")
+    sset.append(mol, label="b.xyz", path="/d/b.xyz")
+    fd = os.open(str(tmp_path / "global-all-no-x.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+        assert all(row != 0 for row, _c0, _c1, _first, _end
+                  in v._list_group_remove_spans)
+    finally:
+        os.close(fd)
+
+
+def test_global_all_button_yields_to_the_scroll_marker_when_narrow(tmp_path):
+    """The scroll marker is the more load-bearing affordance (design §4.1):
+    on a strip too narrow for both, the global ALL button simply doesn't
+    render rather than crowding the marker out."""
+    v, fd = _traj_viewer(tmp_path, n=60, fd_name="global-all-narrow.bin")
+    try:
+        v._list_w = 18   # _LIST_W_MIN -- the narrowest the strip ever gets
+        head = v._draw_list().decode("utf-8", "replace").split("\x1b[2;1H")[0]
+        assert "↓" in head
+        assert v._global_all_span is None
+    finally:
+        os.close(fd)
+
+
+def _click_group_remove(v, first: int):
+    """Click the × of the file group starting at structure index *first*."""
+    row, c0, c1, _first, _end = next(
+        span for span in v._list_group_remove_spans if span[3] == first)
+    from vimol.input import MouseEvent
+    return v._dispatch([MouseEvent(
+        "down", float((c0 + c1) // 2), float(row), button=0)])
+
+
+def test_group_remove_x_deletes_all_frames_of_that_file(tmp_path):
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    for i in range(3):
+        sset.append(mol, label=f"a.xyz#{i + 1}", path="/d/a.xyz")
+    sset.append(mol, label="b.xyz", path="/d/b.xyz")
+    fd = os.open(str(tmp_path / "remove-file.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._draw_list()
+
+        assert _click_group_remove(v, 0) is True
+        assert len(v.structures) == 1
+        assert v.structures[0].label == "b.xyz"
+        assert v.structures.active_index == 0
+        assert "a.xyz" in v._msg and "removed" in v._msg
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_reindexes_rmsd_columns_across_the_gap(tmp_path):
+    """Both RMSD column kinds store absolute entry indices. Removing a file
+    that sits before a column's reference must shift it down, not leave it
+    pointing at whatever slid into the old slot."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn, _SubsetRMSDColumn
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="doomed1", path="/d/doomed.xyz")
+    sset.append(mol, label="doomed2", path="/d/doomed.xyz")
+    sset.append(mol, label="ref", path="/d/ref.xyz")
+    sset.append(mol, label="other", path="/d/other.xyz")
+    fd = os.open(str(tmp_path / "reindex.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=2, reference_revision=0,
+            values=[None, None, 0.0, 0.4]))
+        v._rmsd_columns.append(_SubsetRMSDColumn(
+            select_id=1, reference_index=2, reference_revision=0,
+            indices=(0,), labels=("C0",), values=[None, None, 0.0, 0.5]))
+        v._draw_list()
+
+        assert _click_group_remove(v, 0) is True     # deletes doomed1+doomed2
+        assert [e.label for e in v.structures] == ["ref", "other"]
+
+        full = v._full_rmsd_columns[0]
+        assert full.reference_index == 0
+        assert full.values == [0.0, 0.4]
+        subset = v._rmsd_columns[0]
+        assert subset.reference_index == 0
+        assert subset.values == [0.0, 0.5]
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_drops_rmsd_column_whose_reference_was_removed(tmp_path):
+    """A column anchored on the file being removed no longer means anything
+    -- it must be dropped, not linger with a reference index into thin air."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="ref", path="/d/ref.xyz")
+    sset.append(mol, label="other", path="/d/other.xyz")
+    fd = os.open(str(tmp_path / "drop-column.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd)
+        v._update_geometry()
+        v._list_w = 28
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.4]))
+        v._active_subset_id = None
+        v._draw_list()
+
+        assert _click_group_remove(v, 0) is True     # removes "ref" itself
+        assert v._full_rmsd_columns == []
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_unrelated_file_keeps_active_editor_state(tmp_path):
+    """Removing a file that is not the active one must not discard the
+    active file's dirty flag or undo history -- refitting the camera and
+    resetting editor state is only for when the active structure itself
+    changes identity."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer
+
+    sset = StructureSet()
+    mol = vimol.load(os.path.join(EX, "methane.xyz"))
+    sset.append(mol, label="active.xyz", path="/d/active.xyz")
+    sset.append(mol, label="other.xyz", path="/d/other.xyz")
+    fd = os.open(str(tmp_path / "unrelated-remove.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(mol, structures=sset, fd_out=fd, editable=True)
+        v._update_geometry()
+        v._list_w = 28
+        v.widget.dirty = True
+        v.widget._undo_stack.append(("marker",))
+        v._draw_list()
+
+        assert _click_group_remove(v, 1) is True     # removes "other.xyz"
+        assert len(v.structures) == 1
+        assert v.widget.dirty is True
+        assert v.widget._undo_stack == [("marker",)]
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_last_file_exits_without_prompt_when_clean(tmp_path):
+    """A single-structure viewer never shows the strip at all (len <= 1), so
+    the only way to reach "the last file" through the × is a lone file that
+    still has 2+ frames -- removing its whole group empties the pane."""
+    v, fd = _traj_viewer(tmp_path, n=3, fd_name="last-file-clean.bin")
+    try:
+        v._running = True
+        v._list_w = 28
+        v._draw_list()
+
+        _click_group_remove(v, 0)
+        assert v._running is False
+        assert v._mode != "quit_confirm"
+    finally:
+        os.close(fd)
+
+
+def test_group_remove_last_file_prompts_when_dirty(tmp_path):
+    """Removing the last file with unsaved edits pending must ask first --
+    the same gate 'Escape' already uses -- rather than silently discarding
+    them by exiting outright."""
+    v, fd = _traj_viewer(tmp_path, n=3, fd_name="last-file-dirty.bin")
+    try:
+        # _traj_viewer builds a read-only Viewer; editing must be on for
+        # dirty/quit_confirm to mean anything.
+        v.editable = True
+        v._running = True
+        v._list_w = 28
+        v.widget.dirty = True
+        v._draw_list()
+
+        _click_group_remove(v, 0)
+        assert v._mode == "quit_confirm"
+        assert v._running is True             # still alive, waiting for y/n/Esc
     finally:
         os.close(fd)
 
@@ -2131,15 +2409,15 @@ def test_collapsed_summary_uses_local_minimum_in_every_measurement_column(tmp_pa
 
         layout = v._measure_layout(v._list_w)
         assert v._list_collapsed_measure_cells(layout, 2, 4) == [
-            "2.000↓", "0.2000↓", "0.1000↓"]
+            "2.000↓", "0.20↓", "0.10↓"]
 
         v._draw_list()
         row = v._list_group_summary_spans[0][0]
         summary = _visible(_strip_rows(v)[row])
         assert "2 frames" in summary
         assert "2.000↓" in summary
-        assert "0.2000↓" in summary
-        assert "0.1000↓" in summary
+        assert "0.20↓" in summary
+        assert "0.10↓" in summary
     finally:
         os.close(fd)
 
@@ -3318,27 +3596,100 @@ def test_subset_column_disarms_when_the_reference_geometry_changes(tmp_path):
 
         assert v._selected_subset_column() is None
         assert v.widget.align_sel == []
-        assert "#select1" in v._msg
+        assert "RMSD#1" in v._msg
     finally:
         os.close(fd)
 
 
 def test_subset_column_header_marks_itself_stale_after_an_edit(tmp_path):
     """The numbers stay on screen (they were true once) but must not read as
-    current -- otherwise a stale RMSD is indistinguishable from a fresh one."""
+    current -- otherwise a stale RMSD is indistinguishable from a fresh one.
+    The stale marker rides right after the id, before the ×."""
     from vimol import editor
 
     v, fd = _overlay_viewer(tmp_path)
     try:
         v._finish_subset_alignment((0, 1, 2))
         v._list_w = 40
-        assert "⊂RMSD #select1*" not in v._draw_list().decode("utf-8", "replace")
+        v._draw_list()
+        header_cell = v._measure_layout(v._list_w)[0][0]
+        assert header_cell == "⊂RMSD#1 ×"
 
         entry = v.structures.active
         editor.delete_atom(entry.molecule, 4)
         entry.touch()
 
-        assert "⊂RMSD #select1*" in v._draw_list().decode("utf-8", "replace")
+        v._draw_list()
+        header_cell = v._measure_layout(v._list_w)[0][0]
+        assert header_cell == "⊂RMSD#1* ×"
+    finally:
+        os.close(fd)
+
+
+def test_rmsd_columns_share_one_id_sequence_and_round_to_2_decimals(tmp_path):
+    """Both column kinds render as "signRMSD#N" (design 2026-08-02): the ⊂/∀
+    sign glyph stays (it's informative at a glance), but there's no more
+    select/all word in the label -- that detail is hover-only (VIM-30).
+    select_id/full_id share one counter so a ∀RMSD and a ⊂RMSD column can
+    never be numbered alike. Values round to 2 decimals, keeping the column
+    as narrow as the sign+id/× header allows."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn, _SubsetRMSDColumn
+
+    sset = StructureSet()
+    sset.append(_measure_mol(0.0), label="a.xyz")
+    sset.append(_measure_mol(0.123456), label="b.xyz")
+    fd = os.open(str(tmp_path / "rmsd-naming.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+        v._cols, v._rows, v._list_w = 200, 30, 40
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.123456]))
+        v._rmsd_columns.append(_SubsetRMSDColumn(
+            select_id=2, reference_index=0, reference_revision=0,
+            indices=(0, 1), labels=("C0", "N1"), values=[0.0, 0.987654]))
+
+        layout = v._measure_layout(v._list_w)
+        assert [h for h, _w, _v, _r in layout] == ["∀RMSD#1 ×", "⊂RMSD#2 ×"]
+        # The reference row reads "Self", not the em-dash that means "no
+        # result here"; it is excluded from the extrema either way, so the
+        # sole remaining value is trivially both.
+        assert [cells for _h, _w, cells, _r in layout] == [
+            ["Self", "0.12↑↓"], ["Self", "0.99↑↓"]]
+        for header_cell, width, cells, _removable in layout:
+            assert width == max(len(header_cell), max(len(c) for c in cells))
+
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "∀RMSD#1 ×" in text and "⊂RMSD#2 ×" in text
+    finally:
+        os.close(fd)
+
+
+def test_rmsd_reference_row_reads_self_and_a_never_run_row_stays_a_dash(tmp_path):
+    """The whole point of "Self" (design 2026-08-02): a row that WAS the
+    reference and a row that simply has no result must not look alike. Both
+    used to render the same em-dash."""
+    from vimol.structures import StructureSet
+    from vimol.viewer import Viewer, _FullRMSDColumn
+
+    sset = StructureSet()
+    for i, dx in enumerate((0.0, 0.4, 0.8)):
+        sset.append(_measure_mol(dx), label=f"f{i}.xyz", path=f"/d/f{i}.xyz")
+    fd = os.open(str(tmp_path / "self-cell.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        v = Viewer(sset[0].molecule, structures=sset, fd_out=fd)
+        v._cols, v._rows, v._list_w = 200, 30, 40
+        # Row 1 was fitted; row 2 never was (it was not in the overlay).
+        v._full_rmsd_columns.append(_FullRMSDColumn(
+            full_id=1, reference_index=0, reference_revision=0,
+            values=[0.0, 0.4, None]))
+
+        cells = v._measure_layout(v._list_w)[0][2]
+        assert cells == ["Self", "0.40↑↓", "—"]
+
+        text = v._draw_list().decode("utf-8", "replace")
+        assert "Self" in text
     finally:
         os.close(fd)
 

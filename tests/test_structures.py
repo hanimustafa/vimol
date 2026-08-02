@@ -171,6 +171,62 @@ def test_structure_set_remove_by_label():
     assert sset.labels == ["b"]
 
 
+def test_index_after_removal_rebases_below_above_and_inside_the_range():
+    shift = StructureSet.index_after_removal
+    # remove [2, 5) from 8 entries -> 5 remain
+    assert shift(1, 2, 5, 5) == 1        # below: untouched
+    assert shift(5, 2, 5, 5) == 2        # above: slides down by the width
+    assert shift(7, 2, 5, 5) == 4
+    assert shift(3, 2, 5, 5) == 2        # inside: collapses onto `first`
+    # Removing the tail leaves nothing at `first`, so it clamps to the last
+    # survivor rather than pointing one past the end.
+    assert shift(6, 4, 8, 4) == 3
+
+
+def test_remove_range_rebases_active_index_onto_the_entry_it_named():
+    """The active index names an ENTRY, not a slot: removing a file above it
+    must leave it on the same structure, not on whatever slid into its old
+    position."""
+    sset = StructureSet()
+    for label in "abcde":
+        sset.append(_mol(), label=label)
+    sset.active_index = 4                      # "e"
+    active = sset.active
+
+    sset.remove_range(1, 3)                    # drop "b", "c"
+    assert sset.labels == ["a", "d", "e"]
+    assert sset.active is active               # still "e" ...
+    assert sset.active_index == 2              # ... at its new position
+
+
+def test_remove_range_taking_the_active_entry_falls_onto_its_successor():
+    sset = StructureSet()
+    for label in "abcd":
+        sset.append(_mol(), label=label)
+    sset.active_index = 1                      # "b", inside the removal
+    sset.remove_range(1, 3)                    # drop "b", "c"
+    assert sset.labels == ["a", "d"]
+    assert sset.active.label == "d"            # what slid into slot 1
+
+
+def test_remove_range_keeps_the_solo_snapshot_aligned_with_what_survives():
+    """solo() zips _solo_restore against entries, so a snapshot left longer
+    than the rows it describes restores visibility onto the wrong ones."""
+    sset = StructureSet()
+    for label in "abcd":
+        sset.append(_mol(), label=label)
+    sset["b"].visible = False                  # the state solo must restore
+    sset.solo(3)                               # snapshot taken here
+    assert [e.visible for e in sset] == [False, False, False, True]
+
+    # Removed from the FRONT on purpose: zip() would silently truncate a
+    # stale tail, so only a leading removal exposes a snapshot that was
+    # never re-based.
+    sset.remove_range(0, 2)                    # drop "a", "b" while soloed
+    sset.unsolo()
+    assert [e.visible for e in sset] == [True, True]   # "c" and "d" both were
+
+
 def test_structure_set_marks():
     sset = StructureSet()
     sset.append(_mol(), label="a")
