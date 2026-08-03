@@ -95,7 +95,16 @@ def perceive_bonds(mol: Molecule, tolerance: float = 0.45, max_bonds_per_atom: i
 
 
 def ensure_bonds(mol: Molecule, tolerance: float = 0.45) -> Molecule:
-    """Populate mol.bonds if empty. Returns the molecule for chaining."""
-    if not mol.bonds and mol.n_atoms > 1:
-        mol.bonds = perceive_bonds(mol, tolerance=tolerance)
+    """Perceive mol.bonds once, if they have not been. Returns mol for chaining.
+
+    Cheap to call on every redraw, which is the point: perception is deferred
+    until a structure is actually drawn (see StructureSet.composite), so this
+    sits on the render path and must be a no-op the second time. It records
+    that it ran rather than inferring it from a non-empty result -- a molecule
+    with no bonds inside the cutoff is a real answer, not a missing one.
+    """
+    if mol.bonds or mol.bonds_perceived or mol.n_atoms < 2:
+        return mol
+    mol.bonds = perceive_bonds(mol, tolerance=tolerance)
+    mol.bonds_perceived = True
     return mol

@@ -64,6 +64,15 @@ class Molecule:
     atom_names: List[str] = field(default_factory=list)
     atom_is_hetatm: List[bool] = field(default_factory=list)
     atom_keys: List[str] = field(default_factory=list)
+    # True once distance-based perception has run for the current geometry.
+    # A non-empty `bonds` already implies that, so this exists purely for the
+    # molecules that legitimately have none within the cutoff -- noble gases,
+    # isolated ions, a fragmented frame. Perception is deferred to draw time
+    # (see StructureSet.composite), so without this they would be re-perceived
+    # on every redraw, forever, to always produce the same empty list.
+    # Deliberately outside identity and repr: whether a molecule happens to
+    # have been drawn yet says nothing about what molecule it is.
+    bonds_perceived: bool = field(default=False, compare=False, repr=False)
 
     # -- construction -----------------------------------------------------
     def add_atom(self, symbol: str, x: float, y: float, z: float) -> int:

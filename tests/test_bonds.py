@@ -122,3 +122,86 @@ def test_ensure_bonds_does_not_overwrite_existing():
     mol.bonds = [(0, 1, 1)]
     assert ensure_bonds(mol).bonds == [(0, 1, 1)]
 
+
+# -- deferred perception (bonds are computed when a structure is drawn) -----
+def _set_of(name, n=3):
+    from vimol.structures import StructureSet
+    sset = StructureSet()
+    for i in range(n):
+        sset.append(_load(name), label=f"f{i}")
+    return sset
+
+
+def test_loading_does_not_perceive_bonds():
+    """Appending a frame must cost nothing: that is the whole point."""
+    sset = _set_of("c60")
+    assert all(not e.molecule.bonds for e in sset.entries)
+    assert all(not e.molecule.bonds_perceived for e in sset.entries)
+
+
+def test_drawing_perceives_only_what_is_drawn():
+    sset = _set_of("c60")
+    sset.composite()                       # draws the active entry only
+    assert sset.entries[0].molecule.bonds
+    assert not sset.entries[1].molecule.bonds
+    assert not sset.entries[2].molecule.bonds
+
+
+def test_selecting_a_frame_perceives_it_on_the_spot():
+    """The 'user selects a frame we have not bonded yet' case."""
+    sset = _set_of("c60")
+    sset.composite()
+    sset.set_active(2)
+    sset.invalidate()
+    sset.composite()
+    assert sset.entries[2].molecule.bonds
+
+
+def test_overlay_perceives_every_marked_frame():
+    sset = _set_of("c60")
+    sset.overlay = True
+    for e in sset.entries:
+        e.marked = True
+    sset.composite()
+    assert all(e.molecule.bonds for e in sset.entries)
+
+
+def test_auto_bonds_off_never_perceives():
+    """--no-bonds must survive the move to draw-time perception."""
+    sset = _set_of("c60")
+    sset.auto_bonds = False
+    sset.composite()
+    assert not sset.entries[0].molecule.bonds
+
+
+def test_bond_tolerance_is_honoured_at_draw_time():
+    """The CLI's --bond-tolerance has to reach the deferred call."""
+    tight, loose = _set_of("hydrocarbon", 1), _set_of("hydrocarbon", 1)
+    tight.bond_tolerance = -0.4                 # nothing is close enough
+    loose.bond_tolerance = 0.45
+    tight.composite()
+    loose.composite()
+    assert len(tight.entries[0].molecule.bonds) < len(loose.entries[0].molecule.bonds)
+
+
+def test_bondless_molecule_is_perceived_only_once(monkeypatch):
+    """A molecule with no bonds in range must not re-perceive every redraw."""
+    from vimol import bonds as bonds_mod
+    from vimol.molecule import Molecule
+    from vimol.structures import StructureSet
+
+    far = Molecule()                            # two atoms far past any cutoff
+    far.add_atom("He", 0.0, 0.0, 0.0)
+    far.add_atom("He", 40.0, 0.0, 0.0)
+    sset = StructureSet()
+    sset.append(far, label="far")
+
+    calls = []
+    real = bonds_mod.perceive_bonds
+    monkeypatch.setattr(bonds_mod, "perceive_bonds",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    for _ in range(5):
+        sset.invalidate()
+        sset.composite()
+    assert far.bonds == []
+    assert len(calls) == 1, f"re-perceived {len(calls)} times"

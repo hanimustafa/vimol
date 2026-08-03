@@ -3277,6 +3277,10 @@ def test_build_structure_set_respects_no_bonds(tmp_path):
     a = tmp_path / "a.xyz"
     a.write_text("2\nh2\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
     sset = vimol_app._build_structure_set([str(a)], no_bonds=True, tolerance=0.45)
+    # Draw it before asserting: perception is deferred to composite(), so a
+    # freshly loaded molecule has no bonds whether --no-bonds worked or not,
+    # and this would pass without testing the flag at all.
+    sset.composite()
     assert len(sset[0].molecule.bonds) == 0
 
 
@@ -3284,6 +3288,9 @@ def test_build_structure_set_perceives_bonds_by_default(tmp_path):
     a = tmp_path / "a.xyz"
     a.write_text("2\nh2\nH 0.0 0.0 0.0\nH 0.0 0.0 0.74\n")
     sset = vimol_app._build_structure_set([str(a)], no_bonds=False, tolerance=0.45)
+    # Loading is deliberately cheap now -- the bonds arrive when it is drawn.
+    assert len(sset[0].molecule.bonds) == 0
+    sset.composite()
     assert len(sset[0].molecule.bonds) == 1
 
 

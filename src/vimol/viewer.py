@@ -21,7 +21,6 @@ from typing import List, Optional, Tuple, Union
 from .molecule import Molecule
 from .render import Style
 from .widget import MoleculeWidget, REPRESENTATIONS
-from .bonds import ensure_bonds
 from .structures import StructureSet
 from . import editor
 from . import kitty
@@ -293,10 +292,11 @@ class Viewer:
             self.structures = structures
         else:
             frame_list = frames or [molecule]
-            if auto_bonds:
-                for m in frame_list:
-                    ensure_bonds(m, tolerance=bond_tolerance)
             self.structures = StructureSet()
+            # Perception is deferred to StructureSet.composite, so these carry
+            # --no-bonds/--bond-tolerance down to where it now happens.
+            self.structures.auto_bonds = auto_bonds
+            self.structures.bond_tolerance = bond_tolerance
             basename = os.path.basename(source_path) if source_path else None
             multi = len(frame_list) > 1
             for i, m in enumerate(frame_list):
@@ -3266,9 +3266,9 @@ class Viewer:
             molecules = load_all(path)
             if not molecules:
                 raise ValueError("no molecules parsed")
-            if self._auto_bonds:
-                for molecule in molecules:
-                    ensure_bonds(molecule, tolerance=self._bond_tolerance)
+            # Not bonded here: an added trajectory gets perceived frame by
+            # frame as it is drawn (see StructureSet.composite), so adding a
+            # large file mid-session stays as quick as adding a small one.
         except Exception as exc:  # parser and filesystem errors belong in the status bar
             self._msg = f"could not add {display_name}: {exc}"
             return False

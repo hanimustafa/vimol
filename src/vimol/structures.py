@@ -11,6 +11,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from .molecule import Molecule
+from .bonds import ensure_bonds
 from . import editor
 
 
@@ -134,6 +135,11 @@ class StructureSet:
         self.active_index: int = 0
         self.overlay: bool = False   # False: draw active only. True: draw the marked set.
         self._solo_restore: Optional[List[bool]] = None
+        # Bond perception is deferred to composite(), so the settings that
+        # govern it have to live where the drawing happens rather than at
+        # load time. auto_bonds False is --no-bonds: never perceive at all.
+        self.auto_bonds: bool = True
+        self.bond_tolerance: float = 0.45
         # composite() caching -- see "Caching" in design §3. `_topology_cache`
         # holds (key, dict) for symbols/bonds/base_colors/flat, keyed on
         # everything EXCEPT transform (a transform-only change, e.g. a camera
@@ -508,6 +514,23 @@ class StructureSet:
             return Composite(molecule=Molecule(), offsets=np.array([0]),
                              sources=np.array([], dtype=int),
                              base_colors=np.zeros((0, 3)), flat=np.zeros((0,), dtype=bool))
+
+        # Perceive bonds for exactly what is about to be drawn, and no more.
+        # Loading a trajectory used to bond every frame up front, which for an
+        # 803-frame ensemble was seconds of startup spent on frames nobody had
+        # asked to see yet; one frame costs a couple of milliseconds, so doing
+        # it here -- on selection, on marking, on any change of the drawn set
+        # -- is invisible and bounded by what is on screen.
+        #
+        # This must stay ABOVE the caches and the single-entry fast path
+        # below: that path returns the entry's Molecule directly, and the
+        # renderers treat an empty bond list as "this molecule has no bonds"
+        # rather than "not computed yet" (see gl_adapter/render), so a frame
+        # that slipped past here would quietly draw as loose atoms.
+        if self.auto_bonds:
+            for i in drawn:
+                ensure_bonds(self.entries[i].molecule,
+                             tolerance=self.bond_tolerance)
 
         full_key = self._full_key(drawn)
         if self._composite_cache is not None and self._composite_cache[0] == full_key:

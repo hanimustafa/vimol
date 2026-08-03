@@ -14,7 +14,6 @@ from collections import Counter
 from typing import List, Optional, Tuple
 
 from .parsers import load_all, SUPPORTED_EXTENSIONS
-from .bonds import ensure_bonds
 from .render import Style
 from .structures import StructureSet
 from . import kitty
@@ -165,6 +164,11 @@ def _build_structure_set(paths: List[str], no_bonds: bool, tolerance: float) -> 
     docs/superpowers/specs/2026-07-30-multi-file-cli-design.md.
     """
     sset = StructureSet()
+    # Bonds are perceived per drawn frame by StructureSet.composite, not here:
+    # only each file's first model is on screen initially, and bonding a whole
+    # ensemble up front cost seconds for frames the user may never open.
+    sset.auto_bonds = not no_bonds
+    sset.bond_tolerance = tolerance
     basenames = [os.path.basename(p) for p in paths]
     dupe_counts = Counter(basenames)
     seen: Counter = Counter()
@@ -188,8 +192,6 @@ def _build_structure_set(paths: List[str], no_bonds: bool, tolerance: float) -> 
             stem = base
         multi = len(mols) > 1
         for i, m in enumerate(mols):
-            if not no_bonds:
-                ensure_bonds(m, tolerance=tolerance)
             label = f"{stem}#{i + 1}" if multi else stem
             entry = sset.append(m, label=label, path=path)
             if i == 0:
@@ -232,10 +234,8 @@ def main(argv: List[str] | None = None) -> int:
             print("error: no molecules parsed", file=sys.stderr)
             return 3
 
-        for m in mols:
-            if not args.no_bonds:
-                ensure_bonds(m, tolerance=args.bond_tolerance)
-
+        # No bonding pass here either -- the Viewer's StructureSet perceives
+        # each frame as it is drawn (see StructureSet.composite).
         idx = max(0, min(args.frame, len(mols) - 1))
         mol = mols[idx]
         frames, structures, source_path = mols, None, path
