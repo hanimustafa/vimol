@@ -23,10 +23,23 @@ STROKE = 0.085
 
 Polyline = List[Tuple[float, float]]
 
-_O: Polyline = [(0.50, 0.02), (0.86, 0.20), (0.98, 0.50), (0.86, 0.80),
-                (0.50, 0.98), (0.14, 0.80), (0.02, 0.50), (0.14, 0.20), (0.50, 0.02)]
-_C: Polyline = [(0.94, 0.22), (0.72, 0.04), (0.40, 0.03), (0.10, 0.22),
-                (0.02, 0.50), (0.10, 0.78), (0.40, 0.97), (0.72, 0.96), (0.94, 0.78)]
+def _arc(start: float, end: float, steps: int = 18, rx: float = 0.48,
+         ry: float = 0.48, cx: float = 0.50, cy: float = 0.50) -> "Polyline":
+    """A run of an ellipse, in the unit box. Angles in turns, 0 at three
+    o'clock, running clockwise in the y-down box these glyphs live in.
+
+    Round letters are generated rather than hand-listed: at eight or nine
+    points an O reads as a polygon once a tablet fills a quarter of the frame,
+    and the fix is more points, not better-chosen ones.
+    """
+    import math
+    t = [start + (end - start) * i / (steps - 1) for i in range(steps)]
+    return [(cx + rx * math.cos(2 * math.pi * a),
+             cy + ry * math.sin(2 * math.pi * a)) for a in t]
+
+
+_O: Polyline = _arc(0.0, 1.0)
+_C: Polyline = _arc(0.08, 0.92)
 _P_BOWL: Polyline = [(0.14, 0.02), (0.60, 0.02), (0.88, 0.16), (0.88, 0.38),
                      (0.60, 0.52), (0.14, 0.52)]
 
@@ -38,7 +51,9 @@ _STROKES: Dict[str, List[Polyline]] = {
     "E": [[(0.90, 0.02), (0.13, 0.02), (0.13, 0.98), (0.90, 0.98)],
           [(0.13, 0.50), (0.74, 0.50)]],
     "F": [[(0.90, 0.02), (0.13, 0.02), (0.13, 0.98)], [(0.13, 0.50), (0.74, 0.50)]],
-    "G": [_C + [(0.94, 0.56), (0.56, 0.56)]],
+    # The bar hangs off the lower end of the arc, so the arc is run in the
+    # direction that finishes there.
+    "G": [_arc(0.92, 0.08) + [(0.92, 0.55), (0.56, 0.55)]],
     "H": [[(0.13, 0.02), (0.13, 0.98)], [(0.87, 0.02), (0.87, 0.98)],
           [(0.13, 0.50), (0.87, 0.50)]],
     "I": [[(0.50, 0.02), (0.50, 0.98)], [(0.20, 0.02), (0.80, 0.02)],
@@ -62,7 +77,55 @@ _STROKES: Dict[str, List[Polyline]] = {
     "W": [[(0.02, 0.02), (0.26, 0.98), (0.50, 0.34), (0.74, 0.98), (0.98, 0.02)]],
     "X": [[(0.08, 0.02), (0.92, 0.98)], [(0.92, 0.02), (0.08, 0.98)]],
     "Y": [[(0.06, 0.02), (0.50, 0.50), (0.94, 0.02)], [(0.50, 0.50), (0.50, 0.98)]],
+    # Digits, for the residue number that trails the code.
+    "0": [_arc(0.0, 1.0, rx=0.40)],
+    "1": [[(0.24, 0.20), (0.50, 0.02), (0.50, 0.98)], [(0.24, 0.98), (0.78, 0.98)]],
+    "2": [[(0.12, 0.22), (0.32, 0.03), (0.66, 0.04), (0.86, 0.24), (0.82, 0.46),
+           (0.14, 0.98), (0.90, 0.98)]],
+    "3": [[(0.12, 0.16), (0.38, 0.02), (0.70, 0.05), (0.84, 0.25), (0.60, 0.46)],
+          [(0.60, 0.46), (0.86, 0.64), (0.74, 0.92), (0.40, 0.98), (0.12, 0.86)]],
+    "4": [[(0.70, 0.98), (0.70, 0.02), (0.10, 0.70), (0.92, 0.70)]],
+    "5": [[(0.84, 0.03), (0.24, 0.03), (0.18, 0.42), (0.46, 0.34), (0.76, 0.46),
+           (0.86, 0.70), (0.70, 0.93), (0.36, 0.98), (0.12, 0.86)]],
+    "6": [_arc(0.0, 1.0, steps=13, rx=0.34, ry=0.27, cy=0.71),
+          [(0.16, 0.71), (0.28, 0.24), (0.54, 0.03), (0.82, 0.03)]],
+    "7": [[(0.08, 0.03), (0.90, 0.03), (0.38, 0.98)]],
+    "8": [_arc(0.0, 1.0, steps=13, rx=0.30, ry=0.24, cy=0.26),
+          _arc(0.0, 1.0, steps=13, rx=0.36, ry=0.26, cy=0.74)],
+    "9": [_arc(0.0, 1.0, steps=13, rx=0.34, ry=0.27, cy=0.29),
+          [(0.84, 0.29), (0.72, 0.76), (0.46, 0.97), (0.18, 0.97)]],
 }
+
+# The residue number rides beside the one-letter code, smaller and sharing its
+# baseline, the way a subscript does.
+NUMBER_SCALE = 0.60
+NUMBER_GAP = 0.09           # cap heights between the code and the number
+
+
+def layout(code: str, number: str, size: float):
+    """Place a residue's code and number: ``(char, dx, dy, height)`` each.
+
+    ``dx``/``dy`` are offsets from the centre of the whole run, in world units,
+    with ``dy`` pointing the same way the glyph's own down does. Both renderers
+    lay a label out through this, so the terminal and the GPU put the same text
+    in the same place.
+    """
+    number = "".join(c for c in str(number) if c.isdigit())
+    small = size * NUMBER_SCALE
+    code_w = size * ASPECT
+    digit_w = small * ASPECT
+    gap = size * NUMBER_GAP if number else 0.0
+    total = code_w + gap + digit_w * len(number)
+    x = -total * 0.5
+    out = [(code[:1] or "X", x + code_w * 0.5, 0.0, size)]
+    x += code_w + gap
+    # Sharing the code's baseline means the smaller glyph sits lower by half
+    # the difference in height.
+    drop = (size - small) * 0.5
+    for digit in number:
+        out.append((digit, x + digit_w * 0.5, drop, small))
+        x += digit_w
+    return out
 
 # (S, 2, 2) arrays of segment endpoints, x already scaled into cap-height units
 # so a distance in this space is the same in both directions.

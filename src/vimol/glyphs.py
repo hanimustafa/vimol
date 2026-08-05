@@ -26,8 +26,8 @@ import numpy as np
 from . import glyph_mesh
 from .bonds import perceive_bonds
 from .molecule import Molecule
-from .residues import (RING_ATOMS, Residue, chain_runs, hbond_role,
-                       protein_residues, residue_class)
+from .residues import (RING_ATOMS, Residue, chain_runs, protein_residues,
+                       residue_class)
 
 
 # -- tunables ------------------------------------------------------------
@@ -35,15 +35,12 @@ RIBBON_WIDTH = 1.6          # angstrom, full width across the ribbon
 RIBBON_THICKNESS = 0.26     # angstrom, full thickness
 RIBBON_SAMPLES = 8          # spline samples per residue
 PLATE_INFLATE = 0.30        # angstrom the ring hull is pushed out by
-PLATE_THICKNESS = 0.22      # angstrom, full thickness
+PLATE_THICKNESS = 0.34      # angstrom, full thickness
 BLOB_RADIUS = 0.80          # angstrom; over half a 1.5 A bond, so bonded atoms'
                             # spheres merge -- but only just, so a two-carbon
                             # side chain still reads as two lobes, not a ball
 GLYCINE_RADIUS = 0.55       # glycine has no side chain, so its marker is small
-LETTER_SIZE = 1.0           # angstrom, cap height of the one-letter code
-LINK_RADIUS = 0.05
-LINK_MAX_DISTANCE = 3.35    # angstrom, N···O
-LINK_MIN_SEPARATION = 2     # residues apart, so i/i+1 neighbours don't count
+LETTER_SIZE = 0.78          # angstrom, cap height of the one-letter code
 BEAD_RADIUS = 0.22          # the Cα and Cβ beads the link runs through
 ROD_RADIUS = 0.075
 JOIN_OVERLAP = 0.04     # angstrom each ribbon segment runs past its joint
@@ -58,7 +55,6 @@ class Palette:
     plate: Tuple[float, float, float]
     volume: Tuple[float, float, float]
     ink: Tuple[float, float, float]
-    link: Tuple[float, float, float]
     # Cα/Cβ beads and the rods between them, keyed by residue class, so a
     # glance separates the acidic from the aromatic from the merely greasy.
     beads: Dict[str, Tuple[float, float, float]]
@@ -68,22 +64,28 @@ class Palette:
 # light; only the ribbon flips with the background. Atoms drawn as themselves
 # keep their element colours and are not in here.
 LIGHT = Palette(
-    ribbon=(0.17, 0.17, 0.19), plate=(0.70, 0.50, 0.16),
-    volume=(0.90, 0.87, 0.80), ink=(0.09, 0.09, 0.11),
-    link=(0.80, 0.66, 0.42),
-    # Light enough to read against the near-black ribbon they sit on, which is
-    # where every Cα bead lands.
-    beads={"aromatic": (0.66, 0.48, 0.14), "acidic": (0.62, 0.24, 0.20),
-           "basic": (0.30, 0.42, 0.70), "polar": (0.26, 0.50, 0.42),
-           "hydrophobic": (0.50, 0.44, 0.36)},
+    # Warm graphite rather than black: it still reads as the one dark mass in
+    # the picture, but its shading has somewhere to go.
+    ribbon=(0.16, 0.16, 0.18),
+    # Brass and bone. The two solids are the subject, so they take the only
+    # two saturated-ish values in the scheme and sit a clear step apart.
+    plate=(0.74, 0.54, 0.23), volume=(0.89, 0.86, 0.79),
+    ink=(0.11, 0.11, 0.13),
+    # The beads and rods are fittings, not subject. They share one lightness so
+    # they read as a family, and stay muted enough not to compete with the
+    # tablets -- but light enough to be visible where they land, which is on
+    # the graphite ribbon.
+    beads={"aromatic": (0.56, 0.43, 0.22), "acidic": (0.58, 0.31, 0.27),
+           "basic": (0.33, 0.44, 0.63), "polar": (0.29, 0.49, 0.45),
+           "hydrophobic": (0.45, 0.42, 0.38)},
 )
 DARK = Palette(
-    ribbon=(0.80, 0.82, 0.87), plate=(0.85, 0.62, 0.22),
-    volume=(0.88, 0.86, 0.80), ink=(0.09, 0.09, 0.11),
-    link=(0.88, 0.72, 0.42),
-    beads={"aromatic": (0.85, 0.64, 0.25), "acidic": (0.78, 0.32, 0.28),
-           "basic": (0.42, 0.58, 0.92), "polar": (0.36, 0.68, 0.58),
-           "hydrophobic": (0.66, 0.60, 0.52)},
+    ribbon=(0.78, 0.80, 0.84),
+    plate=(0.82, 0.60, 0.26), volume=(0.87, 0.84, 0.77),
+    ink=(0.11, 0.11, 0.13),
+    beads={"aromatic": (0.80, 0.62, 0.32), "acidic": (0.80, 0.44, 0.38),
+           "basic": (0.48, 0.62, 0.88), "polar": (0.40, 0.68, 0.62),
+           "hydrophobic": (0.66, 0.62, 0.56)},
 )
 
 
@@ -121,6 +123,7 @@ class GlyphScene:
     label_color: np.ndarray        # (L, 3)
     label_flat: np.ndarray         # (L,) bool
     label_char: List[str]
+    label_number: List[str]        # residue number, drawn small beside the code
     # True where the letter is already printed onto a tablet face in `mesh`.
     # The raycaster billboards every label; the GPU billboards only these.
     label_on_tablet: np.ndarray    # (L,) bool
@@ -218,14 +221,15 @@ class _Builder:
         self.poly_smooth_span.append(smooth[2] if smooth is not None else 1.0)
         self.poly_smooth_face.append(SMOOTH_FACE if smooth is not None else -1)
 
-    def label(self, center, char, size, bias, color, flat: bool = False,
+    def label(self, center, char, number, size, bias, color, flat: bool = False,
               on_tablet: bool = False, normal=None, offset: float = 0.0,
               surface=None) -> None:
         self.labels.append((np.asarray(center, float), char, float(size), float(bias),
                             color, flat, on_tablet,
                             np.zeros(3) if normal is None else np.asarray(normal, float),
                             float(offset),
-                            np.asarray(color if surface is None else surface, float)))
+                            np.asarray(color if surface is None else surface, float),
+                            str(number)))
 
     def freeze(self) -> GlyphScene:
         def stack(rows, width, dtype=float):
@@ -268,6 +272,7 @@ class _Builder:
             label_color=stack([l[4] for l in self.labels], 3),
             label_flat=stack([l[5] for l in self.labels], 0, bool),
             label_char=[l[1] for l in self.labels],
+            label_number=[l[10] for l in self.labels],
             label_on_tablet=np.array([l[6] for l in self.labels], bool),
             label_normal=stack([l[7] for l in self.labels], 3),
             label_offset=stack([l[8] for l in self.labels], 0),
@@ -687,36 +692,6 @@ def _add_link_to_glyph(builder: _Builder, res: Residue, positions: np.ndarray,
             builder.cylinder(start, end, ROD_RADIUS, color, flat=flat)
 
 
-def _add_links(builder: _Builder, residues: Sequence[Residue],
-               positions: np.ndarray, colors: np.ndarray, flat: np.ndarray) -> None:
-    """Hairlines between backbone amides that are close enough to be bonded.
-
-    Distance alone, on the heavy atoms -- the files this draws usually have no
-    hydrogens, so there is no N–H···O angle to test. Neighbouring residues are
-    excluded because their backbone N and O are within range no matter what
-    the structure is doing.
-    """
-    donors = [(k, res.atoms["N"]) for k, res in enumerate(residues)
-              if "N" in res.atoms and hbond_role(res.name, "N") == "donor"]
-    acceptors = [(k, res.atoms["O"]) for k, res in enumerate(residues)
-                 if "O" in res.atoms]
-    if not donors or not acceptors:
-        return
-    d_idx = np.array([a for _k, a in donors])
-    a_idx = np.array([a for _k, a in acceptors])
-    d_res = np.array([k for k, _a in donors])
-    a_res = np.array([k for k, _a in acceptors])
-    dist = np.linalg.norm(positions[d_idx][:, None, :] - positions[a_idx][None, :, :], axis=2)
-    close = (dist < LINK_MAX_DISTANCE) & (
-        np.abs(d_res[:, None] - a_res[None, :]) >= LINK_MIN_SEPARATION)
-    for i, j in zip(*np.nonzero(close)):
-        donor = d_idx[i]
-        is_flat = bool(flat[donor])
-        builder.cylinder(positions[donor], positions[a_idx[j]], LINK_RADIUS,
-                         colors[donor] if is_flat else builder.pal.link,
-                         flat=is_flat)
-
-
 # -- entry point ----------------------------------------------------------
 
 _CACHE: List[Tuple[tuple, GlyphScene]] = []
@@ -785,7 +760,8 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         # side chain both put geometry well in front of their own anchor, and
         # the letter comes out chewed into an unreadable shape. A tablet's
         # letter is printed into its faces instead, and turns with it.
-        builder.label(anchor, res.letter, size, reach + 0.05, pal.ink, is_flat,
+        builder.label(anchor, res.letter, res.key[1], size, reach + 0.05,
+                      pal.ink, is_flat,
                       on_tablet=on_tablet, normal=face,
                       offset=PLATE_THICKNESS * 0.5 + glyph_mesh.LETTER_LIFT,
                       surface=solid_color)
@@ -796,7 +772,6 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
     # silently get no bonds and no hydroxyl hydrogens.
     bonds = molecule.bonds or perceive_bonds(molecule)
     _add_atoms(builder, residues, molecule, bonds, colors, radii, flat, bond_radius)
-    _add_links(builder, residues, positions, colors, flat)
     return builder.freeze()
 
 

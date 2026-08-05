@@ -49,10 +49,17 @@ PROLINE_RING = ("N", "CA", "CB", "CG", "CD")
 RING_ATOMS: Dict[str, Tuple[str, ...]] = dict(AROMATIC_RINGS)
 RING_ATOMS["PRO"] = PROLINE_RING
 
-# Side-chain hydrogen-bonding roles. A residue's backbone N donates and its
-# backbone O accepts; those are handled separately since they apply to (almost)
-# every residue. "both" covers the hydroxyls, the histidine ring nitrogens
-# (either tautomer is plausible without hydrogens in the file) and thiols.
+# Side-chain hydrogen-bonding roles. Nothing draws from this at the moment:
+# the skin used to mark donors and acceptors with coloured nodes, then with
+# hairlines between backbone pairs, and both were dropped -- the atoms
+# themselves are drawn now, in their own element colours, which says the same
+# thing without a second vocabulary. Kept because the table is the part that
+# would be tedious to rebuild if the interactions are ever drawn again.
+#
+# A residue's backbone N donates and its backbone O accepts; those are handled
+# separately since they apply to (almost) every residue. "both" covers the
+# hydroxyls, the histidine ring nitrogens (either tautomer is plausible without
+# hydrogens in the file) and thiols.
 _SIDE_CHAIN_ROLES: Dict[str, Dict[str, str]] = {
     "ARG": {"NE": "donor", "NH1": "donor", "NH2": "donor"},
     "LYS": {"NZ": "donor"},

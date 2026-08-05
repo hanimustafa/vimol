@@ -84,7 +84,42 @@ def test_side_chain_excludes_the_backbone():
     assert names == {"CB", "OG"}
 
 
-# -- hydrogen bonding -----------------------------------------------------
+# -- labels ---------------------------------------------------------------
+
+def test_labels_carry_the_residue_number(hairpin):
+    scene = glyphs.build_scene(hairpin, "light")
+    assert scene.label_number == [str(n) for n in range(1, 13)]
+
+
+def test_a_label_lays_its_number_out_beside_its_code():
+    from vimol.glyph_font import layout
+    run = layout("Y", "12", 1.0)
+    assert [c for c, _dx, _dy, _h in run] == ["Y", "1", "2"]
+    (_c, code_x, code_y, code_h), *digits = run
+    assert code_y == 0.0 and code_h == 1.0
+    # Smaller, to the right, and dropped to share the code's baseline.
+    for _c, dx, dy, h in digits:
+        assert dx > code_x and dy > 0 and h < code_h
+    assert digits[0][1] < digits[1][1]
+
+
+def test_a_residue_with_no_number_still_lays_out():
+    from vimol.glyph_font import layout
+    assert [c for c, *_ in layout("G", "", 1.0)] == ["G"]
+
+
+def test_the_skin_no_longer_draws_hydrogen_bond_hairlines(hairpin):
+    """Dropped on request: with the backbone amides abstracted into the ribbon
+    they ran between two invisible points and read as stray tubes. The
+    donor/acceptor table stays, unused, for whenever they come back."""
+    scene = glyphs.build_scene(hairpin, "light")
+    assert len(scene.cyl_a)
+    # The hairlines were the only cylinder thinner than a rod.
+    assert scene.cyl_radius.min() >= min(glyphs.ROD_RADIUS, 0.075)
+    assert not hasattr(glyphs, "LINK_RADIUS")
+
+
+# -- residue chemistry ----------------------------------------------------
 
 def test_hbond_roles_follow_the_chemistry():
     assert residues.hbond_role("ALA", "N") == "donor"

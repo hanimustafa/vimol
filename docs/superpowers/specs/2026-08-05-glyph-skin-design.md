@@ -1,7 +1,7 @@
 # The `glyph` skin: a lettered, diagrammatic protein representation
 
 Date: 2026-08-05
-Status: implemented, then revised twice from further references. Where the build
+Status: implemented, then revised three times from further references. Where the build
 differs from the plan, this document records what was built and why; the
 revision is in "Second pass" at the end.
 
@@ -307,3 +307,39 @@ Two plumbing details worth keeping: the mesh fragment shader must write
 check uses an opaque background, so the omission would be invisible until the
 terminal; and mesh depth from `gl_Position` agrees exactly with the impostors'
 analytic `gl_FragDepth`, because the projection's third row is what both use.
+
+
+## Fourth pass
+
+**The hydrogen-bond hairlines are gone.** They joined backbone N to backbone O,
+and once the backbone amide was abstracted into the ribbon those two endpoints
+stopped being drawn — so a hairline ran between two invisible points and read as
+a stray tube rather than as a bond. The donor/acceptor table in `residues.py`
+stays, unused and marked as such: it is the part that would be tedious to
+rebuild if the interactions are ever drawn again, and the fix if they are is a
+visual that reads as annotation rather than as structure.
+
+**Tablets are thicker** (0.34 Å, from 0.22) so the chamfered rim has room to
+show, and **letters are smaller** (0.78 Å cap height) now that they carry more
+text.
+
+**Labels are the residue's code and its number**, the number at 60% of the cap
+height and sharing the code's baseline, like a subscript. Both renderers lay a
+label out through one `glyph_font.layout`, so the terminal and the GPU put the
+same text in the same place and only the rasterizing differs.
+
+**The round letters are generated from arcs** rather than hand-listed at eight
+or nine points, which is what a tablet filling a quarter of the frame needs: the
+fix for an O that reads as a polygon is more points, not better-chosen ones. The
+digits are new. Two of them were wrong in a way worth noting, because it is the
+same mistake twice: a glyph whose bowl is a closed loop and whose tail is a
+separate stroke has to be *two* polylines. Appending the tail to the loop draws
+the connecting line as well, which turned the 6 into an epsilon and put a bar
+through the G.
+
+**The palette is reworked.** The two solids are the subject, so they take the
+only two near-saturated values — brass for the aromatic tablets, bone for
+everything else — and sit a clear step apart. The ribbon is warm graphite rather
+than black, so its shading has somewhere to go. The beads and rods are fittings:
+they share one lightness so they read as a family, muted enough not to compete
+with the tablets, light enough to be visible against the ribbon they land on.

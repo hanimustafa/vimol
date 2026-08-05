@@ -13,7 +13,7 @@ from typing import List
 
 import numpy as np
 
-from .glyph_font import ASPECT, STROKE, segments
+from .glyph_font import ASPECT, STROKE, layout, segments
 
 _EPS = 1e-9
 
@@ -146,7 +146,7 @@ def draw_polyhedron(center_view, normals_view, offsets, half_px, albedo,
 MIN_GLYPH_PX = 8.0
 
 
-def draw_label(center_view, char: str, size, bias, albedo,
+def draw_label(center_view, char: str, number: str, size, bias, albedo,
                zoom, ox_s, oy_s, xs, ys, width, height,
                color, alpha, zbuf, shade_write, y_lo, y_hi) -> None:
     """Stamp one screen-aligned bitmap letter at a view-space anchor.
@@ -159,8 +159,21 @@ def draw_label(center_view, char: str, size, bias, albedo,
     front of both.
     """
     cx, cy, cz = (float(v) for v in center_view)
+    if float(size) * zoom < MIN_GLYPH_PX:
+        return
+    # Same layout the GPU uses, so the terminal puts the same text in the same
+    # place; only the rasterizing differs.
+    for glyph_char, dx, dy, cap in layout(char, number, float(size)):
+        _draw_glyph(cx + dx, cy - dy, cz, glyph_char, cap, bias, albedo,
+                    zoom, ox_s, oy_s, xs, ys, width, height,
+                    color, alpha, zbuf, shade_write, y_lo, y_hi)
+
+
+def _draw_glyph(cx, cy, cz, char: str, size, bias, albedo,
+                zoom, ox_s, oy_s, xs, ys, width, height,
+                color, alpha, zbuf, shade_write, y_lo, y_hi) -> None:
     gh = float(size) * zoom
-    if gh < MIN_GLYPH_PX:
+    if gh < MIN_GLYPH_PX * 0.6:
         return
     gw = gh * ASPECT
     pad = STROKE * gh                       # the stroke straddles the outline
@@ -252,6 +265,7 @@ class Prepared:
     label_color: np.ndarray
     label_flat: np.ndarray
     label_char: List[str]
+    label_number: List[str]
     label_rows: np.ndarray
 
 
@@ -317,7 +331,7 @@ def prepare(scene, camera, zoom, oy_s) -> Prepared:
         sphere_rows=_rows(oy_s - sph_c[:, 1] * zoom, scene.sphere_radius * zoom),
         label_center=lab_c, label_size=scene.label_size, label_bias=scene.label_bias,
         label_color=scene.label_color, label_flat=scene.label_flat,
-        label_char=scene.label_char,
+        label_char=scene.label_char, label_number=scene.label_number,
         label_rows=_rows(oy_s - lab_c[:, 1] * zoom, scene.label_size * zoom * 0.5),
     )
 
@@ -372,7 +386,7 @@ def draw_band(prep: Prepared, zoom, ox_s, oy_s, xs, ys, width, height,
                         bool(prep.sphere_flat[k]))
 
     for k in _in_band(prep.label_rows, y_lo, y_hi):
-        draw_label(prep.label_center[k], prep.label_char[k],
+        draw_label(prep.label_center[k], prep.label_char[k], prep.label_number[k],
                    float(prep.label_size[k]), float(prep.label_bias[k]),
                    prep.label_color[k], zoom, ox_s, oy_s, xs, ys, width, height,
                    color, alpha, zbuf, shade_write, y_lo, y_hi)

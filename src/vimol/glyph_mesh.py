@@ -20,7 +20,7 @@ from typing import List, Sequence
 
 import numpy as np
 
-from .glyph_font import ASPECT, atlas_box
+from .glyph_font import ASPECT, atlas_box, layout
 
 # Points per quarter-turn of the ribbon's rounded corners. Four is enough that
 # the highlight running along the edge reads as curved at any terminal size.
@@ -221,21 +221,23 @@ def tablet(builder: MeshBuilder, center: np.ndarray, e1: np.ndarray, e2: np.ndar
                   np.stack([out3, out3]), color, flat)
 
 
-def letter(builder: MeshBuilder, center: np.ndarray, right: np.ndarray,
-           down: np.ndarray, normal: np.ndarray, char: str, size: float,
-           color, flat, cutout: bool = False) -> None:
-    """One glyph as a textured quad, *size* tall, centred on *center*."""
-    u0, v0, u1, v1 = atlas_box(char)
-    if cutout:
-        u0, u1 = u0 + CUTOUT, u1 + CUTOUT
-    half_w = size * ASPECT * 0.5
-    half_h = size * 0.5
-    corners = [center - right * half_w - down * half_h,
-               center + right * half_w - down * half_h,
-               center + right * half_w + down * half_h,
-               center - right * half_w + down * half_h]
-    builder.quad(corners, normal, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
-                 color, flat)
+def label(builder: MeshBuilder, center: np.ndarray, right: np.ndarray,
+          down: np.ndarray, normal: np.ndarray, code: str, number: str,
+          size: float, color, flat, cutout: bool = False) -> None:
+    """A residue's code and number, as one textured quad per glyph."""
+    for char, dx, dy, height in layout(code, number, size):
+        at = center + right * dx + down * dy
+        u0, v0, u1, v1 = atlas_box(char)
+        if cutout:
+            u0, u1 = u0 + CUTOUT, u1 + CUTOUT
+        half_w = height * ASPECT * 0.5
+        half_h = height * 0.5
+        corners = [at - right * half_w - down * half_h,
+                   at + right * half_w - down * half_h,
+                   at + right * half_w + down * half_h,
+                   at - right * half_w + down * half_h]
+        builder.quad(corners, normal, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
+                     color, flat)
 
 
 def letters(scene, rotation: np.ndarray) -> GlyphMesh:
@@ -263,15 +265,15 @@ def letters(scene, rotation: np.ndarray) -> GlyphMesh:
             # the face and still stands upright to the reader.
             down = _unit(view_down - face * float(np.dot(view_down, face)),
                          view_right)
-            letter(builder,
-                   scene.label_center[k] + face * float(scene.label_offset[k]),
-                   np.cross(face, down), down, face, char, size,
-                   scene.label_surface[k], flat)
+            label(builder,
+                  scene.label_center[k] + face * float(scene.label_offset[k]),
+                  np.cross(face, down), down, face, char, scene.label_number[k],
+                  size, scene.label_surface[k], flat)
         else:
             # Lifted toward the camera by the reach of the solid it names, so
             # the shape it belongs to cannot swallow it.
-            letter(builder,
-                   scene.label_center[k] + toward * float(scene.label_bias[k]),
-                   view_right, view_down, toward, char, size,
-                   scene.label_color[k], flat, cutout=True)
+            label(builder,
+                  scene.label_center[k] + toward * float(scene.label_bias[k]),
+                  view_right, view_down, toward, char, scene.label_number[k],
+                  size, scene.label_color[k], flat, cutout=True)
     return builder.freeze()
