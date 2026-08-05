@@ -21,12 +21,13 @@ channel 3 -- so finishing a frame is a single flat copy either way, never an
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Tuple
 
 import numpy as np
 
 from . import _render_fast as _fast
+from . import render_glyph
 from .arrows import ArrowGeometry, build_arrow_geometry
 from .camera import Camera
 from .molecule import Molecule
@@ -35,7 +36,7 @@ from .molecule import Molecule
 @dataclass
 class Style:
     """Rendering options."""
-    representation: str = "ball_and_stick"   # ball_and_stick | spacefill | wireframe | licorice
+    representation: str = "ball_and_stick"   # ball_and_stick | spacefill | wireframe | licorice | glyph
     atom_scale: float = 0.25                 # multiplier on van der Waals radius (ball_and_stick)
     bond_radius: float = 0.10                # angstrom (cylinder radius)
     background: Tuple[float, float, float] = (0.05, 0.06, 0.09)
@@ -49,6 +50,7 @@ class Style:
     outline: bool = True                     # subtle silhouette darkening
     color_override: object = None            # optional (N,3) array to replace element colors
     flat_mask: object = None                 # optional (N,) bool array: True -> unshaded, uniform color
+    glyph_theme: str = "dark"                # "dark" | "light": which glyph-skin palette to draw
 
 
 # render worker threads: bands of the frame raycast concurrently (numpy
@@ -58,6 +60,10 @@ _POOL_WORKERS = min(8, os.cpu_count() or 1)
 
 
 def _atom_radii(mol: Molecule, style: Style) -> np.ndarray:
+    if style.representation == "glyph":
+        # The glyph skin draws residues, not atoms; the underlying spheres and
+        # bonds are suppressed and its own geometry stands in for them.
+        return np.zeros(mol.n_atoms)
     if style.representation == "spacefill":
         return mol.vdw_radii()
     if style.representation in ("wireframe", "licorice"):
@@ -170,6 +176,18 @@ class Renderer:
         if mol.n_atoms == 0:
             return self._finish(buf)
 
+        # The glyph skin needs residues. A molecule that has none -- an xyz
+        # file, a ligand, anything without PDB residue names -- gets no scene,
+        # and the frame falls back to ball-and-stick rather than coming out
+        # empty. `style` is a per-call copy from Scene._effective_style, but
+        # replace() keeps that true even when a caller passed one in directly.
+        glyph_scene = None
+        if style.representation == "glyph":
+            from .glyphs import cached_scene
+            glyph_scene = cached_scene(mol, style.glyph_theme)
+            if glyph_scene is None:
+                style = replace(style, representation="ball_and_stick")
+
         vpos = camera.view_positions(mol.positions).astype(np.float64)  # (N,3) view space
         zoom = camera.zoom
         ox_s = W * 0.5 + camera.pan[0]
@@ -235,7 +253,8 @@ class Renderer:
         shininess = style.shininess
         depth_cue = float(style.depth_cue)
 
-        def shade_write(sub_c, sub_a, sub_z, win, depth, nx, ny, nz, albedo, flat=False):
+        def shade_write(sub_c, sub_a, sub_z, win, depth, nx, ny, nz, albedo,
+                        flat=False, specular=1.0):
             """Shade a full bounding box and masked-write the winners.
 
             ``nx``/``ny``/``nz`` may be broadcastable pieces ((1,w), (h,1) or
@@ -259,6 +278,13 @@ class Renderer:
             non-active structures) skips diffuse/fill/specular entirely and
             writes ``albedo`` uniformly (still fogged): cheaper than the
             shaded path, not more expensive, since it never touches nx/ny/nz.
+
+            ``specular`` scales the highlight for one primitive. Spheres and
+            cylinders leave it at 1: their normals turn through the highlight,
+            so it stays a small bright spot. A planar face does not, and at the
+            default shininess it flares to white all at once -- which is why
+            the glyph skin's ribbon segments and ring plates ask for a matte
+            finish instead.
             """
             if flat:
                 if depth_cue > 0:
@@ -284,7 +310,7 @@ class Renderer:
             dh = nx * hv0 + ny * hv1 + nz * hv2
             np.maximum(dh, 0.0, out=dh)
             spec = _fast_pow(dh, shininess)
-            spec *= spec_w
+            spec *= spec_w * specular
             diff += ambient
             dfill *= fill_w
             diff += dfill
@@ -345,8 +371,13 @@ class Renderer:
         # Gated on what the kernel reproduces exactly: no arrows (cones stay
         # on the numpy path) and a power-of-two shininess (_fast_pow's
         # rounding sequence). Anything else falls through unchanged.
+        # The glyph skin is excluded because the kernel knows only spheres and
+        # cylinders: leaving it in would return before the band pass and drop
+        # every ribbon, plate and letter -- and only on the machines where
+        # numba compiled, which is the worst way for a bug like that to hide.
         e_shin = int(shininess)
-        if (_fast.ready() and not has_arrows and e_shin == shininess
+        if (_fast.ready() and not has_arrows and glyph_scene is None
+                and e_shin == shininess
                 and e_shin > 0 and (e_shin & (e_shin - 1)) == 0):
             n_bonds = len(bond_list)
             barr = np.zeros((n_bonds, 14), np.float64)
@@ -385,6 +416,68 @@ class Renderer:
 
         xs, ys = self._xs, self._ys
 
+        def draw_sphere(cx, cy, cz, r, albedo, flat, y_lo, y_hi) -> None:
+            """Rasterize one sphere impostor. Centre in SCREEN coordinates
+            (cx, cy) plus view-space depth cz, which is what the atom loop
+            already has to hand -- passing those through unchanged is what
+            keeps this identical to the compiled kernel it is checked against
+            (tests/test_render_fast.py)."""
+            sr = r * zoom
+            if sr < 0.5:
+                sr = 0.5
+            x0 = max(int(np.floor(cx - sr)), 0)
+            x1 = min(int(np.ceil(cx + sr)) + 1, W)
+            y0 = max(int(np.floor(cy - sr)), y_lo)
+            y1 = min(int(np.ceil(cy + sr)) + 1, y_hi)
+            if x0 >= x1 or y0 >= y1:
+                return
+            # squared screen-space distance to the atom centre, via
+            # broadcasting a row and a column sliced from the cached
+            # coordinate grids (one fused ufunc each -- no per-primitive
+            # np.arange). float32 per-pixel math: python-float scalars
+            # don't upcast it, and it halves the bandwidth of every
+            # full-bbox pass.
+            dxr = xs[x0:x1] - np.float32(cx)          # (w,)
+            dyr = ys[y0:y1] - np.float32(cy)          # (h,)
+            d2 = (dxr * dxr)[None, :] + (dyr * dyr)[:, None]   # (h,w)
+            mask = d2 <= sr * sr
+            if not mask.any():
+                return
+            # sphere depth: front-surface height above the view plane
+            h2 = float(r * r) - d2 * float(inv_zoom * inv_zoom)
+            np.maximum(h2, 0.0, out=h2)
+            hgt = np.sqrt(h2)             # height above view plane == r * nz
+            depth = hgt + np.float32(cz)
+            sub_z = zbuf[y0:y1, x0:x1]
+            win = mask & (depth > sub_z)
+            if not win.any():
+                return
+            # normals as broadcastable row/column/full pieces --
+            # shade_write combines them without ever materializing an
+            # (h, w, 3) stack or gathering/scattering fragment lists.
+            inv_r = 1.0 / r
+            nx = (dxr * np.float32(inv_zoom * inv_r))[None, :]
+            ny = (dyr * np.float32(-inv_zoom * inv_r))[:, None]
+            nz = hgt * np.float32(inv_r)
+            shade_write(color[y0:y1, x0:x1],
+                        alpha[y0:y1, x0:x1] if alpha is not None else None,
+                        sub_z, win, depth, nx, ny, nz, albedo, flat=flat)
+
+        # Glyph geometry enters view space once for the whole frame; the two
+        # adapters below let it reuse the sphere and cylinder rasterizers the
+        # atoms and bonds already go through, so it shades the same way.
+        glyphs_prepared = (render_glyph.prepare(glyph_scene, camera, zoom, oy_s)
+                           if glyph_scene is not None else None)
+
+        def glyph_sphere(center_view, r, albedo, lo, hi):
+            draw_sphere(ox_s + center_view[0] * zoom, oy_s - center_view[1] * zoom,
+                        center_view[2], r, albedo, False, lo, hi)
+
+        def glyph_cylinder(a, b, r, color_a, color_b, lo, hi):
+            self._draw_cylinder_segment(a, b, r, color_a, color_b, zoom, ox_s, oy_s,
+                                        style, color, zbuf, shade_write,
+                                        zmin, zspan, lo, hi, alpha=alpha)
+
         def draw_band(y_lo: int, y_hi: int) -> None:
             """Raycast the band's primitives into rows [y_lo, y_hi).
 
@@ -411,48 +504,15 @@ class Renderer:
                 r = radii[a]
                 if r <= 0:
                     continue
-                sr = r * zoom
-                if sr < 0.5:
-                    sr = 0.5
-                cx, cy, cz = sx[a], sy[a], sz[a]
-                x0 = max(int(np.floor(cx - sr)), 0)
-                x1 = min(int(np.ceil(cx + sr)) + 1, W)
-                y0 = max(int(np.floor(cy - sr)), y_lo)
-                y1 = min(int(np.ceil(cy + sr)) + 1, y_hi)
-                if x0 >= x1 or y0 >= y1:
-                    continue
-                # squared screen-space distance to the atom centre, via
-                # broadcasting a row and a column sliced from the cached
-                # coordinate grids (one fused ufunc each -- no per-primitive
-                # np.arange). float32 per-pixel math: python-float scalars
-                # don't upcast it, and it halves the bandwidth of every
-                # full-bbox pass.
-                dxr = xs[x0:x1] - np.float32(cx)          # (w,)
-                dyr = ys[y0:y1] - np.float32(cy)          # (h,)
-                d2 = (dxr * dxr)[None, :] + (dyr * dyr)[:, None]   # (h,w)
-                mask = d2 <= sr * sr
-                if not mask.any():
-                    continue
-                # sphere depth: front-surface height above the view plane
-                h2 = float(r * r) - d2 * float(inv_zoom * inv_zoom)
-                np.maximum(h2, 0.0, out=h2)
-                hgt = np.sqrt(h2)             # height above view plane == r * nz
-                depth = hgt + np.float32(cz)
-                sub_z = zbuf[y0:y1, x0:x1]
-                win = mask & (depth > sub_z)
-                if not win.any():
-                    continue
-                # normals as broadcastable row/column/full pieces --
-                # shade_write combines them without ever materializing an
-                # (h, w, 3) stack or gathering/scattering fragment lists.
-                inv_r = 1.0 / r
-                nx = (dxr * np.float32(inv_zoom * inv_r))[None, :]
-                ny = (dyr * np.float32(-inv_zoom * inv_r))[:, None]
-                nz = hgt * np.float32(inv_r)
-                shade_write(color[y0:y1, x0:x1],
-                            alpha[y0:y1, x0:x1] if alpha is not None else None,
-                            sub_z, win, depth, nx, ny, nz, base_colors[a],
-                            flat=bool(atom_flat[a]) if atom_flat is not None else False)
+                draw_sphere(sx[a], sy[a], sz[a], r, base_colors[a],
+                            bool(atom_flat[a]) if atom_flat is not None else False,
+                            y_lo, y_hi)
+
+            if glyphs_prepared is not None:
+                render_glyph.draw_band(
+                    glyphs_prepared, zoom, ox_s, oy_s, xs, ys, W, H,
+                    color, alpha, zbuf, shade_write,
+                    glyph_sphere, glyph_cylinder, y_lo, y_hi)
 
             if has_arrows:
                 self._draw_arrow_shafts(geom, zoom, ox_s, oy_s, style, color,

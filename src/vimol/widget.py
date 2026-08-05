@@ -31,7 +31,7 @@ from .input import MouseEvent, KeyEvent, Event
 from . import editor
 from . import elements
 
-REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe"]
+REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe", "glyph"]
 
 # Rubber-band preview for the option/alt-drag manual-bond gesture: a thin,
 # distinctive-colored arrow that grows from the anchor atom toward the cursor
@@ -61,6 +61,7 @@ class MoleculeWidget:
         # editing state -- inert unless the host opts in with editable=True
         self.editable = editable
         self.theme = "dark"                     # "dark" | "light"; Viewer keeps this in sync
+        self.rep_note = ""                      # why the last style switch didn't do what it looks like
         self.append_mode = False                # 'a': click to build atoms
         self.delete_mode = False                # 'x': click to remove atoms
         self.measure_mode = False               # 'm': click to build a measurement pick list
@@ -151,9 +152,20 @@ class MoleculeWidget:
         self.cell_w, self.cell_h = cell_w, cell_h
 
     def set_representation(self, rep: str) -> None:
-        if rep in REPRESENTATIONS:
-            self.style.representation = rep
-            self.scene.fit(keep_orientation=True)
+        if rep not in REPRESENTATIONS:
+            return
+        self.style.representation = rep
+        self.rep_note = ""
+        if rep == "glyph":
+            # Build it now rather than discovering at draw time that there was
+            # nothing to draw: the renderer silently falls back to
+            # ball-and-stick, which without a word here reads as a dead key.
+            from .glyphs import cached_scene
+            mol = self.scene.structures.composite().molecule
+            if cached_scene(mol, self.theme) is None:
+                self.rep_note = ("glyph skin needs a protein with residue names "
+                                 "(PDB) — showing ball-and-stick")
+        self.scene.fit(keep_orientation=True)
 
     def cycle_representation(self, step: int = 1) -> None:
         i = REPRESENTATIONS.index(self.style.representation)
@@ -336,7 +348,7 @@ class MoleculeWidget:
             self.reset(); return True
         if key == "f":
             self.fit(); return True
-        if key in ("1", "2", "3", "4"):
+        if key in ("1", "2", "3", "4", "5"):
             self.set_representation(REPRESENTATIONS[int(key) - 1]); return True
         if key == "s" and not self.editable:
             # Without editing, 's' keeps its original meaning (cycle style).
@@ -405,7 +417,7 @@ class MoleculeWidget:
         return (list(mol.symbols), mol.positions.copy(), list(mol.bonds),
                 list(mol.manual_bonds), set(mol.new_atoms),
                 list(mol.atom_names), list(mol.atom_is_hetatm),
-                list(mol.atom_keys))
+                list(mol.atom_keys), list(mol.atom_resnames))
 
     def _commit_undo(self, snapshot) -> None:
         self._undo_stack.append(snapshot)
@@ -428,7 +440,7 @@ class MoleculeWidget:
             self._cancel_bond_gesture()
         self._cleanup_state = None
         (symbols, positions, bonds, manual_bonds, new_atoms,
-         atom_names, atom_is_hetatm, atom_keys) = self._undo_stack.pop()
+         atom_names, atom_is_hetatm, atom_keys, atom_resnames) = self._undo_stack.pop()
         mol = self.scene.molecule
         # restore in place so the Scene keeps referencing the same object
         mol.symbols = list(symbols)
@@ -439,6 +451,7 @@ class MoleculeWidget:
         mol.atom_names = list(atom_names)
         mol.atom_is_hetatm = list(atom_is_hetatm)
         mol.atom_keys = list(atom_keys)
+        mol.atom_resnames = list(atom_resnames)
         self._touch_active()
         self._base_colors = self.scene.structures.composite().base_colors
         self.hovered = self.selected = None
@@ -791,6 +804,9 @@ class MoleculeWidget:
         # CPK for the first-drawn (active) entry, tint for the rest.
         composite = self.scene.structures.composite()
         self._base_colors = composite.base_colors
+        # The glyph skin paints its own palette rather than element colours, so
+        # it needs the light/dark decision the Viewer keeps here.
+        self.style.glyph_theme = self.theme
         themed = elements.themed_base_colors(composite.molecule.symbols,
                                              composite.base_colors, self.theme)
         hi = self.hovered if self.hovered is not None else self.selected

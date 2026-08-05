@@ -42,7 +42,7 @@ class Molecule:
     positions: (N, 3) float array, angstrom
     bonds:     list of (i, j, order) tuples, i < j
     name:      free-form label
-    atom_names / atom_keys: optional atom-aligned PDB identity metadata
+    atom_names / atom_keys / atom_resnames: optional atom-aligned PDB metadata
     """
 
     symbols: List[str] = field(default_factory=list)
@@ -64,6 +64,10 @@ class Molecule:
     atom_names: List[str] = field(default_factory=list)
     atom_is_hetatm: List[bool] = field(default_factory=list)
     atom_keys: List[str] = field(default_factory=list)
+    # Residue name (PDB columns 18-20), atom-aligned when present. Kept apart
+    # from `atom_keys` on purpose: align.py and StructureSet match structures on
+    # that key's exact format, so it must not grow a field.
+    atom_resnames: List[str] = field(default_factory=list)
     # True once distance-based perception has run for the current geometry.
     # A non-empty `bonds` already implies that, so this exists purely for the
     # molecules that legitimately have none within the cutoff -- noble gases,
@@ -84,6 +88,8 @@ class Molecule:
             self.atom_is_hetatm.append(False)
         if self.atom_keys:
             self.atom_keys.append("")
+        if self.atom_resnames:
+            self.atom_resnames.append("")
         self.positions = np.vstack([self.positions, [x, y, z]]) if len(self.positions) else np.array([[x, y, z]], float)
         return idx
 

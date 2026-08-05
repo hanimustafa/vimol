@@ -78,6 +78,7 @@ class Scene:
         self.camera = Camera(center=comp_mol.centroid(), extent=comp_mol.radius_of_gyration_extent())
         self._backend_name, self._renderer = self._make_renderer(
             backend, width * self.supersample, height * self.supersample)
+        self._glyph_renderer = None    # see _cpu_for_glyph
         self.fit()
 
     # -- structure-set-aware molecule access -------------------------------
@@ -217,6 +218,19 @@ class Scene:
         mol = mol if mol is not None else self.structures.composite().molecule
         if mol.n_atoms == 0:
             return 0.0
+        if self.style.representation == "glyph":
+            # Not an atom radius at all: whatever `fit` adds to the radius of
+            # gyration has to cover the glyph skin's own geometry, which a
+            # scaled van der Waals radius says nothing about -- a ribbon runs
+            # between the Cα positions and a plate stands off past its ring.
+            # Asking the scene turns the sum into its exact reach. A molecule
+            # with no residues draws as ball-and-stick, so it must be framed
+            # that way too, or the fallback quietly reframes itself.
+            from .glyphs import cached_scene
+            scene = cached_scene(mol, self.style.glyph_theme)
+            if scene is not None:
+                return max(0.0, scene.reach_from(mol.centroid())
+                           - mol.radius_of_gyration_extent())
         if self.style.representation == "spacefill":
             return float(mol.vdw_radii().max())
         return float(mol.vdw_radii().max()) * self.style.atom_scale
@@ -267,7 +281,7 @@ class Scene:
         composite = self.structures.composite()
         mol = composite.molecule
         style = self._effective_style(composite)
-        if self._backend_name == "gl":
+        if self._backend_name == "gl" and style.representation != "glyph":
             from .gl_adapter import molecule_to_gl_inputs
             w, h = self._renderer.width, self._renderer.height
             spheres, cylinders, cones, proj, shading = molecule_to_gl_inputs(
@@ -276,8 +290,26 @@ class Scene:
             # a display-size image directly -- no CPU _downsample pass.
             return self._renderer.render(spheres, cylinders, proj, shading,
                                          downsample=self.supersample, cones=cones)
-        img = self._renderer.render(mol, self.camera, style)
+        renderer = (self._renderer if self._backend_name == "cpu"
+                    else self._cpu_for_glyph())
+        img = renderer.render(mol, self.camera, style)
         return _downsample(img, self.supersample)
+
+    def _cpu_for_glyph(self) -> Renderer:
+        """The raycaster the glyph skin always draws through.
+
+        The GL backend takes spheres, cylinders and cones, so ribbons, plates
+        and letters would not merely look wrong there -- they would be dropped
+        without a trace. Rather than port three new primitives into GLSL for
+        one representation, this skin falls back to the CPU raycaster, kept in
+        step with whatever size the GL renderer is currently at.
+        """
+        w, h = self._renderer.width, self._renderer.height
+        if self._glyph_renderer is None:
+            self._glyph_renderer = Renderer(w, h)
+        elif (self._glyph_renderer.width, self._glyph_renderer.height) != (w, h):
+            self._glyph_renderer.resize(w, h)
+        return self._glyph_renderer
 
     def to_kitty(self, *, image_id: Optional[int] = None, cols: Optional[int] = None,
                  rows: Optional[int] = None, move_cursor: bool = False) -> bytes:

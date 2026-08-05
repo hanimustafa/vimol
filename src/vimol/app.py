@@ -56,7 +56,8 @@ def make_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("file", nargs="*", help="one or more structure files (xyz/pdb/mol/sdf)")
     p.add_argument("--style", default="ball_and_stick",
-                   choices=["ball_and_stick", "spacefill", "licorice", "wireframe"])
+                   choices=["ball_and_stick", "spacefill", "licorice", "wireframe",
+                            "glyph"])
     p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
                    help="rendering backend: numpy CPU raycaster, GPU (OpenGL), "
                         "or auto (GPU if a context can be created, else CPU)")

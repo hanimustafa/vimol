@@ -467,12 +467,22 @@ class StructureSet:
         offsets = [0]
         base_parts = []
         flat_parts = []
+        # PDB identity, carried through so representations that need residues
+        # (the glyph skin) work on an overlay and not only on a lone structure.
+        # An entry that lacks it contributes blanks rather than shortening the
+        # list, which would leave every downstream index off by that entry.
+        names: List[str] = []
+        keys: List[str] = []
+        resnames: List[str] = []
         off = 0
         for k, i in enumerate(drawn):
             e = self.entries[i]
             mol = e.molecule
             n = mol.n_atoms
             symbols.extend(mol.symbols)
+            for src, dst in ((mol.atom_names, names), (mol.atom_keys, keys),
+                             (mol.atom_resnames, resnames)):
+                dst.extend(src if len(src) == n else [""] * n)
             for a, b, order in mol.bonds:
                 bonds.append((a + off, b + off, order))
             if k == 0:
@@ -486,8 +496,12 @@ class StructureSet:
             offsets.append(off)
         base_colors = np.concatenate(base_parts) if base_parts else np.zeros((0, 3))
         flat = np.concatenate(flat_parts) if flat_parts else np.zeros((0,), dtype=bool)
+        any_identity = any(s.strip() for s in names) or any(s.strip() for s in resnames)
         return dict(symbols=symbols, bonds=bonds, offsets=np.array(offsets),
-                    sources=np.array(drawn, dtype=int), base_colors=base_colors, flat=flat)
+                    sources=np.array(drawn, dtype=int), base_colors=base_colors, flat=flat,
+                    atom_names=names if any_identity else [],
+                    atom_keys=keys if any_identity else [],
+                    atom_resnames=resnames if any_identity else [])
 
     def _build_vector_fields(self, drawn: List[int], offsets: np.ndarray, total: int):
         from .molecule import VectorField
@@ -576,7 +590,10 @@ class StructureSet:
 
         mol = Molecule(symbols=list(topo["symbols"]), positions=positions,
                        bonds=list(topo["bonds"]), name="composite",
-                       vector_fields=vector_fields)
+                       vector_fields=vector_fields,
+                       atom_names=list(topo["atom_names"]),
+                       atom_keys=list(topo["atom_keys"]),
+                       atom_resnames=list(topo["atom_resnames"]))
         comp = Composite(molecule=mol, offsets=offsets, sources=topo["sources"],
                          base_colors=topo["base_colors"], flat=topo["flat"])
         self._composite_cache = (full_key, comp)
