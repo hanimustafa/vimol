@@ -273,22 +273,6 @@ def draw_band(prep: Prepared, zoom, ox_s, oy_s, xs, ys, width, height,
     pixel -- but solids first, then sticks and nodes, then letters keeps the
     letters' write masks small.
     """
-    with np.errstate(over="ignore", invalid="ignore"):
-        _draw_band(prep, zoom, ox_s, oy_s, xs, ys, width, height,
-                   color, alpha, zbuf, shade_write, draw_sphere, draw_cylinder,
-                   y_lo, y_hi)
-
-
-def _draw_band(prep, zoom, ox_s, oy_s, xs, ys, width, height,
-               color, alpha, zbuf, shade_write, draw_sphere, draw_cylinder,
-               y_lo, y_hi) -> None:
-    # The errstate above covers the sticks and the hydrogen-bond hairlines.
-    # Every rasterizer here shades its whole bounding box and then writes only
-    # the pixels that pass coverage and depth; outside the shape the "normal"
-    # is meaningless, and for a cylinder it grows as the segment length over
-    # the radius. These are the thinnest cylinders vimol draws, so raising
-    # that ratio to the shininess exponent overflows float32 -- in numbers
-    # that are discarded a line later, but noisily enough to spam a terminal.
     bounds = prep.poly_slice
     for p in _in_band(prep.poly_rows, y_lo, y_hi):
         lo, hi = int(bounds[p]), int(bounds[p + 1])
@@ -297,10 +281,17 @@ def _draw_band(prep, zoom, ox_s, oy_s, xs, ys, width, height,
                         prep.poly_color[p], zoom, ox_s, oy_s, xs, ys,
                         width, height, color, alpha, zbuf, shade_write, y_lo, y_hi)
 
-    for k in _in_band(prep.cyl_rows, y_lo, y_hi):
-        col = prep.cyl_color[k].astype(np.float32)
-        draw_cylinder(prep.cyl_a[k], prep.cyl_b[k], float(prep.cyl_radius[k]),
-                      col, col, y_lo, y_hi)
+    # The cylinder rasterizer shades its whole bounding box and writes only the
+    # pixels that pass coverage and depth. Outside the cylinder its "normal"
+    # grows as the segment length over the radius, and the sticks and the
+    # hydrogen-bond hairlines are the thinnest cylinders vimol draws -- so
+    # raising that ratio to the shininess exponent overflows float32, in
+    # numbers discarded a line later but noisily enough to spam a terminal.
+    with np.errstate(over="ignore"):
+        for k in _in_band(prep.cyl_rows, y_lo, y_hi):
+            col = prep.cyl_color[k].astype(np.float32)
+            draw_cylinder(prep.cyl_a[k], prep.cyl_b[k], float(prep.cyl_radius[k]),
+                          col, col, y_lo, y_hi)
 
     if len(prep.sphere_center):
         hit = np.zeros(len(prep.sphere_center), bool)

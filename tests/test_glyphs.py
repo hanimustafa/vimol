@@ -6,7 +6,6 @@ import pytest
 import vimol
 from vimol import _render_fast as _fast
 from vimol import editor, glyphs, residues
-from vimol.molecule import Molecule
 from vimol.parsers import pdb
 from vimol.render import Renderer, Style
 from vimol.structures import StructureSet

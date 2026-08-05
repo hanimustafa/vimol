@@ -24,8 +24,8 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from .molecule import Molecule
-from .residues import (BACKBONE, AROMATIC_RINGS, Residue, chain_runs,
-                       hbond_role, protein_residues)
+from .residues import (AROMATIC_RINGS, Residue, chain_runs, hbond_role,
+                       protein_residues)
 
 
 # -- tunables ------------------------------------------------------------
