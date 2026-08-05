@@ -110,6 +110,122 @@ class ConeBatch:
 
 
 @dataclass
+class MeshBatch:
+    """An indexed triangle mesh in view space.
+
+    The impostor batches cover everything that is a sphere, a cylinder or a
+    cone analytically, which is cheaper and more exact than tessellating them.
+    This is for the shapes that are none of those -- the glyph skin's ribbon and
+    its lettered tablets -- where real geometry with interpolated normals is
+    what makes a curved surface read as curved instead of as a run of facets.
+
+    ``uv`` addresses the glyph atlas; a vertex with a negative ``u`` samples
+    nothing and shades as plain surface. Letters ride on the same triangles as
+    everything else so they take the same lighting as the face they sit on.
+    """
+    vertices: np.ndarray      # (V, 3) float32, view space
+    normals: np.ndarray       # (V, 3) float32, view space
+    colors: np.ndarray        # (V, 3) float32
+    flat: np.ndarray          # (V,) float32, 1 = unshaded overlay tint
+    uv: np.ndarray            # (V, 2) float32, negative u = no glyph
+    indices: np.ndarray       # (I,) uint32
+
+    @staticmethod
+    def empty() -> "MeshBatch":
+        return MeshBatch(
+            vertices=np.zeros((0, 3), np.float32), normals=np.zeros((0, 3), np.float32),
+            colors=np.zeros((0, 3), np.float32), flat=np.zeros((0,), np.float32),
+            uv=np.zeros((0, 2), np.float32), indices=np.zeros((0,), np.uint32),
+        )
+
+
+_MESH_VERT = """
+#version 410 core
+layout(location = 0) in vec3 in_pos;
+layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec3 in_color;
+layout(location = 3) in float in_flat;
+layout(location = 4) in vec2 in_uv;
+
+uniform mat4 u_proj;
+
+out vec3 v_normal;
+out vec3 v_color;
+out float v_flat;
+out vec2 v_uv;
+out float v_depth;
+
+void main() {
+    v_normal = in_normal;
+    v_color = in_color;
+    v_flat = in_flat;
+    v_uv = in_uv;
+    v_depth = in_pos.z;
+    gl_Position = u_proj * vec4(in_pos, 1.0);
+}
+"""
+
+_MESH_FRAG = """
+#version 410 core
+in vec3 v_normal;
+in vec3 v_color;
+in float v_flat;
+in vec2 v_uv;
+in float v_depth;
+
+uniform sampler2D u_glyph;
+uniform vec3 u_ink;
+uniform vec3 u_light_dir;
+uniform vec3 u_half_vec;
+uniform vec3 u_fill_dir;
+uniform float u_ambient;
+uniform float u_fill_light;
+uniform float u_specular_strength;
+uniform float u_shininess;
+uniform float u_depth_cue;
+uniform float u_zmin;
+uniform float u_zspan;
+
+out vec4 frag_color;
+
+void main() {
+    // Interpolation shortens the normal; renormalizing is what turns the
+    // faceted strip into a smooth surface. Faces pointing away belong to the
+    // far side of a closed solid seen through its own opening -- light them
+    // from the front rather than leaving them black.
+    vec3 normal = normalize(v_normal);
+    if (normal.z < 0.0) normal = -normal;
+
+    vec3 base = v_color;
+    if (v_uv.x >= 2.0) {
+        // A letter with nothing behind it to print on: keep the strokes and
+        // throw the rest of the quad away. Supersampling is what smooths the
+        // edge, the same as it does for every impostor silhouette.
+        if (texture(u_glyph, v_uv - vec2(2.0, 0.0)).r < 0.5) discard;
+        base = u_ink;
+    } else if (v_uv.x >= 0.0) {
+        // Coverage doubles as the blend, so the letter takes the surface's own
+        // lighting and reads as printed into it rather than stuck on top.
+        base = mix(base, u_ink, texture(u_glyph, v_uv).r);
+    }
+
+    float nl = clamp(dot(normal, u_light_dir), 0.0, 1.0);
+    float nf = clamp(dot(normal, u_fill_dir), 0.0, 1.0) * u_fill_light;
+    float nh = clamp(dot(normal, u_half_vec), 0.0, 1.0);
+    float spec = pow(nh, u_shininess) * u_specular_strength;
+    float diff = u_ambient + nl + nf;
+    vec3 shaded = mix(base * diff + vec3(spec), base, v_flat);
+
+    if (u_depth_cue > 0.0) {
+        float f = clamp((v_depth - u_zmin) / u_zspan, 0.0, 1.0);
+        shaded *= 1.0 - u_depth_cue * (1.0 - f);
+    }
+    frag_color = vec4(shaded, 1.0);
+}
+"""
+
+
+@dataclass
 class ShadingParams:
     """Plain Phong/fog shading parameters — no representation/chemistry
     concepts, unlike ``render.Style``."""
@@ -569,6 +685,17 @@ class GLRenderer:
                 (self._bond_vbo, "3f 3f 1f 3f 3f 1f/i", "in_a", "in_b", "in_radius", "in_color_a", "in_color_b", "in_flat"),
             ],
         )
+        self._mesh_program = self.ctx.program(vertex_shader=_MESH_VERT,
+                                              fragment_shader=_MESH_FRAG)
+        self._mesh_vbo = self.ctx.buffer(reserve=4)
+        self._mesh_ibo = self.ctx.buffer(reserve=4)
+        self._mesh_vao = self.ctx.vertex_array(
+            self._mesh_program,
+            [(self._mesh_vbo, "3f 3f 3f 1f 2f",
+              "in_pos", "in_normal", "in_color", "in_flat", "in_uv")],
+            index_buffer=self._mesh_ibo, index_element_size=4)
+        self._glyph_tex = None         # lazily uploaded; see _glyph_texture
+
         self._cone_vbo = self.ctx.buffer(reserve=4)
         self._cone_vao = self.ctx.vertex_array(
             self._cone_program,
@@ -615,7 +742,9 @@ class GLRenderer:
     # ------------------------------------------------------------------
     def render(self, spheres: SphereBatch, cylinders: CylinderBatch,
                proj: np.ndarray, shading: ShadingParams | None = None,
-               downsample: int = 1, cones: ConeBatch | None = None) -> np.ndarray:
+               downsample: int = 1, cones: ConeBatch | None = None,
+               mesh: MeshBatch | None = None,
+               ink: Tuple[float, float, float] = (0.09, 0.09, 0.11)) -> np.ndarray:
         """Render *spheres*, *cylinders* and *cones* under projection *proj*.
 
         *cones* defaults to empty so existing call sites that only know about
@@ -644,6 +773,7 @@ class GLRenderer:
         """
         shading = shading or ShadingParams()
         cones = cones or ConeBatch.empty()
+        mesh = mesh or MeshBatch.empty()
         W, H = self.width, self.height
         downsample = max(1, int(downsample))
 
@@ -681,8 +811,10 @@ class GLRenderer:
             cone_base[keep_h], cone_apex[keep_h], radii_h[keep_h], colors_h[keep_h],
         )
 
-        if len(centers) or len(ca) or len(cone_base):
-            depths = np.concatenate([centers[:, 2], ca[:, 2], cb[:, 2], cone_base[:, 2], cone_apex[:, 2]])
+        mesh_v = np.asarray(mesh.vertices, dtype=np.float32).reshape(-1, 3)
+        if len(centers) or len(ca) or len(cone_base) or len(mesh_v):
+            depths = np.concatenate([centers[:, 2], ca[:, 2], cb[:, 2], cone_base[:, 2],
+                                     cone_apex[:, 2], mesh_v[:, 2]])
             zmin = float(depths.min())
             zspan = max(float(depths.max()) - zmin, 1e-6)
         else:
@@ -717,6 +849,8 @@ class GLRenderer:
             self._draw_atoms(centers, radii_s, colors_s, flat_s, proj_gl, common)
         if len(cone_base):
             self._draw_cones(cone_base, cone_apex, radii_h, colors_h, proj_gl, common)
+        if len(mesh_v) and len(mesh.indices):
+            self._draw_mesh(mesh, ink, proj_gl, common)
 
         ch = 4 if shading.transparent else 3
         if downsample > 1:
@@ -753,6 +887,40 @@ class GLRenderer:
         payload = data.tobytes()
         vbo.orphan(len(payload))
         vbo.write(payload)
+
+    def _glyph_texture(self):
+        """The letter atlas, uploaded once and kept for the context's life."""
+        if self._glyph_tex is None:
+            from .glyph_font import atlas
+            image, _boxes = atlas()
+            tex = self.ctx.texture((image.shape[1], image.shape[0]), 1,
+                                   np.ascontiguousarray(image).tobytes())
+            tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            # Clamp: a letter's quad maps exactly onto its tile, and wrapping
+            # would fetch its neighbour along the seam.
+            tex.repeat_x = tex.repeat_y = False
+            self._glyph_tex = tex
+        return self._glyph_tex
+
+    def _draw_mesh(self, mesh: MeshBatch, ink, proj_gl, common) -> None:
+        n = mesh.vertices.shape[0]
+        data = np.empty((n, 12), dtype=np.float32)
+        data[:, 0:3] = mesh.vertices
+        data[:, 3:6] = mesh.normals
+        data[:, 6:9] = mesh.colors
+        data[:, 9] = mesh.flat
+        data[:, 10:12] = mesh.uv
+        self._stream(self._mesh_vbo, data)
+        indices = np.ascontiguousarray(mesh.indices, dtype=np.uint32)
+        self._stream(self._mesh_ibo, indices)
+        self._glyph_texture().use(location=0)
+        self._mesh_program["u_glyph"] = 0
+        self._mesh_program["u_ink"].value = tuple(float(c) for c in ink)
+        self._mesh_program["u_proj"].write(proj_gl.tobytes())
+        for name, value in common.items():
+            if name in self._mesh_program:
+                self._mesh_program[name].value = value
+        self._mesh_vao.render(moderngl.TRIANGLES, vertices=len(indices))
 
     def _draw_atoms(self, centers, radii, colors, flat, proj_gl, common) -> None:
         n = centers.shape[0]

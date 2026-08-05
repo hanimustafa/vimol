@@ -282,7 +282,23 @@ class Scene:
         composite = self.structures.composite()
         mol = composite.molecule
         style = self._effective_style(composite)
-        if self._backend_name == "gl" and style.representation != "glyph":
+        if self._backend_name == "gl" and style.representation == "glyph":
+            from .glyphs import glyph_scene_for, palette
+            from .gl_adapter import glyph_to_gl_inputs
+            glyph = glyph_scene_for(mol, style)
+            if glyph is not None:
+                w, h = self._renderer.width, self._renderer.height
+                spheres, cylinders, mesh, proj, shading = glyph_to_gl_inputs(
+                    glyph, self.camera, style, w, h)
+                return self._renderer.render(
+                    spheres, cylinders, proj, shading,
+                    downsample=self.supersample, mesh=mesh,
+                    ink=palette(style.glyph_theme).ink)
+            # Not a protein: fall through and let the usual path draw
+            # ball-and-stick, exactly as the raycaster does.
+            style = replace(style, representation="ball_and_stick")
+
+        if self._backend_name == "gl":
             from .gl_adapter import molecule_to_gl_inputs
             w, h = self._renderer.width, self._renderer.height
             spheres, cylinders, cones, proj, shading = molecule_to_gl_inputs(

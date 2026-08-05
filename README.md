@@ -65,6 +65,13 @@ bonded. Overlaid structures tint flat, as in every other style. It needs
 residue names, so it wants a PDB; anything else stays ball-and-stick and says
 so.
 
+This is the one style that looks materially better on a GPU. There the ribbon
+is a real swept tube with a rounded edge and the tablets are chamfered solids
+with their letters printed onto the faces — and it draws in about 2 ms where
+the raycaster takes 100. Without a GL context it still works: the raycaster
+intersects the same shapes analytically and fakes the smooth shading, which
+costs the polish rather than the picture.
+
 Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
 session, auto-overlaid — the first structure of each file shown together, the
 active one in normal element colours and the rest flat-tinted so you can tell

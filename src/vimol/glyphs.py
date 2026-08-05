@@ -23,9 +23,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from . import glyph_mesh
 from .bonds import perceive_bonds
 from .molecule import Molecule
-from .residues import (AROMATIC_RINGS, Residue, chain_runs, hbond_role,
+from .residues import (RING_ATOMS, Residue, chain_runs, hbond_role,
                        protein_residues, residue_class)
 
 
@@ -120,6 +121,18 @@ class GlyphScene:
     label_color: np.ndarray        # (L, 3)
     label_flat: np.ndarray         # (L,) bool
     label_char: List[str]
+    # True where the letter is already printed onto a tablet face in `mesh`.
+    # The raycaster billboards every label; the GPU billboards only these.
+    label_on_tablet: np.ndarray    # (L,) bool
+    label_normal: np.ndarray       # (L, 3) tablet face normal; zero for a volume
+    label_offset: np.ndarray       # (L,) how far off the face to print it
+    # Colour of the surface the letter is printed on. A printed letter blends
+    # ink into its face, so the quad has to carry that face's colour; the ink
+    # itself is a uniform. Getting this wrong paints the whole quad solid.
+    label_surface: np.ndarray      # (L, 3)
+    # The same ribbon and tablets as real geometry, for the GPU path. The
+    # raycaster ignores it and intersects the half-spaces above instead.
+    mesh: "glyph_mesh.GlyphMesh"
 
     def reach_from(self, center) -> float:
         """How far from *center* the drawn geometry actually gets.
@@ -159,6 +172,7 @@ class _Builder:
         self.normals: List[np.ndarray] = []
         self.offsets: List[np.ndarray] = []
         self.labels: List[Tuple[np.ndarray, str, float, float, Tuple[float, float, float]]] = []
+        self.mesh = glyph_mesh.MeshBuilder()
 
     def sphere(self, center, radius, color, flat: bool = False) -> None:
         self.spheres.append((np.asarray(center, float), float(radius), color, flat))
@@ -204,9 +218,14 @@ class _Builder:
         self.poly_smooth_span.append(smooth[2] if smooth is not None else 1.0)
         self.poly_smooth_face.append(SMOOTH_FACE if smooth is not None else -1)
 
-    def label(self, center, char, size, bias, color, flat: bool = False) -> None:
+    def label(self, center, char, size, bias, color, flat: bool = False,
+              on_tablet: bool = False, normal=None, offset: float = 0.0,
+              surface=None) -> None:
         self.labels.append((np.asarray(center, float), char, float(size), float(bias),
-                            color, flat))
+                            color, flat, on_tablet,
+                            np.zeros(3) if normal is None else np.asarray(normal, float),
+                            float(offset),
+                            np.asarray(color if surface is None else surface, float)))
 
     def freeze(self) -> GlyphScene:
         def stack(rows, width, dtype=float):
@@ -249,6 +268,11 @@ class _Builder:
             label_color=stack([l[4] for l in self.labels], 3),
             label_flat=stack([l[5] for l in self.labels], 0, bool),
             label_char=[l[1] for l in self.labels],
+            label_on_tablet=np.array([l[6] for l in self.labels], bool),
+            label_normal=stack([l[7] for l in self.labels], 3),
+            label_offset=stack([l[8] for l in self.labels], 0),
+            label_surface=stack([l[9] for l in self.labels], 3),
+            mesh=self.mesh.freeze(),
         )
 
 
@@ -512,21 +536,30 @@ def _add_ribbon(builder: _Builder, run: Sequence[Residue], positions: np.ndarray
         builder.solid(center, normals, offsets, color, axes, half, flat=flat,
                       smooth=(joint_faces[k], joint_faces[k + 1], half_length))
 
+    glyph_mesh.ribbon(builder.mesh, path, side_path, half_w, half_t, color, flat)
+
 
 def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray,
                color, flat: bool):
-    """An extruded ring-shaped plate for an aromatic side chain.
+    """An extruded tablet cut to the shape of a side chain's ring.
 
     Returns ``(center, reach)`` -- the glyph's anchor and how far the solid
     extends from it -- or None when the ring atoms are missing and the caller
     should fall back to a rounded volume.
     """
-    names = AROMATIC_RINGS[res.name]
+    names = RING_ATOMS[res.name]
     idx = [res.atoms[n] for n in names if n in res.atoms]
     if len(idx) < 3:
         return None
     ring = positions[idx]
     center, normal, e1, e2 = plane_frame(ring)
+    # Proline's ring closes back onto the backbone, so its true centroid lands
+    # on the ribbon and the tablet would be half-buried in it with nowhere for
+    # the rod to go. Slide the tablet out to the centre of the side chain
+    # proper, keeping the ring's real outline and its real plane.
+    carbons = res.side_chain_carbons()
+    if not res.is_aromatic and carbons:
+        center = positions[carbons].mean(axis=0)
     planar = np.column_stack([(ring - center) @ e1, (ring - center) @ e2])
     hull = convex_hull_2d(planar)
     if len(hull) < 3:
@@ -556,7 +589,9 @@ def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray,
                      PLATE_THICKNESS * 0.5])
     builder.solid(center, normals, offsets, color,
                   np.array([e1, e2, normal]), half, flat=flat)
-    return center, float(np.linalg.norm(half))
+    glyph_mesh.tablet(builder.mesh, center, e1, e2, normal, corners,
+                      PLATE_THICKNESS * 0.5, color, flat)
+    return center, float(np.linalg.norm(half)), normal
 
 
 def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray,
@@ -730,21 +765,30 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         _add_ribbon(builder, run, positions, color, is_flat)
 
     for res in residues:
+        ca = res.atoms["CA"]
         solid_color, is_flat = tint(res, pal.plate if res.is_aromatic else pal.volume)
+        size = LETTER_SIZE if res.is_ring else LETTER_SIZE * 0.85
         shape = (_add_plate(builder, res, positions, solid_color, is_flat)
-                 if res.is_aromatic else None)
-        if shape is None:
-            shape = _add_volume(builder, res, positions,
-                                tint(res, pal.volume)[0], is_flat)
-        anchor, reach = shape
+                 if res.is_ring else None)
+        on_tablet = shape is not None
+        if on_tablet:
+            anchor, reach, face = shape
+        else:
+            anchor, reach = _add_volume(builder, res, positions,
+                                        tint(res, pal.volume)[0], is_flat)
+            face = None
         bead_color, _ = tint(res, pal.beads[residue_class(res.letter)])
         _add_link_to_glyph(builder, res, positions, anchor, bead_color, is_flat)
         # The letter is lifted by the whole reach of its own solid, so it lands
         # on the near surface from every camera angle. Biasing by a thickness
         # or a single sphere radius is not enough: a tilted plate and a long
         # side chain both put geometry well in front of their own anchor, and
-        # the letter comes out chewed into an unreadable shape.
-        builder.label(anchor, res.letter, LETTER_SIZE, reach + 0.05, pal.ink, is_flat)
+        # the letter comes out chewed into an unreadable shape. A tablet's
+        # letter is printed into its faces instead, and turns with it.
+        builder.label(anchor, res.letter, size, reach + 0.05, pal.ink, is_flat,
+                      on_tablet=on_tablet, normal=face,
+                      offset=PLATE_THICKNESS * 0.5 + glyph_mesh.LETTER_LIFT,
+                      surface=solid_color)
 
     # Which hydrogens to keep and which bonds to draw both need connectivity.
     # The render path always perceives before drawing, but a caller building a

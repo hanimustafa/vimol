@@ -40,6 +40,15 @@ AROMATIC_RINGS: Dict[str, Tuple[str, ...]] = {
     "TRP": ("CG", "CD1", "CD2", "NE1", "CE2", "CE3", "CZ2", "CZ3", "CH2"),
 }
 
+# Proline is the one residue whose side chain closes a ring without being
+# aromatic, and it closes it back onto the backbone -- so its ring is N, Cα and
+# the three side-chain carbons. It gets a tablet cut to that pentagon like the
+# aromatics do, in the aliphatic colour rather than the aromatic one.
+PROLINE_RING = ("N", "CA", "CB", "CG", "CD")
+
+RING_ATOMS: Dict[str, Tuple[str, ...]] = dict(AROMATIC_RINGS)
+RING_ATOMS["PRO"] = PROLINE_RING
+
 # Side-chain hydrogen-bonding roles. A residue's backbone N donates and its
 # backbone O accepts; those are handled separately since they apply to (almost)
 # every residue. "both" covers the hydroxyls, the histidine ring nitrogens
@@ -148,6 +157,11 @@ class Residue:
     @property
     def is_aromatic(self) -> bool:
         return self.name in AROMATIC_RINGS
+
+    @property
+    def is_ring(self) -> bool:
+        """Whether this residue's glyph is a tablet cut to a ring outline."""
+        return self.name in RING_ATOMS
 
 
 def _identity(key: str) -> Optional[Tuple[str, str, str, str, str]]:

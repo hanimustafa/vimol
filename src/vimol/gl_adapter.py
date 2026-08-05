@@ -137,3 +137,64 @@ def molecule_to_gl_inputs(molecule: Molecule, camera: Camera, style: Style,
     )
 
     return spheres, cylinders, cones, proj, shading
+
+
+def glyph_to_gl_inputs(scene, camera, style, width: int, height: int):
+    """GL batches for the glyph skin, from a prebuilt ``glyphs.GlyphScene``.
+
+    The skin's rounded volumes, beads, rods, bonds and atoms are all spheres
+    and cylinders, so they go through the same analytic impostors as any other
+    representation -- exact, and cheaper than tessellating them. Only the ribbon
+    and the tablets need real triangles, and those come pre-built in world space
+    and are rotated into view here.
+    """
+    from . import glyph_mesh
+    from .gl_render import MeshBatch
+
+    def view(points):
+        return (camera.view_positions(points).astype(np.float32) if len(points)
+                else np.zeros((0, 3), np.float32))
+
+    spheres = SphereBatch(
+        centers=view(scene.sphere_center),
+        radii=np.asarray(scene.sphere_radius, np.float32),
+        colors=np.asarray(scene.sphere_color, np.float32),
+        flat=np.asarray(scene.sphere_flat, np.float32),
+    )
+    cylinders = CylinderBatch(
+        a=view(scene.cyl_a), b=view(scene.cyl_b),
+        radii=np.asarray(scene.cyl_radius, np.float32),
+        colors_a=np.asarray(scene.cyl_color, np.float32),
+        colors_b=np.asarray(scene.cyl_color_b, np.float32),
+        flat=np.asarray(scene.cyl_flat, np.float32),
+    )
+
+    # The cached ribbon and tablets, plus this frame's letters: where a letter
+    # sits and which way up it reads both depend on the camera, so it is the one
+    # piece of the skin that cannot be cached with the rest.
+    parts = [scene.mesh, glyph_mesh.letters(scene, camera.rotation)]
+    parts = [m for m in parts if len(m.vertices)]
+    if parts:
+        offsets = np.cumsum([0] + [len(m.vertices) for m in parts])
+        mesh = MeshBatch(
+            vertices=view(np.concatenate([m.vertices for m in parts])),
+            normals=np.concatenate([m.normals for m in parts]).astype(np.float64)
+            @ camera.rotation.T,
+            colors=np.concatenate([m.colors for m in parts]).astype(np.float32),
+            flat=np.concatenate([m.flat for m in parts]).astype(np.float32),
+            uv=np.concatenate([m.uv for m in parts]).astype(np.float32),
+            indices=np.concatenate([m.indices + offsets[i]
+                                    for i, m in enumerate(parts)]).astype(np.uint32),
+        )
+        mesh.normals = mesh.normals.astype(np.float32)
+    else:
+        mesh = MeshBatch.empty()
+
+    proj = _build_projection(camera.zoom, camera.pan, width, height, camera.extent)
+    shading = ShadingParams(
+        ambient=style.ambient, specular_strength=style.specular_strength,
+        shininess=style.shininess, light_dir=tuple(style.light_dir),
+        fill_light=style.fill_light, depth_cue=style.depth_cue,
+        background=tuple(style.background), transparent=style.transparent,
+    )
+    return spheres, cylinders, mesh, proj, shading

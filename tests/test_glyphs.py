@@ -361,18 +361,42 @@ def test_the_compiled_kernel_is_skipped_for_glyph_but_not_for_atoms(hairpin, mon
     assert calls == ["kernel"]
 
 
-def test_glyph_renders_through_the_raycaster_even_on_the_gl_backend(hairpin):
+def test_the_gpu_draws_the_skin_as_real_geometry(hairpin):
+    """The polished look is the GPU's: a swept ribbon and chamfered tablets as
+    triangles, where the raycaster intersects half-spaces and fakes the smooth
+    shading. The two are allowed to differ -- the GPU one is canonical."""
     try:
-        gl = vimol.Scene(hairpin, 160, 120, style=Style(representation="glyph"),
+        gl = vimol.Scene(hairpin, 200, 160, style=Style(representation="glyph"),
                          backend="gl")
     except Exception:
         pytest.skip("no GL backend available")
-    cpu = vimol.Scene(hairpin, 160, 120, style=Style(representation="glyph"),
-                      backend="cpu")
+    frame = gl.render()
     assert gl.backend == "gl"
-    # The GL path converts a molecule to spheres/cylinders/cones and would drop
-    # ribbons, plates and letters without a trace.
-    assert np.array_equal(gl.render(), cpu.render())
+    assert (frame != frame[0, 0]).any(), "GPU glyph frame is empty"
+    cpu = vimol.Scene(hairpin, 200, 160, style=Style(representation="glyph"),
+                      backend="cpu").render()
+    assert not np.array_equal(frame, cpu)
+
+
+def test_the_gpu_mesh_carries_the_ribbon_and_the_tablets(hairpin):
+    scene = glyphs.build_scene(hairpin, "light")
+    assert len(scene.mesh.vertices) > 0
+    assert len(scene.mesh.indices) % 3 == 0
+    assert int(scene.mesh.indices.max()) < len(scene.mesh.vertices)
+    # Only letters carry glyph coordinates, and they are added per frame.
+    assert (scene.mesh.uv[:, 0] < 0).all()
+
+
+def test_a_non_protein_still_falls_back_on_the_gpu():
+    mol = vimol.load(os.path.join(os.path.dirname(__file__), "..",
+                                  "examples", "benzene.xyz"))
+    try:
+        gl = vimol.Scene(mol, 160, 120, style=Style(representation="glyph"),
+                         backend="gl")
+    except Exception:
+        pytest.skip("no GL backend available")
+    plain = vimol.Scene(mol, 160, 120, style=Style(), backend="gl")
+    assert np.array_equal(gl.render(), plain.render())
 
 
 def test_the_camera_frames_the_glyph_geometry_not_the_atoms(hairpin):

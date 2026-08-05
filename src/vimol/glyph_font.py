@@ -13,7 +13,7 @@ has no one-letter code.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -67,6 +67,71 @@ _STROKES: Dict[str, List[Polyline]] = {
 # (S, 2, 2) arrays of segment endpoints, x already scaled into cap-height units
 # so a distance in this space is the same in both directions.
 _CACHE: Dict[str, np.ndarray] = {}
+
+
+CELL_W, CELL_H = 64, 88          # one glyph's tile in the atlas, ~ASPECT
+_ATLAS_COLS = 6
+_ATLAS: Optional[Tuple[np.ndarray, Dict[str, Tuple[float, float, float, float]]]] = None
+
+
+def atlas() -> Tuple[np.ndarray, Dict[str, Tuple[float, float, float, float]]]:
+    """A coverage bitmap of every glyph, plus each one's box in it.
+
+    The GPU path stamps letters as textured quads: one upload, one sample per
+    fragment, and the coverage doubles as the blend that mixes ink into the
+    surface the letter sits on -- which is what makes it read as printed on the
+    tablet rather than floating in front of it. Anti-aliased here rather than
+    left to the sampler, so a letter is clean even where the quad is small.
+
+    Returned as ``(image, boxes)`` with ``boxes[char] = (u0, v0, u1, v1)``.
+    """
+    global _ATLAS
+    if _ATLAS is not None:
+        return _ATLAS
+
+    chars = sorted(_STROKES)
+    rows = (len(chars) + _ATLAS_COLS - 1) // _ATLAS_COLS
+    width, height = _ATLAS_COLS * CELL_W, rows * CELL_H
+    image = np.zeros((height, width), np.float32)
+    boxes = {}
+
+    # Cell coordinates in cap heights, both axes to the same scale, with a
+    # half-stroke margin so the ink never reaches the tile edge and bleeds into
+    # its neighbour under bilinear sampling.
+    margin = STROKE
+    u = np.linspace(-margin, ASPECT + margin, CELL_W, dtype=np.float32)
+    v = np.linspace(-margin, 1.0 + margin, CELL_H, dtype=np.float32)
+    uu, vv = np.meshgrid(u, v)
+    # One pixel, in the same units -- the width the edge is feathered over.
+    feather = float((v[1] - v[0]) * 0.75)
+
+    for k, char in enumerate(chars):
+        row, col = divmod(k, _ATLAS_COLS)
+        near = np.full_like(uu, 1e9)
+        for (ax, ay), (bx, by) in segments(char):
+            dx, dy = float(bx - ax), float(by - ay)
+            span = dx * dx + dy * dy
+            du, dv = uu - ax, vv - ay
+            if span > 1e-12:
+                t = np.clip(du * (dx / span) + dv * (dy / span), 0.0, 1.0)
+                du = du - t * dx
+                dv = dv - t * dy
+            np.minimum(near, np.hypot(du, dv), out=near)
+        coverage = np.clip((STROKE - near) / max(feather, 1e-6) + 0.5, 0.0, 1.0)
+        y0, x0 = row * CELL_H, col * CELL_W
+        image[y0:y0 + CELL_H, x0:x0 + CELL_W] = coverage
+        boxes[char] = (x0 / width, y0 / height,
+                       (x0 + CELL_W) / width, (y0 + CELL_H) / height)
+
+    _ATLAS = ((image * 255.0).astype(np.uint8), boxes)
+    return _ATLAS
+
+
+def atlas_box(char: str) -> Tuple[float, float, float, float]:
+    """The atlas box for *char*, falling back to ``X``."""
+    _image, boxes = atlas()
+    char = (char or "X").upper()[:1]
+    return boxes.get(char, boxes["X"])
 
 
 def segments(char: str) -> np.ndarray:

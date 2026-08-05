@@ -1,7 +1,7 @@
 # The `glyph` skin: a lettered, diagrammatic protein representation
 
 Date: 2026-08-05
-Status: implemented, then revised once from a second reference. Where the build
+Status: implemented, then revised twice from further references. Where the build
 differs from the plan, this document records what was built and why; the
 revision is in "Second pass" at the end.
 
@@ -258,3 +258,52 @@ marking a structure into an overlay moves no atom and changes no count; and
 residues had to become runs of consecutive atoms sharing an identity rather than
 a dictionary keyed on it, or two overlaid copies of one file fold together and
 the second gets no glyphs at all.
+
+
+## Third pass: proline, and the GPU
+
+**Proline is a tablet.** It is the one residue whose side chain closes a ring
+without being aromatic, so the plate treatment now keys on "is a ring" and the
+aromatic/aliphatic distinction only picks the colour. Its ring closes back onto
+the backbone — N and Cα are two of the five — so its true centroid lands on the
+ribbon and the tablet would be half-buried with nowhere for the rod to go. The
+outline and the plane stay real; the tablet slides out to the centre of the side
+chain proper.
+
+**The GPU draws the skin as geometry.** `gl_render.py` gains a mesh program
+alongside the impostors, and `glyph_mesh.py` builds the ribbon as a swept tube
+with a rounded cross-section and the tablets as chamfered prisms, both with real
+per-vertex normals. Everything else in the skin — volumes, beads, rods, bonds,
+atoms — is a sphere or a cylinder, and those stay analytic impostors, which are
+exact and cheaper than any tessellation. A 46-residue protein at 640x480 draws
+in 2.2 ms against the raycaster's 97 ms.
+
+The raycaster keeps its own path. The README's headline is pure-software
+rendering and that path already worked; "GPU only" means the *polish* needs the
+GPU. **The GPU rendering is canonical** — the two are allowed to differ, and a
+test asserts they do rather than that they match.
+
+Letters are the one part that cannot be cached with the geometry, because both
+things that make one readable depend on the camera. A letter on a tablet is
+printed onto the face and stands upright *on screen*; pinning it to the tablet's
+own axes leaves it lying at whatever angle the ring happens to sit at. A letter
+on a rounded volume has no face to print on, so it is squared to the viewer and
+cut out of its quad. A tablet turned nearly edge-on falls back to the second.
+
+Three things about the letter quads, each of which was a bug first:
+
+- A printed letter blends ink into the face it sits on, so its quad has to carry
+  *that face's* colour. Coloured with the ink itself, the blend has nothing to
+  blend into and the whole quad comes out solid black.
+- A cut-out letter has nothing behind it, so it discards below a coverage
+  threshold instead of blending. Supersampling is what smooths its edge, the
+  same as for every impostor silhouette.
+- The in-plane basis has to be right-handed with respect to the face being
+  viewed, or the letter is mirrored — which for a P reads as a 9 and takes a
+  while to recognize as a handedness error rather than a rotation.
+
+Two plumbing details worth keeping: the mesh fragment shader must write
+`alpha = 1`, because `style.transparent` is the viewer's default and every PNG
+check uses an opaque background, so the omission would be invisible until the
+terminal; and mesh depth from `gl_Position` agrees exactly with the impostors'
+analytic `gl_FragDepth`, because the projection's third row is what both use.
