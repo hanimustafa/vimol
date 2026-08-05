@@ -160,9 +160,11 @@ class MoleculeWidget:
             # Build it now rather than discovering at draw time that there was
             # nothing to draw: the renderer silently falls back to
             # ball-and-stick, which without a word here reads as a dead key.
-            from .glyphs import cached_scene
-            mol = self.scene.structures.composite().molecule
-            if cached_scene(mol, self.theme) is None:
+            from .glyphs import glyph_scene_for
+            composite = self.scene.structures.composite()
+            self.style.glyph_theme = self.theme
+            if glyph_scene_for(composite.molecule,
+                               self.scene._effective_style(composite)) is None:
                 self.rep_note = ("glyph skin needs a protein with residue names "
                                  "(PDB) — showing ball-and-stick")
         self.scene.fit(keep_orientation=True)

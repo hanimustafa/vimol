@@ -183,8 +183,8 @@ class Renderer:
         # replace() keeps that true even when a caller passed one in directly.
         glyph_scene = None
         if style.representation == "glyph":
-            from .glyphs import cached_scene
-            glyph_scene = cached_scene(mol, style.glyph_theme)
+            from .glyphs import glyph_scene_for
+            glyph_scene = glyph_scene_for(mol, style)
             if glyph_scene is None:
                 style = replace(style, representation="ball_and_stick")
 
@@ -469,14 +469,14 @@ class Renderer:
         glyphs_prepared = (render_glyph.prepare(glyph_scene, camera, zoom, oy_s)
                            if glyph_scene is not None else None)
 
-        def glyph_sphere(center_view, r, albedo, lo, hi):
+        def glyph_sphere(center_view, r, albedo, lo, hi, flat=False):
             draw_sphere(ox_s + center_view[0] * zoom, oy_s - center_view[1] * zoom,
-                        center_view[2], r, albedo, False, lo, hi)
+                        center_view[2], r, albedo, flat, lo, hi)
 
-        def glyph_cylinder(a, b, r, color_a, color_b, lo, hi):
+        def glyph_cylinder(a, b, r, color_a, color_b, lo, hi, flat=False):
             self._draw_cylinder_segment(a, b, r, color_a, color_b, zoom, ox_s, oy_s,
                                         style, color, zbuf, shade_write,
-                                        zmin, zspan, lo, hi, alpha=alpha)
+                                        zmin, zspan, lo, hi, alpha=alpha, flat=flat)
 
         def draw_band(y_lo: int, y_hi: int) -> None:
             """Raycast the band's primitives into rows [y_lo, y_hi).

@@ -65,6 +65,22 @@ _SIDE_CHAIN_ROLES: Dict[str, Dict[str, str]] = {
 }
 
 
+# Broad side-chain classes, used only to tint a residue's Cα/Cβ beads and rods
+# so a glance across the structure separates the acidic from the aromatic from
+# the merely greasy.
+_CLASSES = {
+    "aromatic": "FWYH",
+    "acidic": "DE",
+    "basic": "KR",
+    "polar": "STNQC",
+}
+CLASS_OF = {letter: name for name, letters in _CLASSES.items() for letter in letters}
+
+
+def residue_class(letter: str) -> str:
+    return CLASS_OF.get(letter.upper(), "hydrophobic")
+
+
 def one_letter(resname: str) -> str:
     """One-character code for a three-letter residue name, ``X`` if unknown."""
     return ONE_LETTER.get(resname.strip().upper(), "X")
@@ -96,6 +112,7 @@ class Residue:
     name: str                        # three-letter, upper case
     letter: str                      # one-letter code, "X" when unknown
     atoms: Dict[str, int] = field(default_factory=dict)   # atom name -> atom index
+    elements: Dict[str, str] = field(default_factory=dict)  # atom name -> element
 
     def index(self, *names: str) -> Optional[int]:
         """Index of the first of *names* this residue actually has."""
@@ -106,7 +123,27 @@ class Residue:
 
     def side_chain_indices(self) -> List[int]:
         """Heavy side-chain atoms: everything that is not backbone."""
-        return [i for name, i in self.atoms.items() if name not in BACKBONE]
+        return [i for name, i in self.atoms.items()
+                if name not in BACKBONE and self.elements.get(name) != "H"]
+
+    def side_chain_carbons(self) -> List[int]:
+        """The side chain's carbon skeleton -- what a glyph solid stands for.
+
+        Everything else the residue owns is drawn as itself, so the carbons are
+        the only atoms a shape has to swallow.
+        """
+        return [i for name, i in self.atoms.items()
+                if name not in BACKBONE and self.elements.get(name) == "C"]
+
+    def side_chain_polar(self) -> List[int]:
+        """Side-chain heavy atoms that are not carbon: N, O, S.
+
+        The backbone amide is deliberately not here. The ribbon stands for the
+        whole backbone, N and carbonyl O included, and drawing those as atoms
+        stipples a blue and red dot onto every residue of it.
+        """
+        return [i for name, i in self.atoms.items()
+                if name not in BACKBONE and self.elements.get(name) not in ("C", "H")]
 
     @property
     def is_aromatic(self) -> bool:
@@ -133,6 +170,12 @@ def protein_residues(molecule: Molecule) -> List[Residue]:
     HETATM records, waters and anything without a Cα are skipped, as are the
     B and later alternate conformations -- drawing two overlapping glyphs for
     one residue would read as a rendering fault, not as disorder.
+
+    Residues are runs of consecutive atoms sharing an identity, not a lookup
+    keyed on that identity. A PDB writes them contiguously either way, and the
+    run rule is what keeps two overlaid copies of the same file apart: they
+    repeat every chain/number pair, and a dictionary would fold the second copy
+    into the first and leave it with no glyphs at all.
     """
     n = molecule.n_atoms
     names, keys = molecule.atom_names, molecule.atom_keys
@@ -140,11 +183,9 @@ def protein_residues(molecule: Molecule) -> List[Residue]:
     if not (len(names) == len(keys) == len(resnames) == n) or n == 0:
         return []
 
-    by_key: Dict[Tuple[str, str, str], Residue] = {}
-    order: List[Tuple[str, str, str]] = []
+    out: List[Residue] = []
+    current: Optional[Tuple[str, str, str]] = None
     for i in range(n):
-        if molecule.symbols[i].strip().upper() == "H":
-            continue
         ident = _identity(keys[i])
         if ident is None:
             continue
@@ -155,15 +196,17 @@ def protein_residues(molecule: Molecule) -> List[Residue]:
         if resname not in ONE_LETTER:
             continue
         key = (chain, resseq, icode)
-        res = by_key.get(key)
-        if res is None:
-            res = by_key[key] = Residue(key=key, name=resname, letter=one_letter(resname))
-            order.append(key)
+        if key != current:
+            current = key
+            out.append(Residue(key=key, name=resname, letter=one_letter(resname)))
         # First occurrence wins, so a stray duplicate atom name cannot move a
         # glyph off the coordinates the rest of the residue agrees on.
-        res.atoms.setdefault(names[i].strip().upper(), i)
+        name = names[i].strip().upper()
+        if name not in out[-1].atoms:
+            out[-1].atoms[name] = i
+            out[-1].elements[name] = molecule.symbols[i].strip().upper()
 
-    return [by_key[k] for k in order if "CA" in by_key[k].atoms]
+    return [r for r in out if "CA" in r.atoms]
 
 
 def chain_runs(residues: Sequence[Residue], positions: np.ndarray,

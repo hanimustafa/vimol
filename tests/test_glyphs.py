@@ -29,6 +29,15 @@ ATOM     10  CB  SER A   2       3.560   3.680   1.220  1.00  0.00           C
 ATOM     11  OG  SER A   2       4.100   4.990   1.190  1.00  0.00           O
 """
 
+# The same, with the hydrogens an NMR model would carry: one on the hydroxyl,
+# the rest on carbons.
+DIPEPTIDE_WITH_H = DIPEPTIDE + """\
+ATOM     12  HB2 SER A   2       2.480   3.760   1.240  1.00  0.00           H
+ATOM     13  HB3 SER A   2       3.860   3.170   2.140  1.00  0.00           H
+ATOM     14  HG  SER A   2       3.840   5.470   1.980  1.00  0.00           H
+ATOM     15  HA  SER A   2       3.700   3.410  -0.900  1.00  0.00           H
+"""
+
 
 @pytest.fixture
 def hairpin():
@@ -87,32 +96,37 @@ def test_hbond_roles_follow_the_chemistry():
     assert residues.hbond_role("ALA", "CB") is None
 
 
-def test_pure_donor_and_acceptor_nodes_sit_on_the_file_coordinates(hairpin):
+def test_side_chain_oxygens_and_nitrogens_are_drawn_at_their_file_coordinates(hairpin):
+    """The whole point of drawing them as atoms instead of as abstract markers
+    is that they land exactly where the file puts them."""
     scene = glyphs.build_scene(hairpin, "light")
-    nodes = {"donor": np.asarray(glyphs.LIGHT.donor),
-             "acceptor": np.asarray(glyphs.LIGHT.acceptor)}
-    placed = {k: scene.sphere_center[np.all(np.isclose(scene.sphere_color, c), axis=1)]
-              for k, c in nodes.items()}
     for res in residues.protein_residues(hairpin):
-        for name, atom in res.atoms.items():
-            role = residues.hbond_role(res.name, name)
-            if role in ("donor", "acceptor"):
-                d = np.linalg.norm(placed[role] - hairpin.positions[atom], axis=1)
-                assert d.min() < 1e-9, f"{res.name} {name} node moved off its atom"
+        for atom in res.side_chain_polar():
+            d = np.linalg.norm(scene.sphere_center - hairpin.positions[atom], axis=1)
+            assert d.min() < 1e-9, f"{res.name} atom {atom} is not drawn where it is"
 
 
-def test_an_atom_that_both_donates_and_accepts_gets_one_node_of_each():
-    mol = pdb.parse(DIPEPTIDE)[0]
-    res = residues.protein_residues(mol)[1]
-    og = res.atoms["OG"]
-    placed = glyphs._node_positions(res, og, "both", mol.positions)
-    kinds = sorted(k for _p, k in placed)
-    assert kinds == ["acceptor", "donor"]
-    # The acceptor keeps the real coordinates; the donor steps aside by one
-    # node width so the two do not fight for the same pixels.
-    (p_acc, _), (p_don, _) = placed
-    assert np.allclose(p_acc, mol.positions[og])
-    assert np.isclose(np.linalg.norm(p_don - p_acc), glyphs.NODE_SPLIT)
+def test_side_chain_polar_atoms_keep_their_element_colours(hairpin):
+    scene = glyphs.build_scene(hairpin, "light")
+    colors = hairpin.element_colors()
+    for res in residues.protein_residues(hairpin):
+        for atom in res.side_chain_polar():
+            k = int(np.argmin(np.linalg.norm(scene.sphere_center
+                                             - hairpin.positions[atom], axis=1)))
+            assert np.allclose(scene.sphere_color[k], colors[atom])
+
+
+def test_the_backbone_amide_is_the_ribbons_business_not_an_atom(hairpin):
+    """Drawing backbone N and O as atoms stipples a blue and a red dot onto
+    every residue of the ribbon, which is what the ribbon is there to replace."""
+    scene = glyphs.build_scene(hairpin, "light")
+    for res in residues.protein_residues(hairpin):
+        for name in ("N", "O"):
+            if name not in res.atoms:
+                continue
+            d = np.linalg.norm(scene.sphere_center
+                               - hairpin.positions[res.atoms[name]], axis=1)
+            assert d.min() > 1e-9, f"backbone {name} drawn as an atom"
 
 
 # -- geometry -------------------------------------------------------------
@@ -162,6 +176,40 @@ def test_plane_frame_finds_the_ring_normal():
     assert np.allclose(center, 0, atol=1e-9)
     assert abs(abs(normal[2]) - 1.0) < 1e-9
     assert abs(np.dot(e1, e2)) < 1e-9
+
+
+def test_the_ribbon_runs_through_the_alpha_carbons(hairpin):
+    """Its guide points are the Cα atoms themselves, so each residue's link
+    starts on the ribbon rather than beside it. Peptide-plane midpoints smooth
+    marginally better and sit up to an angstrom off every Cα."""
+    res = residues.protein_residues(hairpin)
+    run = residues.chain_runs(res, hairpin.positions)[0]
+    centers, _sides = glyphs._ribbon_frames(run, hairpin.positions)
+    expected = np.array([hairpin.positions[r.atoms["CA"]] for r in run])
+    assert np.allclose(centers, expected)
+
+
+def test_the_link_beads_sit_on_the_real_alpha_and_beta_carbons(hairpin):
+    scene = glyphs.build_scene(hairpin, "light")
+    for res in residues.protein_residues(hairpin):
+        for name in ("CA", "CB"):
+            if name not in res.atoms:
+                continue
+            d = np.linalg.norm(scene.sphere_center
+                               - hairpin.positions[res.atoms[name]], axis=1)
+            assert d.min() < 1e-9, f"no bead on {res.name} {name}"
+
+
+def test_hydrogens_show_only_where_they_say_something():
+    """On a hydroxyl or an amide, not on every carbon: an NMR model carries
+    every C–H, and drawing those buries the skin under white spheres."""
+    mol = pdb.parse(DIPEPTIDE_WITH_H)[0]
+    scene = glyphs.build_scene(mol, "light")
+    res = residues.protein_residues(mol)[1]
+    on_oxygen = mol.positions[res.atoms["HG"]]
+    on_carbon = mol.positions[res.atoms["HB2"]]
+    assert np.linalg.norm(scene.sphere_center - on_oxygen, axis=1).min() < 1e-9
+    assert np.linalg.norm(scene.sphere_center - on_carbon, axis=1).min() > 1e-9
 
 
 def test_ribbon_side_vectors_never_flip_between_neighbours(hairpin):
@@ -240,6 +288,43 @@ def test_scene_is_cached_per_molecule_and_busted_by_an_edit(hairpin):
     assert glyphs.cached_scene(hairpin, "dark") is not first
     hairpin.positions = hairpin.positions + 1.0
     assert glyphs.cached_scene(hairpin, "light") is not first
+
+
+def test_the_cache_notices_a_structure_being_marked_into_an_overlay(hairpin):
+    """Tint and flatness are geometry inputs, and neither moves an atom or
+    changes the count -- so a key built from coordinates alone would keep
+    serving the untinted scene after an overlay is switched on."""
+    plain = glyphs.cached_scene(hairpin, "light")
+    flat = np.ones(hairpin.n_atoms, bool)
+    tinted = glyphs.cached_scene(hairpin, "light", flat_mask=flat,
+                                 atom_colors=np.tile([1.0, 0.5, 0.0],
+                                                     (hairpin.n_atoms, 1)))
+    assert tinted is not plain
+    assert not plain.poly_flat.any()
+    assert tinted.poly_flat.all()
+
+
+def test_an_overlaid_structure_renders_in_its_own_flat_tint(hairpin):
+    other = vimol.load(HAIRPIN)
+    other.positions = other.positions + np.array([3.0, 1.0, 0.0])
+    structures = StructureSet()
+    structures.append(hairpin, label="main")
+    structures.append(other, label="other")
+    for entry in structures.entries:
+        entry.marked = True
+    structures.overlay = True
+    scene = vimol.Scene(structures, 160, 120, style=Style(representation="glyph"),
+                        backend="cpu")
+    composite = structures.composite()
+    glyph_scene = glyphs.glyph_scene_for(composite.molecule,
+                                         scene._effective_style(composite))
+    # Both copies are drawn, and exactly one of them is flat-tinted.
+    assert "".join(glyph_scene.label_char) == "SWTWENGKWTWK" * 2
+    for flags in (glyph_scene.poly_flat, glyph_scene.label_flat):
+        assert 0 < flags.sum() < len(flags)
+    tint = np.asarray(structures.entries[1].tint)
+    flat_solids = glyph_scene.poly_color[glyph_scene.poly_flat]
+    assert np.allclose(flat_solids, tint)
 
 
 # -- rendering ------------------------------------------------------------

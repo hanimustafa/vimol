@@ -226,8 +226,9 @@ class Scene:
             # Asking the scene turns the sum into its exact reach. A molecule
             # with no residues draws as ball-and-stick, so it must be framed
             # that way too, or the fallback quietly reframes itself.
-            from .glyphs import cached_scene
-            scene = cached_scene(mol, self.style.glyph_theme)
+            from .glyphs import glyph_scene_for
+            scene = glyph_scene_for(mol, self._effective_style(
+                self.structures.composite()))
             if scene is not None:
                 return max(0.0, scene.reach_from(mol.centroid())
                            - mol.radius_of_gyration_extent())

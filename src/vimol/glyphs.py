@@ -6,8 +6,8 @@ the renderer only has to rotate it into view space.
 
 The four kinds of primitive it produces:
 
-``spheres``     the rounded side-chain volumes and the hydrogen-bonding nodes
-``cylinders``   the Cα-to-glyph sticks and the hydrogen-bond links
+``spheres``     side-chain volumes, Cα/Cβ beads, and atoms drawn as themselves
+``cylinders``   the rods out to each glyph, real bonds, and hydrogen-bond links
 ``polyhedra``   ribbon segments and aromatic ring plates, as sets of half-spaces
 ``labels``      screen-aligned one-letter codes
 
@@ -19,13 +19,14 @@ plane in the scene at once.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .bonds import perceive_bonds
 from .molecule import Molecule
 from .residues import (AROMATIC_RINGS, Residue, chain_runs, hbond_role,
-                       protein_residues)
+                       protein_residues, residue_class)
 
 
 # -- tunables ------------------------------------------------------------
@@ -34,16 +35,20 @@ RIBBON_THICKNESS = 0.26     # angstrom, full thickness
 RIBBON_SAMPLES = 8          # spline samples per residue
 PLATE_INFLATE = 0.30        # angstrom the ring hull is pushed out by
 PLATE_THICKNESS = 0.22      # angstrom, full thickness
-BLOB_RADIUS = 0.85          # angstrom; comfortably over half a 1.5 A bond, so
-                            # bonded atoms' spheres merge into one solid
+BLOB_RADIUS = 0.80          # angstrom; over half a 1.5 A bond, so bonded atoms'
+                            # spheres merge -- but only just, so a two-carbon
+                            # side chain still reads as two lobes, not a ball
 GLYCINE_RADIUS = 0.55       # glycine has no side chain, so its marker is small
 LETTER_SIZE = 1.0           # angstrom, cap height of the one-letter code
-STICK_RADIUS = 0.10
-NODE_RADIUS = 0.13
-NODE_SPLIT = 0.16           # see `_node_positions`
 LINK_RADIUS = 0.05
 LINK_MAX_DISTANCE = 3.35    # angstrom, N···O
 LINK_MIN_SEPARATION = 2     # residues apart, so i/i+1 neighbours don't count
+BEAD_RADIUS = 0.22          # the Cα and Cβ beads the link runs through
+ROD_RADIUS = 0.075
+JOIN_OVERLAP = 0.04     # angstrom each ribbon segment runs past its joint
+# `box_planes` emits side, -side, up, -up: the third plane is the first of the
+# two large faces, which are the ones a ribbon shades smoothly across.
+SMOOTH_FACE = 2
 
 
 @dataclass(frozen=True)
@@ -51,26 +56,33 @@ class Palette:
     ribbon: Tuple[float, float, float]
     plate: Tuple[float, float, float]
     volume: Tuple[float, float, float]
-    stick: Tuple[float, float, float]
     ink: Tuple[float, float, float]
-    donor: Tuple[float, float, float]
-    acceptor: Tuple[float, float, float]
     link: Tuple[float, float, float]
+    # Cα/Cβ beads and the rods between them, keyed by residue class, so a
+    # glance separates the acidic from the aromatic from the merely greasy.
+    beads: Dict[str, Tuple[float, float, float]]
 
 
 # The letters are always dark, so both palettes keep the side-chain solids
-# light; only the ribbon and the node colours flip with the background.
+# light; only the ribbon flips with the background. Atoms drawn as themselves
+# keep their element colours and are not in here.
 LIGHT = Palette(
     ribbon=(0.17, 0.17, 0.19), plate=(0.70, 0.50, 0.16),
-    volume=(0.90, 0.87, 0.80), stick=(0.32, 0.33, 0.35),
-    ink=(0.09, 0.09, 0.11), donor=(0.16, 0.36, 0.72),
-    acceptor=(0.66, 0.12, 0.12), link=(0.80, 0.66, 0.42),
+    volume=(0.90, 0.87, 0.80), ink=(0.09, 0.09, 0.11),
+    link=(0.80, 0.66, 0.42),
+    # Light enough to read against the near-black ribbon they sit on, which is
+    # where every Cα bead lands.
+    beads={"aromatic": (0.66, 0.48, 0.14), "acidic": (0.62, 0.24, 0.20),
+           "basic": (0.30, 0.42, 0.70), "polar": (0.26, 0.50, 0.42),
+           "hydrophobic": (0.50, 0.44, 0.36)},
 )
 DARK = Palette(
     ribbon=(0.80, 0.82, 0.87), plate=(0.85, 0.62, 0.22),
-    volume=(0.88, 0.86, 0.80), stick=(0.62, 0.64, 0.70),
-    ink=(0.09, 0.09, 0.11), donor=(0.38, 0.62, 0.98),
-    acceptor=(0.92, 0.32, 0.30), link=(0.88, 0.72, 0.42),
+    volume=(0.88, 0.86, 0.80), ink=(0.09, 0.09, 0.11),
+    link=(0.88, 0.72, 0.42),
+    beads={"aromatic": (0.85, 0.64, 0.25), "acidic": (0.78, 0.32, 0.28),
+           "basic": (0.42, 0.58, 0.92), "polar": (0.36, 0.68, 0.58),
+           "hydrophobic": (0.66, 0.60, 0.52)},
 )
 
 
@@ -87,11 +99,18 @@ class GlyphScene:
     cyl_a: np.ndarray              # (C, 3)
     cyl_b: np.ndarray              # (C, 3)
     cyl_radius: np.ndarray         # (C,)
-    cyl_color: np.ndarray          # (C, 3)
+    cyl_color: np.ndarray          # (C, 3) colour at the `a` end
+    cyl_color_b: np.ndarray        # (C, 3) colour at the `b` end; a bond splits at the middle
+    cyl_flat: np.ndarray           # (C,) bool
+    sphere_flat: np.ndarray        # (S,) bool
     poly_center: np.ndarray        # (P, 3)
     poly_color: np.ndarray         # (P, 3)
+    poly_flat: np.ndarray          # (P,) bool
     poly_axes: np.ndarray          # (P, 3, 3) orthonormal rows of the enclosing box
     poly_half: np.ndarray          # (P, 3) half-extent along each of those axes
+    poly_smooth: np.ndarray        # (P, 2, 3) joint normals to shade between
+    poly_smooth_span: np.ndarray   # (P,) half-length to interpolate those over
+    poly_smooth_face: np.ndarray   # (P,) index of the first smooth-shaded plane, or -1
     poly_slice: np.ndarray         # (P + 1,) int, CSR bounds into the plane arrays
     plane_normal: np.ndarray       # (M, 3) unit, world space
     plane_offset: np.ndarray       # (M,)
@@ -99,6 +118,7 @@ class GlyphScene:
     label_size: np.ndarray         # (L,) glyph height in angstrom
     label_bias: np.ndarray         # (L,) angstrom to lift the letter toward the camera
     label_color: np.ndarray        # (L, 3)
+    label_flat: np.ndarray         # (L,) bool
     label_char: List[str]
 
     def reach_from(self, center) -> float:
@@ -129,20 +149,27 @@ class _Builder:
         self.cylinders: List[Tuple[np.ndarray, np.ndarray, float, Tuple[float, float, float]]] = []
         self.poly_center: List[np.ndarray] = []
         self.poly_color: List[Tuple[float, float, float]] = []
+        self.poly_flat: List[bool] = []
         self.poly_axes: List[np.ndarray] = []
         self.poly_half: List[np.ndarray] = []
+        self.poly_smooth: List[Tuple[np.ndarray, np.ndarray]] = []
+        self.poly_smooth_span: List[float] = []
+        self.poly_smooth_face: List[int] = []
         self.poly_counts: List[int] = []
         self.normals: List[np.ndarray] = []
         self.offsets: List[np.ndarray] = []
         self.labels: List[Tuple[np.ndarray, str, float, float, Tuple[float, float, float]]] = []
 
-    def sphere(self, center, radius, color) -> None:
-        self.spheres.append((np.asarray(center, float), float(radius), color))
+    def sphere(self, center, radius, color, flat: bool = False) -> None:
+        self.spheres.append((np.asarray(center, float), float(radius), color, flat))
 
-    def cylinder(self, a, b, radius, color) -> None:
-        self.cylinders.append((np.asarray(a, float), np.asarray(b, float), float(radius), color))
+    def cylinder(self, a, b, radius, color, color_b=None, flat: bool = False) -> None:
+        self.cylinders.append((np.asarray(a, float), np.asarray(b, float),
+                               float(radius), color, color if color_b is None else color_b,
+                               flat))
 
-    def solid(self, center, normals, offsets, color, axes, half) -> None:
+    def solid(self, center, normals, offsets, color, axes, half,
+              flat: bool = False, smooth=None) -> None:
         """Add a convex solid, plus an oriented box that encloses it.
 
         A set of half-spaces does not hand over a bounding box, and the
@@ -156,14 +183,30 @@ class _Builder:
         normals = np.asarray(normals, float)
         self.poly_center.append(np.asarray(center, float))
         self.poly_color.append(color)
+        self.poly_flat.append(flat)
         self.poly_axes.append(np.asarray(axes, float))
         self.poly_half.append(np.asarray(half, float))
         self.poly_counts.append(len(normals))
         self.normals.append(normals)
         self.offsets.append(np.asarray(offsets, float))
+        # `smooth` is (n_start, n_end, half_length): the pair of joint normals
+        # to interpolate between, and the half-length to interpolate over. The
+        # faces it applies to are the third and fourth planes, the two large
+        # ones (`box_planes` order: side, -side, up, -up).
+        #
+        # The half-length is NOT the enclosing box's half-extent along the same
+        # axis -- a mitred corner overhangs, so that one is larger. Scaling by
+        # it would leave the interpolation short of 0 and 1 at the real ends,
+        # the normals either side of a joint would disagree, and every joint
+        # would draw itself as a thin dark seam across the ribbon.
+        self.poly_smooth.append(smooth[:2] if smooth is not None
+                                else (np.zeros(3), np.zeros(3)))
+        self.poly_smooth_span.append(smooth[2] if smooth is not None else 1.0)
+        self.poly_smooth_face.append(SMOOTH_FACE if smooth is not None else -1)
 
-    def label(self, center, char, size, bias, color) -> None:
-        self.labels.append((np.asarray(center, float), char, float(size), float(bias), color))
+    def label(self, center, char, size, bias, color, flat: bool = False) -> None:
+        self.labels.append((np.asarray(center, float), char, float(size), float(bias),
+                            color, flat))
 
     def freeze(self) -> GlyphScene:
         def stack(rows, width, dtype=float):
@@ -178,15 +221,23 @@ class _Builder:
             sphere_center=stack([s[0] for s in self.spheres], 3),
             sphere_radius=stack([s[1] for s in self.spheres], 0),
             sphere_color=stack([s[2] for s in self.spheres], 3),
+            sphere_flat=stack([s[3] for s in self.spheres], 0, bool),
             cyl_a=stack([c[0] for c in self.cylinders], 3),
             cyl_b=stack([c[1] for c in self.cylinders], 3),
             cyl_radius=stack([c[2] for c in self.cylinders], 0),
             cyl_color=stack([c[3] for c in self.cylinders], 3),
+            cyl_color_b=stack([c[4] for c in self.cylinders], 3),
+            cyl_flat=stack([c[5] for c in self.cylinders], 0, bool),
             poly_center=stack(self.poly_center, 3),
             poly_color=stack(self.poly_color, 3),
+            poly_flat=stack(self.poly_flat, 0, bool),
             poly_axes=(np.asarray(self.poly_axes, float) if self.poly_axes
                        else np.zeros((0, 3, 3))),
             poly_half=stack(self.poly_half, 3),
+            poly_smooth=(np.asarray(self.poly_smooth, float) if self.poly_smooth
+                         else np.zeros((0, 2, 3))),
+            poly_smooth_span=stack(self.poly_smooth_span, 0),
+            poly_smooth_face=stack(self.poly_smooth_face, 0, np.int64),
             poly_slice=slices,
             plane_normal=(np.concatenate(self.normals) if self.normals
                           else np.zeros((0, 3))),
@@ -196,6 +247,7 @@ class _Builder:
             label_size=stack([l[2] for l in self.labels], 0),
             label_bias=stack([l[3] for l in self.labels], 0),
             label_color=stack([l[4] for l in self.labels], 3),
+            label_flat=stack([l[5] for l in self.labels], 0, bool),
             label_char=[l[1] for l in self.labels],
         )
 
@@ -322,21 +374,24 @@ def virtual_cbeta(n: np.ndarray, ca: np.ndarray, c: np.ndarray) -> np.ndarray:
 def _ribbon_frames(run: Sequence[Residue], positions: np.ndarray):
     """Guide points and side vectors along one continuous chain.
 
+    The guide points are the Cα atoms themselves. Routing the spline through
+    the peptide-plane midpoints instead would smooth it slightly more, but it
+    lifts the ribbon off every Cα by up to an angstrom, and each residue's
+    glyph link has to start exactly where its Cα is -- otherwise the link
+    visibly launches from beside the ribbon rather than out of it.
+
     Carson-Bugg: between consecutive Cα atoms the peptide plane fixes a natural
     "side" direction, ``normalize((CA(i+1) − CA(i)) × (O(i) − CA(i)))``. That
     direction flips by nearly 180° from one residue to the next in a β-strand
     (the carbonyls alternate), so each is negated when it opposes its
-    predecessor -- without that the ribbon corkscrews once per residue.
+    predecessor -- without that the ribbon corkscrews once per residue. Each
+    residue then averages the peptide planes on either side of it.
     """
-    centers: List[np.ndarray] = []
-    sides: List[np.ndarray] = []
+    peptide: List[np.ndarray] = []
     previous: Optional[np.ndarray] = None
     for i in range(len(run) - 1):
-        ca_i = run[i].index("CA")
-        ca_j = run[i + 1].index("CA")
+        ca_i, ca_j = run[i].index("CA"), run[i + 1].index("CA")
         o_i = run[i].index("O")
-        if ca_i is None or ca_j is None:
-            continue
         a = positions[ca_j] - positions[ca_i]
         if o_i is None:
             side = previous if previous is not None else _unit(np.cross(a, (0.0, 0.0, 1.0)))
@@ -345,22 +400,15 @@ def _ribbon_frames(run: Sequence[Residue], positions: np.ndarray):
         if previous is not None and float(np.dot(side, previous)) < 0.0:
             side = -side
         previous = side
-        centers.append(0.5 * (positions[ca_i] + positions[ca_j]))
-        sides.append(side)
+        peptide.append(side)
 
-    if not centers:
+    if not peptide:
         return None
-    # Run the ribbon out to the first and last Cα rather than stopping at the
-    # midpoints, so a chain does not visibly lose half a residue at each end.
-    first_ca = run[0].index("CA")
-    last_ca = run[-1].index("CA")
-    if first_ca is not None:
-        centers.insert(0, positions[first_ca])
-        sides.insert(0, sides[0])
-    if last_ca is not None:
-        centers.append(positions[last_ca])
-        sides.append(sides[-1])
-    return np.asarray(centers), np.asarray(sides)
+    centers = np.array([positions[r.atoms["CA"]] for r in run])
+    sides = np.array([_unit(sum(peptide[j] for j in (i - 1, i)
+                                if 0 <= j < len(peptide)))
+                      for i in range(len(run))])
+    return centers, sides
 
 
 def _mitred_segment(a: np.ndarray, b: np.ndarray, side: np.ndarray,
@@ -394,7 +442,13 @@ def _mitred_segment(a: np.ndarray, b: np.ndarray, side: np.ndarray,
         # never actually produces.
         if float(np.dot(n, tangent)) * sign < 0.5:
             n = tangent * sign
-        caps.append((n, float(np.dot(n, through - center))))
+        # Push each cap a hair past the joint so neighbouring segments overlap.
+        # Ending exactly on the shared plane is right geometrically and wrong
+        # on screen: at the joint pixels the two solids tie on depth, and
+        # whichever cap wins is a rectangle seen edge-on, so every joint draws
+        # itself as a thin dark line across the ribbon. Buried inside the
+        # neighbour, the caps never win.
+        caps.append((n, float(np.dot(n, through - center)) + JOIN_OVERLAP))
     normals += [c[0] for c in caps]
     offsets += [c[1] for c in caps]
 
@@ -413,10 +467,11 @@ def _mitred_segment(a: np.ndarray, b: np.ndarray, side: np.ndarray,
                 along = max(along, abs((d - float(np.dot(n, o))) / denom))
     axes = np.array([tangent, side, up])
     return (center, np.array(normals), np.array(offsets),
-            axes, np.array([along, half_w, half_t]))
+            axes, np.array([along, half_w, half_t]), length * 0.5)
 
 
-def _add_ribbon(builder: _Builder, run: Sequence[Residue], positions: np.ndarray) -> None:
+def _add_ribbon(builder: _Builder, run: Sequence[Residue], positions: np.ndarray,
+                color, flat: bool) -> None:
     frames = _ribbon_frames(run, positions)
     if frames is None:
         return
@@ -434,17 +489,32 @@ def _add_ribbon(builder: _Builder, run: Sequence[Residue], positions: np.ndarray
     # their tangents, and the two open ends just use the tangent they have.
     joints = np.vstack([tangents[0], tangents[:-1] + tangents[1:], tangents[-1]])
 
+    # Each segment's own face normal, and the average of the two meeting at
+    # each joint. Shading interpolates between the joint normals across a
+    # segment, so it is continuous where segments meet and the ribbon reads as
+    # one curved band instead of a run of flat facets catching the light in
+    # steps. This is vertex-normal averaging; the geometry stays faceted, only
+    # the shading is smooth.
+    # The cross product drops the tangent component, so this is exactly the
+    # `up` axis _mitred_segment derives for the same segment.
+    faces = np.array([_unit(np.cross(tangents[k], side_path[k] + side_path[k + 1]))
+                      for k in range(len(tangents))])
+    joint_faces = np.vstack([faces[0], faces[:-1] + faces[1:], faces[-1]])
+    joint_faces /= np.maximum(np.linalg.norm(joint_faces, axis=1, keepdims=True), 1e-9)
+
     for k in range(len(path) - 1):
         seg = _mitred_segment(path[k], path[k + 1],
                               side_path[k] + side_path[k + 1],
                               joints[k], joints[k + 1], half_w, half_t)
         if seg is None:
             continue
-        center, normals, offsets, axes, half = seg
-        builder.solid(center, normals, offsets, builder.pal.ribbon, axes, half)
+        center, normals, offsets, axes, half, half_length = seg
+        builder.solid(center, normals, offsets, color, axes, half, flat=flat,
+                      smooth=(joint_faces[k], joint_faces[k + 1], half_length))
 
 
-def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray):
+def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray,
+               color, flat: bool):
     """An extruded ring-shaped plate for an aromatic side chain.
 
     Returns ``(center, reach)`` -- the glyph's anchor and how far the solid
@@ -457,12 +527,12 @@ def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray):
         return None
     ring = positions[idx]
     center, normal, e1, e2 = plane_frame(ring)
-    flat = np.column_stack([(ring - center) @ e1, (ring - center) @ e2])
-    hull = convex_hull_2d(flat)
+    planar = np.column_stack([(ring - center) @ e1, (ring - center) @ e2])
+    hull = convex_hull_2d(planar)
     if len(hull) < 3:
         return None
 
-    loop = flat[hull]
+    loop = planar[hull]
     edges = np.roll(loop, -1, axis=0) - loop
     # The hull is counter-clockwise, so (dy, -dx) points out of it.
     out2d = np.column_stack([edges[:, 1], -edges[:, 0]])
@@ -484,24 +554,27 @@ def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray):
     corners = _edge_intersections(out2d, side_offsets)
     half = np.array([np.abs(corners[:, 0]).max(), np.abs(corners[:, 1]).max(),
                      PLATE_THICKNESS * 0.5])
-    builder.solid(center, normals, offsets, builder.pal.plate,
-                  np.array([e1, e2, normal]), half)
+    builder.solid(center, normals, offsets, color,
+                  np.array([e1, e2, normal]), half, flat=flat)
     return center, float(np.linalg.norm(half))
 
 
-def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray):
-    """A rounded volume built from the side chain's own atom positions.
+def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray,
+                color, flat: bool):
+    """A rounded volume built from the side chain's own carbon positions.
 
-    A sphere per heavy atom, sized so that atoms a bond length apart merge into
-    one smooth solid -- which makes the shape literally the geometry of the
-    side chain rather than a stand-in for it.
+    A sphere per carbon, sized so that atoms a bond length apart merge into one
+    smooth solid -- which makes the shape literally the geometry of the side
+    chain rather than a stand-in for it. Only the carbons: the nitrogens,
+    oxygens and sulfurs hanging off the skeleton are drawn as themselves, and
+    swallowing them into the blob would be the one thing that hides them.
 
     Returns ``(anchor, reach)`` like :func:`_add_plate`.
     """
-    side = res.side_chain_indices()
+    side = res.side_chain_carbons()
     if side:
         for i in side:
-            builder.sphere(positions[i], BLOB_RADIUS, builder.pal.volume)
+            builder.sphere(positions[i], BLOB_RADIUS, color, flat)
         anchor = positions[side].mean(axis=0)
         reach = float(np.linalg.norm(positions[side] - anchor, axis=1).max()) + BLOB_RADIUS
         return anchor, reach
@@ -512,46 +585,75 @@ def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray):
         anchor = virtual_cbeta(positions[n], positions[ca], positions[c])
     else:
         anchor = positions[res.atoms["CA"]] + np.array([0.0, 0.0, 1.2])
-    builder.sphere(anchor, GLYCINE_RADIUS, builder.pal.volume)
+    builder.sphere(anchor, GLYCINE_RADIUS, color, flat)
     return anchor, GLYCINE_RADIUS
 
 
-def _node_positions(res: Residue, atom: int, role: str,
-                    positions: np.ndarray) -> List[Tuple[np.ndarray, str]]:
-    """Where a residue's hydrogen-bonding node(s) for one atom go.
+def _add_atoms(builder: _Builder, residues: Sequence[Residue], molecule: Molecule,
+               bonds, colors: np.ndarray, radii: np.ndarray, flat: np.ndarray,
+               bond_radius: float) -> None:
+    """Draw every side-chain atom the glyphs do not stand for as itself.
 
-    A pure donor or acceptor sits exactly on the atom's file coordinates. An
-    atom that does both -- a hydroxyl, a histidine ring nitrogen, a thiol --
-    cannot show two colours in one place, so its acceptor node keeps the exact
-    coordinates and its donor node is set one node-width out along the atom's
-    own bond axis.
+    A ribbon stands for the backbone and a glyph solid for its side chain's
+    carbon skeleton. What is left over -- a carboxylate, a hydroxyl, the indole
+    N–H, a thiol -- is drawn as a real atom in its element colour, bonded to
+    what it is bonded to, at the exact coordinates in the file. Those groups
+    are where the chemistry is, and an abstract shape is the wrong thing to put
+    over them.
+
+    Nothing tests whether an atom is inside its own solid: the ones a shape
+    swallows are hidden by the z-buffer, which is cheaper and more honest than
+    a rule about which groups matter.
     """
-    p = positions[atom]
-    if role != "both":
-        return [(p, role)]
-    others = [i for i in res.atoms.values() if i != atom]
-    if others:
-        d = positions[others] - p
-        axis = _unit(-d[int(np.argmin(np.linalg.norm(d, axis=1)))])
-    else:
-        axis = np.array([0.0, 0.0, 1.0])
-    return [(p, "acceptor"), (p + axis * NODE_SPLIT, "donor")]
+    symbols = molecule.symbols
+    polar = {i for res in residues for i in res.side_chain_polar()}
+    if not polar:
+        return
+    # Hydrogens only where they say something the heavy atom does not: on a
+    # hydroxyl or an amide, which is what makes it a donor. A structure solved
+    # by NMR carries every C–H as well, and drawing those buries the skin under
+    # a hundred white spheres -- they belong to the carbon skeleton the glyph
+    # already stands for.
+    drawn = set(polar)
+    for a, b, _order in bonds:
+        for h, heavy in ((a, b), (b, a)):
+            if symbols[h].strip().upper() == "H" and heavy in polar:
+                drawn.add(h)
+
+    for i in sorted(drawn):
+        builder.sphere(molecule.positions[i], float(radii[i]), colors[i], bool(flat[i]))
+    for a, b, _order in bonds:
+        # A bond is worth drawing when it holds a drawn atom on: to another
+        # drawn atom, or back to the carbon skeleton it hangs off.
+        both = a in drawn and b in drawn
+        anchored = ((a in polar and symbols[b].strip().upper() == "C")
+                    or (b in polar and symbols[a].strip().upper() == "C"))
+        if not (both or anchored):
+            continue
+        builder.cylinder(molecule.positions[a], molecule.positions[b], bond_radius,
+                         colors[a], colors[b], bool(flat[a]))
 
 
-def _add_nodes(builder: _Builder, residues: Sequence[Residue],
-               positions: np.ndarray) -> None:
-    for res in residues:
-        for name, atom in res.atoms.items():
-            role = hbond_role(res.name, name)
-            if role is None:
-                continue
-            for point, kind in _node_positions(res, atom, role, positions):
-                color = builder.pal.donor if kind == "donor" else builder.pal.acceptor
-                builder.sphere(point, NODE_RADIUS, color)
+def _add_link_to_glyph(builder: _Builder, res: Residue, positions: np.ndarray,
+                       anchor: np.ndarray, color, flat: bool) -> None:
+    """Cα bead → rod → Cβ bead → rod → glyph.
+
+    The Cβ is a bead on the way out rather than a point the rod passes through:
+    it is a real atom of the residue and reads better shown than skewered.
+    """
+    ca = positions[res.atoms["CA"]]
+    builder.sphere(ca, BEAD_RADIUS, color, flat)
+    cb = res.index("CB")
+    waypoints = [ca] if cb is None else [ca, positions[cb]]
+    if cb is not None:
+        builder.sphere(positions[cb], BEAD_RADIUS, color, flat)
+    for start, end in zip(waypoints, waypoints[1:] + [anchor]):
+        if float(np.linalg.norm(end - start)) > 1e-6:
+            builder.cylinder(start, end, ROD_RADIUS, color, flat=flat)
 
 
 def _add_links(builder: _Builder, residues: Sequence[Residue],
-               positions: np.ndarray) -> None:
+               positions: np.ndarray, colors: np.ndarray, flat: np.ndarray) -> None:
     """Hairlines between backbone amides that are close enough to be bonded.
 
     Distance alone, on the heavy atoms -- the files this draws usually have no
@@ -573,8 +675,11 @@ def _add_links(builder: _Builder, residues: Sequence[Residue],
     close = (dist < LINK_MAX_DISTANCE) & (
         np.abs(d_res[:, None] - a_res[None, :]) >= LINK_MIN_SEPARATION)
     for i, j in zip(*np.nonzero(close)):
-        builder.cylinder(positions[d_idx[i]], positions[a_idx[j]],
-                         LINK_RADIUS, builder.pal.link)
+        donor = d_idx[i]
+        is_flat = bool(flat[donor])
+        builder.cylinder(positions[donor], positions[a_idx[j]], LINK_RADIUS,
+                         colors[donor] if is_flat else builder.pal.link,
+                         flat=is_flat)
 
 
 # -- entry point ----------------------------------------------------------
@@ -583,64 +688,128 @@ _CACHE: List[Tuple[tuple, GlyphScene]] = []
 _CACHE_LIMIT = 4
 
 
-def build_scene(molecule: Molecule, theme: str = "dark") -> Optional[GlyphScene]:
+def build_scene(molecule: Molecule, theme: str = "dark", *,
+                atom_colors=None, atom_radii=None, flat_mask=None,
+                bond_radius: float = 0.10) -> Optional[GlyphScene]:
     """Glyph geometry for *molecule*, or None if it is not a protein.
 
     None means "this skin has nothing to say about this molecule" -- a file
     with no residue names (xyz, mol, sdf) or with no amino acids in it. The
     renderer falls back to ball-and-stick on None rather than drawing an empty
     frame.
+
+    ``atom_colors``/``atom_radii`` are how atoms drawn as themselves get their
+    element colouring, so the skin inherits the light/dark palette and any hover
+    tint without knowing about either. ``flat_mask`` marks the atoms of overlaid
+    structures other than the main one: those residues render in their entry's
+    flat tint, exactly as the other representations do, so an overlay stays
+    readable as "this one is the subject, those are the comparison".
     """
     residues = protein_residues(molecule)
     if not residues:
         return None
 
     positions = molecule.positions
+    colors = (np.asarray(atom_colors, float) if atom_colors is not None
+              else molecule.element_colors())
+    radii = (np.asarray(atom_radii, float) if atom_radii is not None
+             else molecule.vdw_radii() * 0.25)
+    flat = (np.asarray(flat_mask, bool) if flat_mask is not None
+            else np.zeros(molecule.n_atoms, bool))
     pal = palette(theme)
     builder = _Builder(pal)
 
+    def tint(res: Residue, own):
+        """A tinted overlay entry paints every glyph in its own flat colour;
+        the main frame keeps the skin's palette."""
+        ca = res.atoms["CA"]
+        return (colors[ca], True) if flat[ca] else (own, False)
+
     for run in chain_runs(residues, positions):
-        _add_ribbon(builder, run, positions)
+        color, is_flat = tint(run[0], pal.ribbon)
+        _add_ribbon(builder, run, positions, color, is_flat)
 
     for res in residues:
-        ca = res.atoms["CA"]
-        shape = _add_plate(builder, res, positions) if res.is_aromatic else None
+        solid_color, is_flat = tint(res, pal.plate if res.is_aromatic else pal.volume)
+        shape = (_add_plate(builder, res, positions, solid_color, is_flat)
+                 if res.is_aromatic else None)
         if shape is None:
-            shape = _add_volume(builder, res, positions)
+            shape = _add_volume(builder, res, positions,
+                                tint(res, pal.volume)[0], is_flat)
         anchor, reach = shape
-        builder.cylinder(positions[ca], anchor, STICK_RADIUS, pal.stick)
+        bead_color, _ = tint(res, pal.beads[residue_class(res.letter)])
+        _add_link_to_glyph(builder, res, positions, anchor, bead_color, is_flat)
         # The letter is lifted by the whole reach of its own solid, so it lands
         # on the near surface from every camera angle. Biasing by a thickness
         # or a single sphere radius is not enough: a tilted plate and a long
         # side chain both put geometry well in front of their own anchor, and
         # the letter comes out chewed into an unreadable shape.
-        builder.label(anchor, res.letter, LETTER_SIZE, reach + 0.05, pal.ink)
+        builder.label(anchor, res.letter, LETTER_SIZE, reach + 0.05, pal.ink, is_flat)
 
-    _add_nodes(builder, residues, positions)
-    _add_links(builder, residues, positions)
+    # Which hydrogens to keep and which bonds to draw both need connectivity.
+    # The render path always perceives before drawing, but a caller building a
+    # scene straight from a freshly parsed molecule has none yet, and would
+    # silently get no bonds and no hydroxyl hydrogens.
+    bonds = molecule.bonds or perceive_bonds(molecule)
+    _add_atoms(builder, residues, molecule, bonds, colors, radii, flat, bond_radius)
+    _add_links(builder, residues, positions, colors, flat)
     return builder.freeze()
 
 
-def _cache_key(molecule: Molecule, theme: str) -> tuple:
+def glyph_scene_for(molecule: Molecule, style) -> Optional[GlyphScene]:
+    """The cached glyph scene a :class:`render.Style` asks for.
+
+    Every caller goes through here -- the renderer, the camera's fit, and the
+    widget's "is there anything to draw?" check. They must agree on the whole
+    argument list or one of them populates the cache with a scene the others
+    would not have built, and whichever asks first wins.
+    """
+    return cached_scene(
+        molecule, style.glyph_theme,
+        atom_colors=(style.color_override if style.color_override is not None
+                     else molecule.element_colors()),
+        atom_radii=molecule.vdw_radii() * style.atom_scale,
+        flat_mask=style.flat_mask,
+        bond_radius=style.bond_radius,
+    )
+
+
+def _digest(array) -> tuple:
+    """A cheap, order-sensitive summary of an array for the cache key."""
+    if array is None:
+        return ()
+    a = np.asarray(array, float)
+    return (a.shape, float(a.sum()), float(a.ravel()[-1]) if a.size else 0.0)
+
+
+def _cache_key(molecule: Molecule, theme: str, atom_colors, flat_mask) -> tuple:
     p = molecule.positions
     # Cheap and specific: identity plus a checksum of the coordinates, so an
-    # edit or a new frame invalidates but a pure camera move does not.
+    # edit or a new frame invalidates but a pure camera move does not. Colour
+    # and flatness are geometry inputs too now -- marking a structure into an
+    # overlay changes neither the atom count nor a coordinate, so without them
+    # the cache would keep serving the untinted scene.
     return (id(molecule), molecule.n_atoms, str(theme),
             float(p.sum()) if p.size else 0.0,
-            float(p[-1, 0]) if p.size else 0.0)
+            float(p[-1, 0]) if p.size else 0.0,
+            _digest(atom_colors), _digest(flat_mask))
 
 
-def cached_scene(molecule: Molecule, theme: str = "dark") -> Optional[GlyphScene]:
+def cached_scene(molecule: Molecule, theme: str = "dark", *,
+                 atom_colors=None, atom_radii=None, flat_mask=None,
+                 bond_radius: float = 0.10) -> Optional[GlyphScene]:
     """:func:`build_scene`, memoized across frames.
 
     A spin or an orbit re-renders the same geometry many times a second;
     rebuilding splines and hulls each time would dominate the frame.
     """
-    key = _cache_key(molecule, theme)
+    key = _cache_key(molecule, theme, atom_colors, flat_mask)
     for k, scene in _CACHE:
         if k == key:
             return scene
-    scene = build_scene(molecule, theme)
+    scene = build_scene(molecule, theme, atom_colors=atom_colors,
+                        atom_radii=atom_radii, flat_mask=flat_mask,
+                        bond_radius=bond_radius)
     _CACHE.append((key, scene))
     if len(_CACHE) > _CACHE_LIMIT:
         _CACHE.pop(0)

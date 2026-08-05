@@ -25,7 +25,8 @@ MATTE = 0.18
 
 def draw_polyhedron(center_view, normals_view, offsets, half_px, albedo,
                     zoom, ox_s, oy_s, xs, ys, width, height,
-                    color, alpha, zbuf, shade_write, y_lo, y_hi) -> None:
+                    color, alpha, zbuf, shade_write, y_lo, y_hi,
+                    flat=False, smooth=None) -> None:
     """Rasterize one convex solid given as half-spaces ``n·(p − c) ≤ d``.
 
     The camera is orthographic, so every ray is axis-aligned in view space and
@@ -38,6 +39,14 @@ def draw_polyhedron(center_view, normals_view, offsets, half_px, albedo,
     is real wherever it clears every floor and every mask. The plane that
     supplied that ceiling is the surface normal, so shading comes out of the
     same pass with no extra work.
+
+    ``smooth`` is ``(face_index, tangent_view, half_along, n_start, n_end)``:
+    on the two faces beginning at *face_index* the constant plane normal is
+    replaced by a normal interpolated along the tangent between the two joint
+    normals. That is vertex-normal averaging -- the geometry stays faceted, but
+    shading runs continuously across the joins, which is what turns a chain of
+    ribbon segments into one curved band instead of a row of flats each
+    catching the light in a step.
     """
     cx, cy, cz = (float(v) for v in center_view)
     scx = ox_s + cx * zoom
@@ -91,11 +100,45 @@ def draw_polyhedron(center_view, normals_view, offsets, half_px, albedo,
         return
 
     face = normals[which]                                   # (h, w, 3)
+    if smooth is not None:
+        first, tangent, up, half_along, n_start, n_end = smooth
+        # Everything but the two thin side faces: the ribbon's flat top and
+        # bottom, and its end caps. The caps matter as much as the faces --
+        # they are internal, one segment's cap sits against the next one's, and
+        # left with their own edge-on normals they draw a hairline dark crease
+        # across the ribbon at every joint.
+        on_face = which >= first
+        if on_face.any():
+            # Where along the segment each hit landed, as 0..1. The ceiling is
+            # +inf outside the solid, and inf * a zero tangent component is a
+            # nan the shading would carry into a warning, so flatten it first.
+            dz = np.where(np.isfinite(ceiling), ceiling, np.float32(0.0))
+
+            def project(axis):
+                return ((dx * np.float32(axis[0]))[None, :]
+                        + (dy * np.float32(axis[1]))[:, None]
+                        + dz * np.float32(axis[2]))
+
+            s = project(tangent)
+            s *= np.float32(0.5 / max(float(half_along), 1e-9))
+            s += np.float32(0.5)
+            np.clip(s, 0.0, 1.0, out=s)
+            # Adjacent joint normals are a few degrees apart, so the lerp is
+            # within a fraction of a percent of unit length -- not worth a
+            # square root per pixel to renormalize.
+            blend = (np.asarray(n_start, np.float32)
+                     + s[..., None] * np.asarray(n_end - n_start, np.float32))
+            # Which face of the ribbon the hit is on, from which side of the
+            # slab it landed. Stable where a normal-vs-normal test is not:
+            # a cap is perpendicular to the surface it has to blend into.
+            blend = np.where((project(up) >= 0.0)[..., None], blend, -blend)
+            face = np.where(on_face[..., None], blend, face)
+
     shade_write(color[y0:y1, x0:x1],
                 alpha[y0:y1, x0:x1] if alpha is not None else None,
                 sub_z, win, depth,
                 face[..., 0], face[..., 1], face[..., 2],
-                np.asarray(albedo, np.float32), specular=MATTE)
+                np.asarray(albedo, np.float32), flat=flat, specular=MATTE)
 
 
 # Below this cap height in pixels a stroked capital collapses into a blob, so
@@ -183,21 +226,31 @@ class Prepared:
     poly_slice: np.ndarray
     poly_half_px: np.ndarray       # (P, 2) screen half-width/half-height
     poly_color: np.ndarray
+    poly_flat: np.ndarray
+    poly_tangent: np.ndarray       # (P, 3) view-space long axis, for smooth shading
+    poly_up: np.ndarray            # (P, 3) view-space face normal axis
+    poly_along: np.ndarray         # (P,) half-extent along that axis
+    poly_smooth: np.ndarray        # (P, 2, 3) view-space joint normals
+    poly_smooth_face: np.ndarray   # (P,) first smooth-shaded plane, or -1
     poly_rows: np.ndarray          # (P, 2) screen y-interval
     cyl_a: np.ndarray
     cyl_b: np.ndarray
     cyl_radius: np.ndarray
     cyl_color: np.ndarray
+    cyl_color_b: np.ndarray
+    cyl_flat: np.ndarray
     cyl_rows: np.ndarray
     sphere_center: np.ndarray
     sphere_radius: np.ndarray
     sphere_color: np.ndarray
+    sphere_flat: np.ndarray
     sphere_order: np.ndarray
     sphere_rows: np.ndarray
     label_center: np.ndarray
     label_size: np.ndarray
     label_bias: np.ndarray
     label_color: np.ndarray
+    label_flat: np.ndarray
     label_char: List[str]
     label_rows: np.ndarray
 
@@ -227,10 +280,16 @@ def prepare(scene, camera, zoom, oy_s) -> Prepared:
     # sees. Exact for a box, and for a ribbon segment -- a thin slab -- several
     # times smaller than the square a bounding sphere would ask to be shaded.
     poly_half_px = np.zeros((0, 2))
+    poly_tangent = np.zeros((0, 3))
+    poly_up = np.zeros((0, 3))
+    poly_smooth = np.zeros((0, 2, 3))
     if len(poly_c):
         axes_view = scene.poly_axes @ camera.rotation.T          # (P, 3, 3)
         poly_half_px = np.einsum("pij,pi->pj", np.abs(axes_view[:, :, :2]),
                                  scene.poly_half) * zoom
+        poly_tangent = axes_view[:, 0, :]
+        poly_up = axes_view[:, 2, :]
+        poly_smooth = scene.poly_smooth @ camera.rotation.T
 
     cyl_rows = np.zeros((0, 2))
     if len(cyl_a):
@@ -242,18 +301,23 @@ def prepare(scene, camera, zoom, oy_s) -> Prepared:
     return Prepared(
         poly_center=poly_c, poly_normal=poly_n, poly_offset=scene.plane_offset,
         poly_slice=scene.poly_slice, poly_half_px=poly_half_px,
-        poly_color=scene.poly_color,
+        poly_color=scene.poly_color, poly_flat=scene.poly_flat,
+        poly_tangent=poly_tangent, poly_up=poly_up,
+        poly_along=scene.poly_smooth_span,
+        poly_smooth=poly_smooth, poly_smooth_face=scene.poly_smooth_face,
         poly_rows=_rows(oy_s - poly_c[:, 1] * zoom,
                         poly_half_px[:, 1] if len(poly_half_px) else np.zeros(0)),
         cyl_a=cyl_a, cyl_b=cyl_b, cyl_radius=scene.cyl_radius,
-        cyl_color=scene.cyl_color, cyl_rows=cyl_rows,
+        cyl_color=scene.cyl_color, cyl_color_b=scene.cyl_color_b,
+        cyl_flat=scene.cyl_flat, cyl_rows=cyl_rows,
         sphere_center=sph_c, sphere_radius=scene.sphere_radius,
-        sphere_color=scene.sphere_color,
+        sphere_color=scene.sphere_color, sphere_flat=scene.sphere_flat,
         # far to near, like the atom loop, so specular highlights layer sanely
         sphere_order=np.argsort(sph_c[:, 2]) if len(sph_c) else np.zeros(0, np.int64),
         sphere_rows=_rows(oy_s - sph_c[:, 1] * zoom, scene.sphere_radius * zoom),
         label_center=lab_c, label_size=scene.label_size, label_bias=scene.label_bias,
-        label_color=scene.label_color, label_char=scene.label_char,
+        label_color=scene.label_color, label_flat=scene.label_flat,
+        label_char=scene.label_char,
         label_rows=_rows(oy_s - lab_c[:, 1] * zoom, scene.label_size * zoom * 0.5),
     )
 
@@ -276,10 +340,15 @@ def draw_band(prep: Prepared, zoom, ox_s, oy_s, xs, ys, width, height,
     bounds = prep.poly_slice
     for p in _in_band(prep.poly_rows, y_lo, y_hi):
         lo, hi = int(bounds[p]), int(bounds[p + 1])
+        face = int(prep.poly_smooth_face[p])
+        smooth = None if face < 0 else (
+            face, prep.poly_tangent[p], prep.poly_up[p], float(prep.poly_along[p]),
+            prep.poly_smooth[p, 0], prep.poly_smooth[p, 1])
         draw_polyhedron(prep.poly_center[p], prep.poly_normal[lo:hi],
                         prep.poly_offset[lo:hi], prep.poly_half_px[p],
                         prep.poly_color[p], zoom, ox_s, oy_s, xs, ys,
-                        width, height, color, alpha, zbuf, shade_write, y_lo, y_hi)
+                        width, height, color, alpha, zbuf, shade_write, y_lo, y_hi,
+                        flat=bool(prep.poly_flat[p]), smooth=smooth)
 
     # The cylinder rasterizer shades its whole bounding box and writes only the
     # pixels that pass coverage and depth. Outside the cylinder its "normal"
@@ -289,16 +358,18 @@ def draw_band(prep: Prepared, zoom, ox_s, oy_s, xs, ys, width, height,
     # numbers discarded a line later but noisily enough to spam a terminal.
     with np.errstate(over="ignore"):
         for k in _in_band(prep.cyl_rows, y_lo, y_hi):
-            col = prep.cyl_color[k].astype(np.float32)
             draw_cylinder(prep.cyl_a[k], prep.cyl_b[k], float(prep.cyl_radius[k]),
-                          col, col, y_lo, y_hi)
+                          prep.cyl_color[k].astype(np.float32),
+                          prep.cyl_color_b[k].astype(np.float32),
+                          y_lo, y_hi, bool(prep.cyl_flat[k]))
 
     if len(prep.sphere_center):
         hit = np.zeros(len(prep.sphere_center), bool)
         hit[_in_band(prep.sphere_rows, y_lo, y_hi)] = True
         for k in prep.sphere_order[hit[prep.sphere_order]]:
             draw_sphere(prep.sphere_center[k], float(prep.sphere_radius[k]),
-                        prep.sphere_color[k].astype(np.float32), y_lo, y_hi)
+                        prep.sphere_color[k].astype(np.float32), y_lo, y_hi,
+                        bool(prep.sphere_flat[k]))
 
     for k in _in_band(prep.label_rows, y_lo, y_hi):
         draw_label(prep.label_center[k], prep.label_char[k],
