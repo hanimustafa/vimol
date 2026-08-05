@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from typing import List, Optional, Tuple
+
 from .molecule import Molecule
 from .bonds import perceive_bonds
 
@@ -98,11 +100,51 @@ def largest_ring_system(molecule: Molecule) -> np.ndarray:
     return np.asarray(chosen, dtype=np.int64)
 
 
+def peptide_motifs(molecule: Molecule) -> List[List[Tuple[int, int, int, Optional[int]]]]:
+    """Runs of ``(N, Cα, C, O)`` motifs, in chain order, from geometry alone.
+
+    This is what lets a format with no atom names -- an xyz file -- still be
+    read as a protein: the motif is recognized from elements and connectivity,
+    and the runs are linked through the real peptide bonds. ``O`` is the
+    carbonyl oxygen, or None where the file has none (a chain's last residue
+    written without its terminal oxygens).
+
+    Shared by the selection presets and by ``residues.infer_residues``, which
+    hangs side chains off the Cα of each motif. Returned as runs rather than a
+    flat list because both callers need to know where one chain stops: a
+    ribbon must not leap a chain break, and neither must residue numbering.
+    """
+    return _peptide_motifs(molecule)[0]
+
+
 def _topology_backbone(molecule: Molecule, include_beta_carbon: bool) -> np.ndarray:
     """Infer N-Cα-C(-O) motifs from elements and connectivity in O(N+E)."""
+    runs, neighbors, symbols = _peptide_motifs(molecule)
+    selected = set()
+    for run in runs:
+        for nitrogen, alpha, carbonyl, _oxygen in run:
+            # Backbone here deliberately means the peptide path. Carbonyl O is
+            # a branch off that path and must not participate in an RMSD
+            # subset.
+            selected.update((nitrogen, alpha, carbonyl))
+            if include_beta_carbon:
+                sidechain = [j for j in neighbors[alpha]
+                             if symbols[j] == "C" and j != carbonyl]
+                if sidechain:
+                    beta = min(
+                        sidechain,
+                        key=lambda j: float(np.dot(
+                            molecule.positions[j] - molecule.positions[alpha],
+                            molecule.positions[j] - molecule.positions[alpha])))
+                    selected.add(beta)
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def _peptide_motifs(molecule: Molecule):
+    """(runs, neighbors, symbols) -- the shared half of both callers' work."""
     n = molecule.n_atoms
     if n < 4:
-        return np.empty(0, dtype=np.int64)
+        return [], [], molecule.symbols
     bonds = molecule.bonds or perceive_bonds(molecule)
     neighbors = [[] for _ in range(n)]
     bond_orders = {}
@@ -171,22 +213,31 @@ def _topology_backbone(molecule: Molecule, include_beta_carbon: bool) -> np.ndar
                     linked.update((i, j))
     kept = linked if linked else ({0} if len(motifs) == 1 else set())
 
-    selected = set()
+    # Walk the peptide bonds into ordered runs: the successor of a motif is the
+    # one whose N its carbonyl is bonded to. A motif nobody points at starts a
+    # run, which is also how the N-terminus is found.
+    successor, predecessor = {}, {}
     for i in kept:
-        nitrogen, alpha, carbonyl = motifs[i]
-        # Backbone here deliberately means the peptide path. Carbonyl O is a
-        # branch off that path and must not participate in an RMSD subset.
-        selected.update((nitrogen, alpha, carbonyl))
-        if include_beta_carbon:
-            sidechain = [j for j in neighbors[alpha]
-                         if symbols[j] == "C" and j != carbonyl]
-            if sidechain:
-                beta = min(
-                    sidechain,
-                    key=lambda j: float(np.dot(molecule.positions[j] - molecule.positions[alpha],
-                                              molecule.positions[j] - molecule.positions[alpha])))
-                selected.add(beta)
-    return np.asarray(sorted(selected), dtype=np.int64)
+        for neighbor in neighbors[motifs[i][2]]:
+            for j in motif_by_nitrogen.get(neighbor, ()):
+                if j in kept and j != i:
+                    successor[i] = j
+                    predecessor[j] = i
+    runs, seen = [], set()
+    starts = [i for i in sorted(kept) if i not in predecessor]
+    for start in starts + [i for i in sorted(kept) if i not in seen]:
+        if start in seen:
+            continue
+        run, at = [], start
+        while at is not None and at not in seen:
+            seen.add(at)
+            nitrogen, alpha, carbonyl = motifs[at]
+            oxygens = carbonyl_oxygens(carbonyl)
+            run.append((nitrogen, alpha, carbonyl, oxygens[0] if oxygens else None))
+            at = successor.get(at)
+        if run:
+            runs.append(run)
+    return runs, neighbors, symbols
 
 
 def peptide_backbone(molecule: Molecule, include_beta_carbon: bool = False) -> np.ndarray:
@@ -212,4 +263,5 @@ def peptide_backbone(molecule: Molecule, include_beta_carbon: bool = False) -> n
     return _topology_backbone(molecule, include_beta_carbon)
 
 
-__all__ = ["heavy_atoms", "largest_ring_system", "peptide_backbone"]
+__all__ = ["heavy_atoms", "largest_ring_system", "peptide_backbone",
+           "peptide_motifs"]

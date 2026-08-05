@@ -60,7 +60,51 @@ def test_residues_group_into_the_real_sequence(hairpin):
     assert res[1].is_aromatic and not res[0].is_aromatic
 
 
-def test_a_molecule_without_residue_names_has_no_residues():
+def test_a_protein_with_no_names_at_all_is_read_from_its_structure(hairpin):
+    """An xyz file has neither residue names nor atom names, so both come from
+    the bond graph: the backbone from the same motif detector the selection
+    presets use, the identities from each side chain's (element, bond-distance)
+    signature. It has to agree with the PDB it was stripped from."""
+    from vimol.molecule import Molecule
+    bare = Molecule(symbols=list(hairpin.symbols), positions=hairpin.positions.copy())
+    assert not bare.atom_resnames and not bare.atom_names
+    named = residues.protein_residues(hairpin)
+    guessed = residues.protein_residues(bare)
+    assert [r.letter for r in guessed] == [r.letter for r in named]
+    # And every atom got the name it would have had, which is what lets the
+    # ring lookups and the side-chain splits work unchanged.
+    for a, b in zip(named, guessed):
+        for name, index in a.atoms.items():
+            assert b.atoms.get(name) == index, f"{a.name} {name}"
+
+
+def test_the_side_chain_signatures_tell_all_twenty_apart():
+    assert len(residues._BY_SIGNATURE) == len(residues.SIDE_CHAIN_ATOMS) == 20
+
+
+def test_a_disulfide_does_not_merge_two_cysteines():
+    """The one covalent bond between two side chains a protein routinely has.
+    Walking across it fuses both into a fragment matching nothing, which is
+    what turned crambin's six cysteines into UNK. No residue owns two sulfurs,
+    so refusing to step from one to another costs nothing."""
+    #  CA - CB - SG ~~ SG - CB - CA, the two halves of a disulfide bridge.
+    symbols = ["C", "C", "S", "S", "C", "C"]
+    neighbors = [[1], [0, 2], [1, 3], [2, 4], [3, 5], [4]]
+    walked = residues._walk_side_chain(0, {0}, neighbors, symbols)
+    assert sorted(walked) == [(1, 1), (2, 2)]
+    # Without the rule the walk runs all the way into the partner residue.
+    assert (4, 4) not in walked and (5, 5) not in walked
+
+
+def test_a_glyph_scene_builds_from_a_nameless_protein(hairpin):
+    from vimol.molecule import Molecule
+    bare = Molecule(symbols=list(hairpin.symbols), positions=hairpin.positions.copy())
+    scene = glyphs.build_scene(bare, "light")
+    assert scene is not None
+    assert "".join(scene.label_char) == "SWTWENGKWTWK"
+
+
+def test_a_molecule_that_is_not_a_peptide_has_no_residues():
     mol = vimol.load(os.path.join(os.path.dirname(__file__), "..",
                                   "examples", "water.xyz"))
     assert residues.protein_residues(mol) == []
@@ -493,7 +537,7 @@ def test_the_skin_says_why_it_did_nothing_for_a_non_protein():
                                   "examples", "benzene.xyz"))
     widget = MoleculeWidget(mol, 160, 120)
     widget.handle_key("5")
-    assert "protein" in widget.rep_note
+    assert "backbone" in widget.rep_note
     widget.handle_key("1")
     assert widget.rep_note == ""
 

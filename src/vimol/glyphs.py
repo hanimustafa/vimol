@@ -721,10 +721,11 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
                 bond_radius: float = 0.10) -> Optional[GlyphScene]:
     """Glyph geometry for *molecule*, or None if it is not a protein.
 
-    None means "this skin has nothing to say about this molecule" -- a file
-    with no residue names (xyz, mol, sdf) or with no amino acids in it. The
-    renderer falls back to ball-and-stick on None rather than drawing an empty
-    frame.
+    None means "this skin has nothing to say about this molecule" -- nothing in
+    it that walks like a peptide. A file with no names at all still works: the
+    backbone and the residue identities are inferred from elements and
+    connectivity (see ``residues.infer_residues``). The renderer falls back to
+    ball-and-stick on None rather than drawing an empty frame.
 
     ``atom_colors``/``atom_radii`` are how atoms drawn as themselves get their
     element colouring, so the skin inherits the light/dark palette and any hover

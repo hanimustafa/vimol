@@ -49,6 +49,51 @@ PROLINE_RING = ("N", "CA", "CB", "CG", "CD")
 RING_ATOMS: Dict[str, Tuple[str, ...]] = dict(AROMATIC_RINGS)
 RING_ATOMS["PRO"] = PROLINE_RING
 
+# Every side chain's atoms, in PDB names. Used to name and identify a residue
+# in a file that has no names at all: PDB side-chain names encode the element
+# and the Greek letter, and the Greek letter *is* the bond distance from Cα, so
+# each name here doubles as an (element, depth) fact. The multiset of those
+# facts is unique across the twenty, which is what makes the identification a
+# lookup rather than a search.
+SIDE_CHAIN_ATOMS: Dict[str, Tuple[str, ...]] = {
+    "ALA": ("CB",),
+    "ARG": ("CB", "CG", "CD", "NE", "CZ", "NH1", "NH2"),
+    "ASN": ("CB", "CG", "OD1", "ND2"),
+    "ASP": ("CB", "CG", "OD1", "OD2"),
+    "CYS": ("CB", "SG"),
+    "GLN": ("CB", "CG", "CD", "OE1", "NE2"),
+    "GLU": ("CB", "CG", "CD", "OE1", "OE2"),
+    "GLY": (),
+    "HIS": ("CB", "CG", "ND1", "CD2", "CE1", "NE2"),
+    "ILE": ("CB", "CG1", "CG2", "CD1"),
+    "LEU": ("CB", "CG", "CD1", "CD2"),
+    "LYS": ("CB", "CG", "CD", "CE", "NZ"),
+    "MET": ("CB", "CG", "SD", "CE"),
+    "PHE": ("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ"),
+    "PRO": ("CB", "CG", "CD"),
+    "SER": ("CB", "OG"),
+    "THR": ("CB", "OG1", "CG2"),
+    "TRP": ("CB", "CG", "CD1", "CD2", "NE1", "CE2", "CE3", "CZ2", "CZ3", "CH2"),
+    "TYR": ("CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", "OH"),
+    "VAL": ("CB", "CG1", "CG2"),
+}
+
+# beta, gamma, delta, epsilon, zeta, eta -- one bond further from Cα each.
+_GREEK = {"B": 1, "G": 2, "D": 3, "E": 4, "Z": 5, "H": 6}
+
+
+def _atom_fact(name: str) -> Tuple[int, str]:
+    """(bond distance from Cα, element) for a PDB side-chain atom name."""
+    return _GREEK.get(name[1], 0), name[0]
+
+
+def _signature(facts) -> Tuple[Tuple[int, str], ...]:
+    return tuple(sorted(facts))
+
+
+_BY_SIGNATURE = {_signature(_atom_fact(n) for n in names): resname
+                 for resname, names in SIDE_CHAIN_ATOMS.items()}
+
 # Side-chain hydrogen-bonding roles. Nothing draws from this at the moment:
 # the skin used to mark donors and acceptors with coloured nodes, then with
 # hairlines between backbone pairs, and both were dropped -- the atoms
@@ -202,7 +247,8 @@ def protein_residues(molecule: Molecule) -> List[Residue]:
     names, keys = molecule.atom_names, molecule.atom_keys
     resnames = molecule.atom_resnames
     if not (len(names) == len(keys) == len(resnames) == n) or n == 0:
-        return []
+        # No names to read -- infer the whole thing from the structure.
+        return infer_residues(molecule) if n else []
 
     out: List[Residue] = []
     current: Optional[Tuple[str, str, str]] = None
@@ -228,6 +274,98 @@ def protein_residues(molecule: Molecule) -> List[Residue]:
             out[-1].elements[name] = molecule.symbols[i].strip().upper()
 
     return [r for r in out if "CA" in r.atoms]
+
+
+def infer_residues(molecule: Molecule) -> List[Residue]:
+    """Read a protein out of elements and connectivity, with no names to help.
+
+    An xyz file carries neither residue names nor atom names, so both have to
+    come from the structure. The backbone comes from ``select.peptide_motifs``,
+    the same detector the selection presets use. Each Cα then gets its side
+    chain walked outward, breadth first, which gives every atom its bond
+    distance from the Cα -- and that distance is exactly what a PDB name's
+    Greek letter records. So the walk yields the same (element, depth) facts a
+    named file would, the multiset identifies the residue against
+    :data:`SIDE_CHAIN_ATOMS`, and pairing the two off in the same order hands
+    every atom the name it would have had in a PDB.
+
+    The result is ordinary :class:`Residue` objects, indistinguishable from the
+    parsed ones, so everything downstream is unchanged.
+    """
+    from .bonds import perceive_bonds
+    from .select import peptide_motifs
+
+    runs = peptide_motifs(molecule)
+    if not runs:
+        return []
+    symbols = [s.strip().upper() for s in molecule.symbols]
+    neighbors: List[List[int]] = [[] for _ in range(molecule.n_atoms)]
+    for i, j, _order in (molecule.bonds or perceive_bonds(molecule)):
+        neighbors[i].append(j)
+        neighbors[j].append(i)
+
+    # Every motif's backbone, so a side-chain walk cannot leak along the chain
+    # into the next residue by way of a mis-perceived bond.
+    spine = {i for run in runs for motif in run for i in motif[:3]}
+
+    out: List[Residue] = []
+    number = 0
+    for chain, run in enumerate(runs):
+        for nitrogen, alpha, carbonyl, oxygen in run:
+            number += 1
+            backbone = set(spine)
+            if oxygen is not None:
+                backbone.add(oxygen)
+            side = _walk_side_chain(alpha, backbone, neighbors, symbols)
+            name = _BY_SIGNATURE.get(_signature((d, symbols[i]) for i, d in side))
+            res = Residue(key=(str(chain), str(number), ""),
+                          name=name or "UNK", letter=one_letter(name or "UNK"))
+            for atom_name, index in (("N", nitrogen), ("CA", alpha), ("C", carbonyl),
+                                     ("O", oxygen)):
+                if index is not None:
+                    res.atoms[atom_name] = index
+                    res.elements[atom_name] = symbols[index]
+            if name:
+                # Both lists in the same (depth, element) order, so equivalent
+                # atoms pair up and a ring ends up with the exact names
+                # RING_ATOMS looks for.
+                canonical = sorted(SIDE_CHAIN_ATOMS[name], key=_atom_fact)
+                found = sorted(side, key=lambda p: (p[1], symbols[p[0]]))
+                for atom_name, (index, _depth) in zip(canonical, found):
+                    res.atoms[atom_name] = index
+                    res.elements[atom_name] = symbols[index]
+            out.append(res)
+    return out
+
+
+def _walk_side_chain(alpha: int, backbone, neighbors, symbols):
+    """[(atom, bond distance from Cα)] for the heavy atoms hanging off *alpha*.
+
+    Breadth first, so the distance is the shortest path -- which is what makes
+    it line up with the Greek letters. Proline's ring closes back onto the
+    backbone nitrogen; the walk simply stops there, leaving the three carbons
+    that make it distinguishable.
+
+    Disulfides are the one covalent bond between two side chains a protein
+    routinely has, and crossing one merges both cysteines into a single
+    unrecognizable fragment. No residue has two sulfurs of its own, so refusing
+    to step from one to another costs nothing and stops exactly that.
+    """
+    found, seen, frontier, depth = [], set(backbone), [alpha], 0
+    while frontier:
+        depth += 1
+        nxt = []
+        for atom in frontier:
+            for j in neighbors[atom]:
+                if j in seen or symbols[j] == "H":
+                    continue
+                if symbols[atom] == "S" and symbols[j] == "S":
+                    continue
+                seen.add(j)
+                found.append((j, depth))
+                nxt.append(j)
+        frontier = nxt
+    return found
 
 
 def chain_runs(residues: Sequence[Residue], positions: np.ndarray,

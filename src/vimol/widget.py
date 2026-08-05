@@ -165,8 +165,8 @@ class MoleculeWidget:
             self.style.glyph_theme = self.theme
             if glyph_scene_for(composite.molecule,
                                self.scene._effective_style(composite)) is None:
-                self.rep_note = ("glyph skin needs a protein with residue names "
-                                 "(PDB) — showing ball-and-stick")
+                self.rep_note = ("glyph skin needs a peptide backbone — "
+                                 "showing ball-and-stick")
         self.scene.fit(keep_orientation=True)
 
     def cycle_representation(self, step: int = 1) -> None:

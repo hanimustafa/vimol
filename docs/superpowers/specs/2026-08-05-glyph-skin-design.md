@@ -1,7 +1,7 @@
 # The `glyph` skin: a lettered, diagrammatic protein representation
 
 Date: 2026-08-05
-Status: implemented, then revised four times from further references. Where the build
+Status: implemented, then revised five times. Where the build
 differs from the plan, this document records what was built and why; the
 revision is in "Second pass" at the end.
 
@@ -375,3 +375,37 @@ so the rod grows out of a swelling of the backbone instead of being planted on
 it. **Side-chain spheres are 0.92 Å**, well over half a bond length, so a
 two-carbon side chain runs together with a soft waist -- a snowman rather than a
 string of beads.
+
+
+## Sixth pass: reading a protein with no names
+
+The skin needed a PDB, because it needed residue names. It no longer does.
+
+`select.py` already had a bond-graph `N–Cα–C(=O)` motif detector, written for
+the selection presets on unnamed formats, but it returned a flat set of indices.
+It now exposes `peptide_motifs`, which returns the same motifs as `(N, Cα, C, O)`
+tuples grouped into runs linked by real peptide bonds — the shape both callers
+want, since a ribbon must not leap a chain break and neither must residue
+numbering. The preset path is a thin consumer of it.
+
+`residues.infer_residues` hangs a side chain off each Cα by walking outward
+breadth first. The insight that makes this cheap: **a PDB side-chain atom name
+already encodes the two facts the walk produces.** The Greek letter is the bond
+distance from the Cα, and the leading character is the element — so `CD1` is
+"carbon, three bonds out". The multiset of (element, distance) over a side chain
+is unique across all twenty residues, which turns identification into a lookup
+against `SIDE_CHAIN_ATOMS` rather than a graph search. Sorting the matched
+residue's canonical names and the walked atoms into the same order then hands
+every atom the name it would have had, so `RING_ATOMS` and the side-chain splits
+work unchanged and the whole thing returns ordinary `Residue` objects.
+
+Verified against three structures by stripping their names and checking the
+recovered sequence *and* every atom name against the PDB they came from. Two
+things the walk has to refuse to cross, both found that way:
+
+- **Disulfides.** The one covalent bond between two side chains a protein
+  routinely has; crossing one fuses both cysteines into a fragment matching
+  nothing, which is what turned crambin's six cysteines into UNK. No residue
+  owns two sulfurs, so refusing to step from one to another costs nothing.
+- **Any other motif's backbone**, so a mis-perceived bond cannot leak the walk
+  along the chain into the next residue.

@@ -64,9 +64,15 @@ file. Each solid is lettered with its one-letter code and residue number,
 printed onto one face of the residue -- so turning the structure foreshortens a
 letter and eventually takes it out of sight, the way a marking on a real object
 would.
-Overlaid structures tint flat, as in every other style. It needs
-residue names, so it wants a PDB; anything else stays ball-and-stick and says
-so.
+Overlaid structures tint flat, as in every other style.
+
+It works on an `.xyz` too, which carries neither residue names nor atom names:
+the backbone is found as a bond-graph `N–Cα–C(=O)` motif, and each side chain is
+walked outward from its Cα, which gives every atom its bond distance from the Cα
+— and that distance is what a PDB name's Greek letter records. The resulting
+(element, distance) signature identifies all twenty residues uniquely, so the
+letters and the ring shapes come out the same as they would from a PDB.
+Something with no peptide backbone in it stays ball-and-stick and says so.
 
 This is the one style that looks materially better on a GPU. There the ribbon
 is a real swept tube with a rounded edge and the tablets are chamfered solids
