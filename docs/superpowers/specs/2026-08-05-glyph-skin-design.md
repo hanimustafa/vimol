@@ -1,8 +1,9 @@
 # The `glyph` skin: a lettered, diagrammatic protein representation
 
 Date: 2026-08-05
-Status: implemented. Where the build differs from the plan, this document
-records what was built and why.
+Status: implemented, then revised once from a second reference. Where the build
+differs from the plan, this document records what was built and why; the
+revision is in "Second pass" at the end.
 
 ## Goal
 
@@ -125,25 +126,25 @@ the enclosing box is measured on the inflated outline's own corners rather than
 on the ring atoms plus the inflation.
 
 **Rounded volumes.** Every other side chain is a union of spheres of radius
-0.85 Å at the real heavy-atom positions — comfortably over half a bond length,
-so neighbouring spheres merge into one smooth solid rather than reading as a
-bunch of grapes. The shape is then literally the geometry of
+0.80 Å at its real *carbon* positions (see "Second pass" — originally at every
+heavy atom, at 0.85 Å) — over half a bond length, so neighbouring spheres merge
+into one solid, but only just, so a two-carbon side chain still reads as two
+lobes rather than a ball. The shape is then literally the geometry of
 the side chain, and it costs nothing new in the renderer. Glycine, which has no
 side chain, gets a single small sphere at the position its Cβ would occupy
 (built from the tetrahedral completion of N, C and Cα); alanine gets one sphere
 at Cβ.
 
-**Sticks.** A cylinder from Cα to the solid's anchor: the plate center for
-aromatics, the side chain's centroid otherwise.
+**Sticks.** A rod from Cα to the solid's anchor: the plate center for
+aromatics, the side chain's centroid otherwise. (Superseded — see "Second pass":
+the link now runs Cα bead → rod → Cβ bead → rod → glyph.)
 
-**Nodes.** Classified per `(residue, atom name)` rather than from attached
-hydrogens, since most PDB files have none: backbone `N` donates (except
-proline), backbone `O` and `OXT` accept, and a side-chain table covers the rest.
-Hydroxyls, histidine ring nitrogens and cysteine sulfur do both, and draw one
-node of each colour offset 0.16 Å along the atom's own bond axis so they do not
-z-fight — the acceptor keeps the real coordinates and the donor is the one that
-steps aside. Every other node sits exactly where the file puts its atom. Radius
-0.13 Å.
+**Nodes.** *Superseded — see "Second pass": the abstract nodes are gone and the
+atoms themselves are drawn instead.* They were classified per `(residue, atom
+name)` rather than from attached hydrogens, since most PDB files have none:
+backbone `N` donates (except proline), backbone `O` and `OXT` accept, and a
+side-chain table covers the rest. That table survives, and still decides which
+backbone pairs the hairlines join.
 
 **Links.** Backbone `N`···`O` pairs closer than 3.35 Å and at least two residues
 apart get a 0.05 Å cylinder in a muted gold. Distance alone, on the heavy atoms:
@@ -199,3 +200,61 @@ convex hull, and the fallback when a molecule has no residue names. Two
 properties earn tests of their own because breaking them fails invisibly rather
 than loudly: that every solid fits inside the box the renderer shades, and that
 each letter is lifted clear of the whole reach of the solid it names.
+
+
+## Second pass
+
+A second reference and three notes changed four things.
+
+**The ribbon shades smoothly.** Each segment carries the averaged normals of
+the joints at its two ends and interpolates between them along its length. That
+is vertex-normal averaging: the geometry stays faceted, the shading runs
+continuously across the joins, and the band reads as one curved surface. Two
+traps, both of which draw a hairline dark crease at every joint and neither of
+which is obvious from the code:
+
+- The interpolation must be scaled by the segment's true half-length, not by the
+  enclosing box's half-extent along the same axis. The mitre makes the second
+  larger, which leaves the interpolation short of 0 and 1 at the real ends, so
+  normals either side of a joint disagree.
+- The end caps need the same treatment as the faces. They are internal — one
+  segment's cap sits against the next one's — and left with their own edge-on
+  normals they shade nearly black. Which side of the ribbon a hit is on comes
+  from which side of the slab it landed, not from comparing normals: a cap is
+  perpendicular to the surface it has to blend into.
+
+The GPU was on the table for this and is not needed for it. Smooth shading is a
+per-pixel normal, not a mesh pipeline. A GL port remains the way to make the
+skin *fast* — it is the outstanding speed work, and it is not done.
+
+**The ribbon runs through the Cα atoms.** Peptide-plane midpoints smooth
+marginally better and sit up to an angstrom off every Cα, so each residue's link
+launched from beside the ribbon rather than out of it. The side vector is still
+per peptide plane, now averaged onto each residue.
+
+**The link runs Cα bead → rod → Cβ bead → rod → glyph**, tinted by residue
+class, rather than one rod skewering the Cβ on the way past.
+
+**Atoms the glyphs do not stand for are drawn as themselves.** A solid is built
+from the side chain's *carbon* skeleton only; the carboxylate, the hydroxyl, the
+indole N–H and any hydrogen bonded to one of those is a real atom in its element
+colour, bonded, at the exact file coordinates. This replaces the abstract
+red/blue hydrogen-bond nodes, which sat at those same coordinates in those same
+colours — the reference's legend relabelled them "oxygen" and "nitrogen", which
+is the whole change. The gold hairlines stay: they are detected interaction, not
+atoms, and nothing else conveys them.
+
+Two boundaries had to be drawn by rendering it and looking, not by reasoning:
+
+- The backbone amide stays the ribbon's business. Drawn as atoms, N and O put a
+  blue and a red dot on every residue of the ribbon.
+- Hydrogens show only on the drawn non-carbon atoms. An NMR model carries every
+  C–H, and drawing those buries the skin under a hundred white spheres.
+
+**Overlaid structures tint.** A residue whose atoms are flagged flat paints every
+primitive it emits in its entry's tint, exactly as the other representations do.
+Two things this needed: the cache key had to learn about tint and flatness, since
+marking a structure into an overlay moves no atom and changes no count; and
+residues had to become runs of consecutive atoms sharing an identity rather than
+a dictionary keyed on it, or two overlaid copies of one file fold together and
+the second gets no glyphs at all.

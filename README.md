@@ -54,13 +54,16 @@ every binding.
 
 `1`–`4` switch between ball-and-stick, space-filling, licorice and wireframe.
 On a protein, `5` reads it the way a figure does instead: the backbone runs as
-a ribbon, and each residue sends a stick from its Cα out to a solid carrying
-its one-letter code — a plate cut to the shape of the ring for the aromatics,
-a rounded volume built from the real side-chain atom positions for everything
-else. Tiny red and blue nodes mark every atom that can accept or donate a
-hydrogen bond, at the exact coordinates in the file, with hairlines between the
-backbone pairs close enough to be bonded. It needs residue names, so it wants a
-PDB; anything else stays ball-and-stick and says so.
+a ribbon through the Cα atoms, and each residue links out from its Cα by way
+of its Cβ to a solid carrying its one-letter code — a plate cut to the shape of
+the ring for the aromatics, a rounded volume built from the real side-chain
+carbons for everything else. Only the carbon skeleton is abstracted: the
+carboxylate, the hydroxyl, the indole N–H and any hydrogen sitting on one of
+those stay real atoms in their element colours, at the exact coordinates in the
+file, with hairlines between the backbone amides close enough to be hydrogen
+bonded. Overlaid structures tint flat, as in every other style. It needs
+residue names, so it wants a PDB; anything else stays ball-and-stick and says
+so.
 
 Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
 session, auto-overlaid — the first structure of each file shown together, the
