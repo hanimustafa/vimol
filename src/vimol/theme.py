@@ -26,6 +26,7 @@ class Theme:
     input_fg: RGB
     help_bg: RGB
     help_fg: RGB
+    help_border_fg: RGB
     list_header_fg: RGB
     list_muted_fg: RGB
     list_label_fg: RGB
@@ -48,7 +49,7 @@ DARK = Theme(
     name="dark", panel_bg=(30, 33, 44), panel_fg=(230, 232, 240),
     edit_prefix_fg=(150, 155, 170), warn_bg=(60, 30, 30), warn_fg=(250, 230, 230),
     input_bg=(44, 40, 30), input_fg=(240, 236, 220),
-    help_bg=(20, 22, 30), help_fg=(220, 220, 230),
+    help_bg=(20, 22, 30), help_fg=(220, 220, 230), help_border_fg=(60, 200, 180),
     list_header_fg=(139, 146, 165), list_muted_fg=(110, 118, 135),
     list_label_fg=(232, 236, 244), list_dim_fg=(200, 206, 216),
     list_active_bg=(37, 45, 64), list_cursor_bg=(28, 33, 46),
@@ -63,7 +64,7 @@ LIGHT = Theme(
     name="light", panel_bg=(225, 227, 232), panel_fg=(30, 32, 38),
     edit_prefix_fg=(90, 95, 110), warn_bg=(255, 225, 225), warn_fg=(120, 20, 20),
     input_bg=(255, 247, 214), input_fg=(90, 70, 10),
-    help_bg=(238, 239, 243), help_fg=(35, 37, 44),
+    help_bg=(238, 239, 243), help_fg=(35, 37, 44), help_border_fg=(0, 140, 125),
     list_header_fg=(70, 76, 95), list_muted_fg=(120, 126, 142),
     list_label_fg=(20, 22, 28), list_dim_fg=(55, 60, 72),
     list_active_bg=(202, 210, 230), list_cursor_bg=(216, 220, 230),

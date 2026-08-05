@@ -328,6 +328,10 @@ class MoleculeWidget:
             cam.roll(-0.15); return True
         if key == "]":
             cam.roll(0.15); return True
+        # 'r' resets here for standalone widget use; the Viewer driver claims
+        # 'r' for RMSD alignment instead, so 'z' is the one that actually
+        # reaches this branch there -- keep it unclaimed by every other
+        # keymap (list strip included) so it always fits/resets the scene.
         if key in ("r", "z"):
             self.reset(); return True
         if key == "f":

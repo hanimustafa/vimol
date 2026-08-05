@@ -139,46 +139,74 @@ class _FullRMSDColumn:
 # separator plus footer lines below. _list_capacity() derives what fits from
 # these, and _draw_list lays the panel out to match.
 _LIST_ROWS_ABOVE = 2                # header + a blank row
-_LIST_ROWS_BELOW = 5                # separator + the four legend/hint lines
+_LIST_ROWS_BELOW = 4                # separator + the three legend/hint lines
 _LIST_WHEEL_STEP = 3                # display rows per mouse-wheel notch
 
+_HELP_TITLE = " vimol — terminal molecular viewer "
+_HELP_KEY_W = 18        # 'key' plus its dot leader, before the value's space
+_HELP_COL_W = 36        # one whole key/value column, left column to right
+
+
+def _kv(key: str, value: str) -> str:
+    """One ``key ......... value`` cell.
+
+    The leader is *computed* to fill a fixed field rather than typed out by
+    hand: hand-counted dots drift (two columns in this table were a space
+    out of true before this), and a drifting column is invisible in source
+    but obvious on screen."""
+    return f"{(key + ' ').ljust(_HELP_KEY_W, '.')} {value}"
+
+
+def _help_row(*cells: str) -> str:
+    """A help line of one or two _kv cells, indented and column-aligned."""
+    return "  " + "".join(c.ljust(_HELP_COL_W) for c in cells[:-1]) + cells[-1]
+
+
+def _help_note(text: str) -> str:
+    """A continuation line hanging under the binding it elaborates."""
+    return "     " + text
+
+
 _HELP_HEAD = [
-    "  vimol — terminal molecular viewer",
-    "",
-    "  Mouse drag ......... rotate            Wheel / + - ........ zoom",
-    "  Right / mid drag ... pan               [ / ] .............. roll",
-    "  Hover .............. identify atom      Arrows / h j k l ... rotate",
-    "  1 2 3 4 ............ ball / space / licorice / wire",
+    _help_row(_kv("Mouse drag", "rotate"), _kv("Wheel / + -", "zoom")),
+    _help_row(_kv("Right / mid drag", "pan"), _kv("[ / ]", "roll")),
+    _help_row(_kv("Hover", "identify atom"), _kv("Arrows / h j k l", "rotate")),
+    _help_row(_kv("1 2 3 4", "ball / spacefill / licorice / wire")),
 ]
 # Shown only when editing is disabled (the classic bindings).
 _HELP_VIEW = [
-    "  s .................. cycle style       a .................. autospin",
-    "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
-    "     with 2+ structures: a table column tracks it live, click × to remove",
+    _help_row(_kv("s", "cycle style"), _kv("a", "autospin")),
+    _help_row(_kv("m", "measure: click 2/3/4 atoms → dist/angle/dihedral")),
+    _help_note("2+ structures: a column tracks it live · click × to drop"),
 ]
 # Shown only when editing is enabled (Viewer(editable=True), the vimol CLI default).
 _HELP_EDIT = [
-    "  a .................. append (edit)     o .................. autospin",
-    "     click H -> grow · heavy atom -> replace · empty space -> new molecule",
-    "     click the [ C ] pill -> pick a different element to build",
-    "  x .................. delete            s .................. save",
-    "  u .................. undo",
-    "     option-drag atom -> atom ... draw a bond (kept beyond auto range)",
-    "  c .................. cleanup clashes / long bonds",
-    "  m .................. measure (click 2/3/4 atoms: distance/angle/dihedral)",
-    "     with 2+ structures: a table column tracks it live, click × to remove",
+    _help_row(_kv("a", "append (edit)"), _kv("o", "autospin")),
+    _help_note("click H → grow · heavy atom → replace · space → new molecule"),
+    _help_note("click the [ C ] pill → pick a different element to build"),
+    _help_row(_kv("x", "delete"), _kv("s", "save")),
+    _help_row(_kv("u", "undo"), _kv("c", "cleanup clashes")),
+    _help_note("option-drag atom → atom · draw a bond past the auto range"),
+    _help_row(_kv("m", "measure: click 2/3/4 atoms → dist/angle/dihedral")),
+    _help_note("2+ structures: a column tracks it live · click × to drop"),
 ]
 _HELP_TAIL = [
-    "  A .................. add a structure file",
-    "  n / p / opt+up/dn .. next/prev frame   d .................. depth cue",
-    "  t .................. transparent bg    g .................. hi-quality",
-    "  ctrl-t ............. light/dark theme",
-    "  f / z .............. re-fit / reset    ? .................. toggle help",
-    "  overlay: r .......... align all → ∀RMSD#N  R ... pick atoms → ⊂RMSD#N",
-    "     Shift+S / click select ... Backbone, Heavy atoms, or Ring system",
-    "     option-click atom ........ additive manual subset selection",
-    "     RMSD#N column: hover title for spec · click arm selection · R recalculate",
-    "  q / Esc ............ quit",
+    _help_row(_kv("A", "add a file"), _kv("n / p / opt+↑↓", "next/prev")),
+    _help_row(_kv("d", "depth cue"), _kv("g", "hi-quality")),
+    _help_row(_kv("t", "transparent bg"), _kv("ctrl-t", "light/dark theme")),
+    # 'f' and 'z' reach the widget's camera keys and nothing else may claim
+    # them -- the structure strip shadowing 'z' with solo is exactly how this
+    # line quietly stopped being true once (see widget.handle_key).
+    _help_row(_kv("f / z", "re-fit / reset"), _kv("?", "toggle this help")),
+    _help_row(_kv("Tab", "focus the structure list (2+ loaded)")),
+    _help_note("j k move · Enter activate · h hide/show · v overlay · Esc out"),
+    _help_note("h j k address list rows there, not the camera"),
+    _help_row(_kv("overlay: r", "align all → ∀RMSD#N")),
+    _help_row(_kv("overlay: R", "pick atoms → ⊂RMSD#N")),
+    _help_note("Shift+S / click select · Backbone, Heavy atoms, Ring system"),
+    _help_note("option-click atom · additive manual subset selection"),
+    _help_note("RMSD#N column: hover for spec · click to arm · R recalculates"),
+    _help_row(_kv("q / Esc", "quit")),
 ]
 
 
@@ -1196,9 +1224,8 @@ class Viewer:
         select_style = (self._sgr_bg(self.theme.list_cap_bg)
                         + self._sgr_fg(self.theme.list_label_fg) + "\x1b[1m")
         return [
-            [(" ", ""), cap("1"), ("-", muted), cap("9"), (" jump to", muted)],
             [(" ", ""), cap("n"), cap("p"), (" next/prev", muted)],
-            [(" ", ""), cap("z"), (" solo ", muted), cap("h"), (" hide", muted)],
+            [(" ", ""), cap("?"), (" all keys", muted)],
             [(" Shft+S to ", muted), ("select", select_style)],
         ]
 
@@ -1933,17 +1960,50 @@ class Viewer:
         elif self._mode == "file_browser":
             self._draw_file_browser()
 
-    def _draw_help(self):
+    def _help_geometry(self) -> Tuple[int, int, int, int]:
+        """(top, left, width, height) of the help panel, 0-based cell coords.
+
+        Sized from the CONTENT rather than a constant: the old panel padded
+        every row to a hardcoded 58 without ever truncating, so the eleven
+        lines longer than that spilled out of the tinted block and the panel
+        had no edge to speak of. Then clamped to the terminal -- never wider
+        than the screen, never tall enough to reach the status bar (the same
+        rule _pt_geometry follows)."""
+        lines = _help_lines(self.editable)
+        inner_w = min(max(len(l) for l in lines) + 2, max(self._cols - 2, 1))
+        height = min(len(lines) + 2, max(self._rows - 1, 1))
+        width = inner_w + 2
+        return (max(0, (self._rows - 1 - height) // 2),
+                max(0, (self._cols - width) // 2), width, height)
+
+    def _draw_help(self) -> bytes:
+        top, left, width, height = self._help_geometry()
+        lines = _help_lines(self.editable)
+        inner_w = width - 2
+        body_h = max(height - 2, 0)
+        border = self._sgr_bg(self.theme.help_bg) + self._sgr_fg(self.theme.help_border_fg)
+        text = self._sgr_bg(self.theme.help_bg) + self._sgr_fg(self.theme.help_fg)
         out = bytearray()
-        bg_r, bg_g, bg_b = self.theme.help_bg
-        fg_r, fg_g, fg_b = self.theme.help_fg
-        sgr = b"\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm" % (bg_r, bg_g, bg_b, fg_r, fg_g, fg_b)
-        for k, line in enumerate(_help_lines(self.editable)):
-            out += b"\x1b[%d;3H" % (2 + k)
-            out += sgr
-            out += (" " + line.ljust(58)).encode()
-            out += b"\x1b[0m"
+
+        def put(row0: int, s: str) -> None:
+            out.extend(b"\x1b[%d;%dH" % (row0 + 1, left + 1))
+            out.extend(s.encode("utf-8", "replace"))
+
+        put(top, f"{border}┌{_HELP_TITLE[:inner_w].center(inner_w, '─')}┐\x1b[0m")
+        for k in range(body_h):
+            row = lines[k] if k < len(lines) else ""
+            # Truncate as well as pad: every body row is exactly inner_w
+            # visible columns, which is what gives the box straight sides.
+            put(top + 1 + k,
+                f"{border}│\x1b[0m{text}{row[:inner_w].ljust(inner_w)}\x1b[0m{border}│\x1b[0m")
+        # Say so when the terminal is too short for the whole table, rather
+        # than closing the box over silently missing bindings.
+        # center() pads but never truncates -- slice first, or a box too
+        # narrow for the marker gets a bottom border wider than its sides.
+        foot = ("─ more ─" if len(lines) > body_h else "")[:inner_w].center(inner_w, "─")
+        put(top + height - 1, f"{border}└{foot}┘\x1b[0m")
         kitty.write_bytes(bytes(out), self.fd_out)
+        return bytes(out)
 
     # -- periodic-table picker ---------------------------------------------
     def _pt_geometry(self) -> Tuple[int, int, int, int]:
@@ -3925,13 +3985,9 @@ class Viewer:
             self._list_cursor = 0 if key == "home" else n - 1
             self._list_scroll_to(0 if key == "home" else self._list_max_scroll())
             return True
-        if key in "123456789":
-            i = int(key) - 1
-            if i < n:
-                self._list_cursor = i
-                self._list_ensure_visible(i)
-                return True
-            return False
+        # NOT 1-9. The jump was redundant with j/k, n/p and clicking, and
+        # 1-4 are the global representation keys -- claiming them here made
+        # a documented binding silently dead whenever the strip had focus.
         # NOT ]/[ -- those are the global roll bindings (widget.handle_key),
         # and the strip must not shadow them. next/prev is n/p, which the
         # strip deliberately leaves unclaimed so it falls through to the
@@ -3941,9 +3997,8 @@ class Viewer:
             sset.clear_marks()
             self._list_focused = False
             return True
-        if key == "z":
-            sset.solo(self._list_cursor)
-            return True
+        # NOT 'z' -- that is the global camera fit/reset key (widget.py); the
+        # strip must not shadow it with solo.
         if key == "h":
             self._hide_toggle(self._list_cursor)
             return True

@@ -442,9 +442,8 @@ image — so it costs nothing to render and never touches the renderer.
  █ 2 holo.pdb
  ░ 3 mutant.pdb       <- hidden: hollow swatch, whole row dimmed
  ──────────────────
-  1 - 9  jump to
   n  p  next/prev
-  z  solo  h  hide
+  ?  all keys
  overlay 1+2 · aligned
  camera shared
 ```
@@ -472,8 +471,8 @@ a fully selected section is cleared while the main frame remains selected.
 `Viewer._list_display_rows()` is the *only* place display rows and structure
 indices are related: it returns `(kind, structure_index, text)` per row, and
 `_draw_list` registers a click span (plus its structure index in
-`_list_row_struct`) only for the rows it actually emitted. Keys, clicks and
-`1`–`9` address **structures**, never display rows; group headers own no
+`_list_row_struct`) only for the rows it actually emitted. Keys and clicks
+address **structures**, never display rows; group headers own no
 structure, so only their `ALL` button is interactive. Grouping runs over *consecutive*
 structures — they load in file order, and grouping across a gap would reorder
 the strip behind the user's back.
@@ -493,8 +492,8 @@ overlay. Every frozen RMSD column has an independent `×` control.
 and footer below — is the single source of truth for what fits: `_draw_list`
 slices the rows with it and every scroll clamps against it, so a resize can
 never strand the offset. The mouse wheel over the strip scrolls it (and never
-reaches the widget's zoom); `Home`/`End` jump to the ends; `j`/`k`, `1`–`9`,
-and `n`/`p` scroll the minimum needed to keep their target visible,
+reaches the widget's zoom); `Home`/`End` jump to the ends; `j`/`k` and
+`n`/`p` scroll the minimum needed to keep their target visible,
 computed on **display** rows (`_list_ensure_visible`) — scrolling up to a
 file's first frame brings its header along. A dim `↑`/`↓` in the header row
 says there is more above/below.
@@ -574,11 +573,18 @@ status bar's existing handling:
 ### 4.3 Keys — a focused strip, so no existing binding changes
 
 `1`–`9`, `h` and `z` all collide with bindings that exist today: `1`–`4` set
-the representation and `h` is the vim orbit-left key (`widget.handle_key`,
-`widget.py:251-272`). Relocating established bindings to make room is the
-expensive answer. (`[`/`]` — camera roll — are deliberately *not* in the
-strip's keymap at all: next/prev is the global `n`/`p`, so the strip never
-shadows the roll keys, focused or not.)
+the representation, `h` is the vim orbit-left key and `z` re-fits the camera
+(`widget.handle_key`, `widget.py:251-272`). Relocating established bindings to
+make room is the expensive answer, so the strip's keymap is focus-scoped.
+
+Focus-scoping bounds the damage but does not remove it — a shadowed key is
+still dead for as long as the strip has focus, which is exactly the bug
+`1`–`9` (representation) and `z` (re-fit/reset) turned out to be in practice.
+Both were dropped; only `h` is knowingly shadowed, because hide is the one
+list action with no equally direct alternative and the help panel says so.
+(`[`/`]` — camera roll — are deliberately *not* in the strip's keymap at all:
+next/prev is the global `n`/`p`, so the strip never shadows the roll keys,
+focused or not.)
 
 The overlay toggle is `v`, not `o`: `o` is claimed by `_EDIT_DRIVER_KEYS`
 (`viewer.py`) as the editable-mode relocation of autospin, and the strip's
@@ -589,8 +595,8 @@ collides with nothing in `widget.handle_key` or the driver keys.
 **Decision: the strip takes keyboard focus.** `Tab` toggles focus between the
 viewport (default) and the strip; clicking any row also focuses it; `Esc`
 returns focus to the viewport. While the strip has focus its keymap applies and
-**not one existing binding changes**. One new global key buys the whole
-namespace.
+**not one existing binding changes** — and, after the pruning above, the
+focused strip shadows only `h`. One new global key buys the whole namespace.
 
 | key | focus | action |
 | --- | --- | --- |
@@ -599,12 +605,19 @@ namespace.
 | `opt+↑` / `opt+↓` | global | next / prev structure (from the worktree branch) |
 | `j` / `k` | strip | move the row cursor without activating |
 | `↑` / `↓` | global | orbit the camera — the strip never claims the plain arrows |
-| `1`–`9` | strip | jump to structure N |
 | `Enter` | strip | activate the row cursor, clear the overlay set, return focus |
-| `z` | strip | **solo** toggle |
 | `h` | strip | **hide** toggle on the cursor row |
 | `v` | strip | toggle `overlay` |
 | `Esc` | strip | return focus to the viewport |
+
+**The strip shadows no global binding.** Two once did and both were removed:
+`1`–`9` jumped the cursor, which killed the `1`–`4` representation keys while
+the strip had focus, and it duplicated `j`/`k`, `n`/`p` and clicking anyway;
+`z` toggled solo, which killed the camera's re-fit/reset. A key the strip
+does not claim falls through to the driver and the widget, so anything not in
+the table above still works with the strip focused — that is the rule the
+strip is built on, and shadowing a documented global quietly breaks it. The
+legend now advertises `?` instead, since the help panel lists the rest.
 
 Mouse, focus-independent: **click** a row → `set_active(k)`, `clear_marks()`,
 `overlay = False` — "that structure replaces the pane", identical to next/prev.
@@ -636,9 +649,12 @@ Semantics against `StructureSet`:
   state; users would have to build the same selection twice. The flag keeps
   its `marked` name in the model; the **UI never says "mark"** — a row is
   either in the overlay or not, and opt+click is how it gets there.
-- **solo** (`z`) — a **toggle**. `solo(i)` stores the current visibility vector
-  in `_solo_restore` and sets `visible` True on `i` only; `z` again restores it.
-  One-way solo would strand the user re-showing rows by hand.
+- **solo** — a **toggle**. `solo(i)` stores the current visibility vector in
+  `_solo_restore` and sets `visible` True on `i` only; calling it again
+  restores. One-way solo would strand the user re-showing rows by hand.
+  It has **no key binding**: it was `z`, which shadowed the camera's
+  re-fit/reset, and `h` plus clicking covers the same ground. The
+  `StructureSet` API stays for callers that want it.
 - **hide** (`h`) — toggles `Structure.visible` on the cursor row. The last
   visible structure cannot be hidden (a blank pane reads as a crash); the
   attempt is refused with `at least one structure must stay visible`. Hiding

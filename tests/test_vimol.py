@@ -1749,7 +1749,7 @@ def test_sticky_file_header_hover_keeps_original_path(tmp_path):
 def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
     """A grouped file followed by a lone one: the offset between display rows
     and structure indices CHANGES partway down the list, which is exactly
-    where row arithmetic drifts. Clicks and 1-9 must still address
+    where row arithmetic drifts. Clicks and the cursor must still address
     structures."""
     from vimol.input import KeyEvent, MouseEvent
     from vimol.structures import StructureSet
@@ -1779,9 +1779,12 @@ def test_viewer_list_mixed_tree_keeps_rows_and_structures_aligned(tmp_path):
                                        button=0)]) is True
         assert v.frame_index == 3
 
-        # 1-9 addresses structures, not display rows
+        # the cursor addresses structures, not display rows: the click above
+        # left it on 3, and one 'k' must step to structure 2 -- not to the
+        # group header that sits between them as a display row.
         v._list_focused = True
-        assert v._dispatch([KeyEvent("3")]) is True
+        assert v._list_cursor == 3
+        assert v._dispatch([KeyEvent("k")]) is True
         assert v._list_cursor == 2
         v._draw_list()
         assert 2 in v._list_row_struct
@@ -2825,6 +2828,61 @@ def test_measure_live_column_suppressed_when_it_matches_a_frozen_one(tmp_path):
         os.close(fd)
 
 
+def _help_rows(v):
+    """{0-based screen row: the SGR text drawn there} for one _draw_help()."""
+    parts = re.split(r"\x1b\[(\d+);(\d+)H", v._draw_help().decode("utf-8", "replace"))
+    return {int(parts[i]) - 1: parts[i + 2] for i in range(1, len(parts), 3)}
+
+
+@pytest.mark.parametrize("editable", [False, True])
+@pytest.mark.parametrize("cols,rows_h", [(120, 40), (80, 30), (60, 12), (30, 6), (8, 5)])
+def test_viewer_help_panel_is_a_closed_box_of_uniform_width(tmp_path, editable,
+                                                            cols, rows_h):
+    """The old panel ljust()ed to a hardcoded 58 and never truncated, so the
+    long lines spilled out of the tint and it read as having no edges. Every
+    row must now measure the SAME visible width and start/end on a border --
+    including at the sizes where the geometry has to clamp and clip."""
+    v, fd = _multi_viewer(tmp_path, editable=editable)
+    try:
+        v._cols, v._rows = cols, rows_h
+        rows = _help_rows(v)
+        widths = {len(_visible(t)) for t in rows.values()}
+        assert len(widths) == 1, widths
+        top, bottom = min(rows), max(rows)
+        assert _visible(rows[top]).startswith("┌")
+        assert _visible(rows[top]).endswith("┐")
+        assert _visible(rows[bottom]).startswith("└")
+        assert _visible(rows[bottom]).endswith("┘")
+        for r in range(top + 1, bottom):
+            assert _visible(rows[r]).startswith("│")
+            assert _visible(rows[r]).endswith("│")
+        body = "".join(_visible(rows[r]) for r in range(top + 1, bottom))
+        if (cols, rows_h) == (120, 40):                # only there is it whole
+            assert "toggle this help" in body
+            assert "focus the structure list" in body  # the strip keymap
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("cols,rows_h", [(120, 40), (80, 30), (60, 12), (30, 6), (8, 5)])
+def test_viewer_help_panel_never_reaches_the_status_bar(tmp_path, cols, rows_h):
+    """Whatever the terminal size, the box stays on screen and off the status
+    row -- and says '─ more ─' in its foot when it had to clip."""
+    v, fd = _multi_viewer(tmp_path, editable=True)
+    try:
+        v._cols, v._rows = cols, rows_h
+        drawn = _help_rows(v)
+        assert drawn
+        assert min(drawn) >= 0
+        assert max(drawn) < rows_h - 1                  # status bar untouched
+        assert all(len(_visible(t)) <= cols for t in drawn.values())
+        from vimol.viewer import _help_lines
+        clipped = len(_help_lines(True)) > len(drawn) - 2
+        assert ("more" in _visible(drawn[max(drawn)])) is clipped
+    finally:
+        os.close(fd)
+
+
 def _sgr_bg(rgb):
     return "\x1b[48;2;%d;%d;%dm" % rgb
 
@@ -2962,16 +3020,19 @@ def test_viewer_list_legend_renders_key_caps(tmp_path):
         rows = _strip_rows(v)
         below = "".join(t for r, t in sorted(rows.items())
                         if r > v._list_row_spans[-1][0])
-        for word in ("jump to", "next/prev", "solo", "hide"):
+        for word in ("next/prev", "all keys"):
             assert word in _visible(below)
         # key caps: padded key text on a lighter background
         assert _sgr_bg((42, 49, 66)) in below
-        for cap in (" 1 ", " 9 ", " n ", " p ", " z ", " h "):
+        for cap in (" n ", " p ", " ? "):
             assert cap in _visible(below)
         # ]/[ are the global roll keys; the legend must not advertise them
         # as the strip's next/prev any more (VIM-9). 'space'/'mark' are gone
-        # with the mark concept: overlay membership is opt+click only.
-        for gone in (" ] ", " [ ", " space ", "mark"):
+        # with the mark concept: overlay membership is opt+click only. 'z'
+        # and 1-9 are global keys (camera reset, representation) that the
+        # strip must not shadow, so it must not advertise them either.
+        for gone in (" ] ", " [ ", " space ", "mark", "solo", "hide",
+                     " z ", " h ", " 1 ", " 9 ", "jump to"):
             assert gone not in _visible(below)
     finally:
         os.close(fd)
@@ -3165,18 +3226,21 @@ def test_viewer_tab_toggles_list_focus(tmp_path):
         os.close(fd)
 
 
-def test_viewer_list_focused_digit_jumps_to_index_without_activating(tmp_path):
-    """1-9 while list-focused move the CURSOR, not the active structure
-    (design §4.3: 'j/k move a cursor without changing what is rendered')."""
+def test_viewer_list_focused_digits_still_set_the_representation(tmp_path):
+    """1-9 used to jump the list cursor, which shadowed the global
+    representation keys 1-4 whenever the strip had focus. The strip claims
+    nothing there now; j/k and n/p already covered the jump."""
     from vimol.viewer import Viewer
     from vimol.input import KeyEvent
 
     v, fd = _multi_viewer(tmp_path)
     try:
         v._list_focused = True
-        assert v._dispatch([KeyEvent("3")]) is True
-        assert v._list_cursor == 2
-        assert v.frame_index == 0   # active structure unchanged
+        assert v._handle_list_key("3") is False    # unclaimed by the strip
+        assert v._dispatch([KeyEvent("2")]) is True
+        assert v.style.representation == "spacefill"
+        assert v._list_cursor == 0                 # cursor untouched
+        assert v.frame_index == 0                  # active structure unchanged
     finally:
         os.close(fd)
 
@@ -3253,13 +3317,16 @@ def test_viewer_list_legend_rows_match_the_reserved_footer(tmp_path):
 
     v, fd = _multi_viewer(tmp_path)
     try:
-        assert len(v._list_legend()) == 4
+        assert len(v._list_legend()) == 3
         assert _LIST_ROWS_BELOW == 1 + len(v._list_legend())
     finally:
         os.close(fd)
 
 
-def test_viewer_list_focused_z_solos_and_restores(tmp_path):
+def test_viewer_list_focused_z_still_resets_the_camera(tmp_path):
+    """'z' must never be shadowed by the list strip -- solo used to claim it
+    there, silently breaking the global camera fit/reset binding whenever the
+    strip had focus."""
     from vimol.viewer import Viewer
     from vimol.input import KeyEvent
 
@@ -3267,10 +3334,16 @@ def test_viewer_list_focused_z_solos_and_restores(tmp_path):
     try:
         v._list_focused = True
         v._list_cursor = 1
+        assert v._handle_list_key("z") is False   # unclaimed by the strip
+        v.widget.scene.camera.orbit(45, 30)
         assert v._dispatch([KeyEvent("z")]) is True
-        assert [e.visible for e in v.structures] == [False, True, False]
-        assert v._dispatch([KeyEvent("z")]) is True
+        assert np.array_equal(v.widget.scene.camera.rotation, np.eye(3))
         assert [e.visible for e in v.structures] == [True, True, True]
+        # the strip's legend now advertises '?', so it had better reach the
+        # driver through a focused strip too
+        assert v._handle_list_key("?") is False
+        assert v._dispatch([KeyEvent("?")]) is True
+        assert v._show_help is True
     finally:
         os.close(fd)
 
