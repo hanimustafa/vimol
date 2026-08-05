@@ -127,6 +127,25 @@ def test_box_planes_bound_exactly_the_box():
     assert np.any(normals @ outside > offsets + 1e-12)
 
 
+def test_every_solid_fits_inside_the_box_the_renderer_shades(hairpin):
+    """The screen bounding box comes from `poly_axes`/`poly_half`. If a solid
+    pokes out of it the rasterizer never visits those pixels, so the shape
+    gets sliced off at an invisible edge -- and an inflated ring outline does
+    poke past its own ring atoms plus the inflation, at every sharp corner."""
+    scene = glyphs.build_scene(hairpin, "light")
+    rng = np.random.default_rng(0)
+    for p in range(len(scene.poly_center)):
+        lo, hi = int(scene.poly_slice[p]), int(scene.poly_slice[p + 1])
+        normals, offsets = scene.plane_normal[lo:hi], scene.plane_offset[lo:hi]
+        half = scene.poly_half[p]
+        reach = float(np.linalg.norm(half))
+        pts = rng.uniform(-reach, reach, size=(3000, 3))
+        inside = pts[np.all(pts @ normals.T <= offsets + 1e-12, axis=1)]
+        assert len(inside), "sampling found no interior -- solid is degenerate"
+        local = np.abs(inside @ scene.poly_axes[p].T)
+        assert np.all(local <= half + 1e-9)
+
+
 def test_convex_hull_drops_interior_points():
     pts = np.array([[0, 0], [2, 0], [2, 2], [0, 2], [1, 1], [1.5, 0.5]], float)
     hull = glyphs.convex_hull_2d(pts)
@@ -209,7 +228,8 @@ def test_a_letter_is_lifted_clear_of_its_own_volume():
 def test_a_letter_is_lifted_clear_of_its_own_plate(hairpin):
     scene = glyphs.build_scene(hairpin, "light")
     plate = np.all(np.isclose(scene.poly_color, glyphs.LIGHT.plate), axis=1)
-    for center, bound in zip(scene.poly_center[plate], scene.poly_bound[plate]):
+    bounds = np.linalg.norm(scene.poly_half[plate], axis=1)
+    for center, bound in zip(scene.poly_center[plate], bounds):
         k = int(np.argmin(np.linalg.norm(scene.label_center - center, axis=1)))
         assert np.allclose(scene.label_center[k], center)
         assert scene.label_bias[k] >= bound

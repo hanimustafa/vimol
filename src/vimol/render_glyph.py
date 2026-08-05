@@ -23,7 +23,7 @@ _EPS = 1e-9
 MATTE = 0.18
 
 
-def draw_polyhedron(center_view, normals_view, offsets, radius, albedo,
+def draw_polyhedron(center_view, normals_view, offsets, half_px, albedo,
                     zoom, ox_s, oy_s, xs, ys, width, height,
                     color, alpha, zbuf, shade_write, y_lo, y_hi) -> None:
     """Rasterize one convex solid given as half-spaces ``n·(p − c) ≤ d``.
@@ -42,11 +42,11 @@ def draw_polyhedron(center_view, normals_view, offsets, radius, albedo,
     cx, cy, cz = (float(v) for v in center_view)
     scx = ox_s + cx * zoom
     scy = oy_s - cy * zoom
-    sr = float(radius) * zoom
-    x0 = max(int(np.floor(scx - sr)), 0)
-    x1 = min(int(np.ceil(scx + sr)) + 1, width)
-    y0 = max(int(np.floor(scy - sr)), y_lo)
-    y1 = min(int(np.ceil(scy + sr)) + 1, y_hi)
+    hx, hy = float(half_px[0]), float(half_px[1])
+    x0 = max(int(np.floor(scx - hx)), 0)
+    x1 = min(int(np.ceil(scx + hx)) + 1, width)
+    y0 = max(int(np.floor(scy - hy)), y_lo)
+    y1 = min(int(np.ceil(scy + hy)) + 1, y_hi)
     if x0 >= x1 or y0 >= y1:
         return
 
@@ -181,7 +181,7 @@ class Prepared:
     poly_normal: np.ndarray
     poly_offset: np.ndarray
     poly_slice: np.ndarray
-    poly_bound: np.ndarray
+    poly_half_px: np.ndarray       # (P, 2) screen half-width/half-height
     poly_color: np.ndarray
     poly_rows: np.ndarray          # (P, 2) screen y-interval
     cyl_a: np.ndarray
@@ -222,6 +222,16 @@ def prepare(scene, camera, zoom, oy_s) -> Prepared:
     sph_c = view(scene.sphere_center) if len(scene.sphere_center) else np.zeros((0, 3))
     lab_c = view(scene.label_center) if len(scene.label_center) else np.zeros((0, 3))
 
+    # Screen rectangle of each solid's enclosing box: an axis of the box
+    # contributes its half-extent times how much of that axis the screen axis
+    # sees. Exact for a box, and for a ribbon segment -- a thin slab -- several
+    # times smaller than the square a bounding sphere would ask to be shaded.
+    poly_half_px = np.zeros((0, 2))
+    if len(poly_c):
+        axes_view = scene.poly_axes @ camera.rotation.T          # (P, 3, 3)
+        poly_half_px = np.einsum("pij,pi->pj", np.abs(axes_view[:, :, :2]),
+                                 scene.poly_half) * zoom
+
     cyl_rows = np.zeros((0, 2))
     if len(cyl_a):
         ay, by = oy_s - cyl_a[:, 1] * zoom, oy_s - cyl_b[:, 1] * zoom
@@ -231,9 +241,10 @@ def prepare(scene, camera, zoom, oy_s) -> Prepared:
 
     return Prepared(
         poly_center=poly_c, poly_normal=poly_n, poly_offset=scene.plane_offset,
-        poly_slice=scene.poly_slice, poly_bound=scene.poly_bound,
+        poly_slice=scene.poly_slice, poly_half_px=poly_half_px,
         poly_color=scene.poly_color,
-        poly_rows=_rows(oy_s - poly_c[:, 1] * zoom, scene.poly_bound * zoom),
+        poly_rows=_rows(oy_s - poly_c[:, 1] * zoom,
+                        poly_half_px[:, 1] if len(poly_half_px) else np.zeros(0)),
         cyl_a=cyl_a, cyl_b=cyl_b, cyl_radius=scene.cyl_radius,
         cyl_color=scene.cyl_color, cyl_rows=cyl_rows,
         sphere_center=sph_c, sphere_radius=scene.sphere_radius,
@@ -282,7 +293,7 @@ def _draw_band(prep, zoom, ox_s, oy_s, xs, ys, width, height,
     for p in _in_band(prep.poly_rows, y_lo, y_hi):
         lo, hi = int(bounds[p]), int(bounds[p + 1])
         draw_polyhedron(prep.poly_center[p], prep.poly_normal[lo:hi],
-                        prep.poly_offset[lo:hi], prep.poly_bound[p],
+                        prep.poly_offset[lo:hi], prep.poly_half_px[p],
                         prep.poly_color[p], zoom, ox_s, oy_s, xs, ys,
                         width, height, color, alpha, zbuf, shade_write, y_lo, y_hi)
 

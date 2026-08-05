@@ -90,7 +90,8 @@ class GlyphScene:
     cyl_color: np.ndarray          # (C, 3)
     poly_center: np.ndarray        # (P, 3)
     poly_color: np.ndarray         # (P, 3)
-    poly_bound: np.ndarray         # (P,) bounding-sphere radius, for the screen bbox
+    poly_axes: np.ndarray          # (P, 3, 3) orthonormal rows of the enclosing box
+    poly_half: np.ndarray          # (P, 3) half-extent along each of those axes
     poly_slice: np.ndarray         # (P + 1,) int, CSR bounds into the plane arrays
     plane_normal: np.ndarray       # (M, 3) unit, world space
     plane_offset: np.ndarray       # (M,)
@@ -110,7 +111,7 @@ class GlyphScene:
         center = np.asarray(center, float)
         spans = []
         for points, pad in ((self.sphere_center, self.sphere_radius),
-                            (self.poly_center, self.poly_bound),
+                            (self.poly_center, np.linalg.norm(self.poly_half, axis=1)),
                             (self.label_center, self.label_size * 0.5),
                             (self.cyl_a, self.cyl_radius),
                             (self.cyl_b, self.cyl_radius)):
@@ -128,7 +129,8 @@ class _Builder:
         self.cylinders: List[Tuple[np.ndarray, np.ndarray, float, Tuple[float, float, float]]] = []
         self.poly_center: List[np.ndarray] = []
         self.poly_color: List[Tuple[float, float, float]] = []
-        self.poly_bound: List[float] = []
+        self.poly_axes: List[np.ndarray] = []
+        self.poly_half: List[np.ndarray] = []
         self.poly_counts: List[int] = []
         self.normals: List[np.ndarray] = []
         self.offsets: List[np.ndarray] = []
@@ -140,15 +142,22 @@ class _Builder:
     def cylinder(self, a, b, radius, color) -> None:
         self.cylinders.append((np.asarray(a, float), np.asarray(b, float), float(radius), color))
 
-    def solid(self, center, normals, offsets, color, bound) -> None:
-        """Add a convex solid. *bound* is a bounding-sphere radius about
-        *center*: the rasterizer needs a screen bounding box, and half-space
-        sets do not hand one over -- only the geometry that produced them
-        knows how far the solid actually reaches."""
+    def solid(self, center, normals, offsets, color, axes, half) -> None:
+        """Add a convex solid, plus an oriented box that encloses it.
+
+        A set of half-spaces does not hand over a bounding box, and the
+        rasterizer needs one; only the geometry that produced the planes knows
+        how far the solid reaches. *axes* (3 orthonormal rows) and *half* (a
+        half-extent along each) let the renderer project a tight screen
+        rectangle instead of the square a bounding sphere would give -- for a
+        ribbon segment, which is a thin slab, that square is several times the
+        pixels the segment actually covers, and every one of them gets shaded.
+        """
         normals = np.asarray(normals, float)
         self.poly_center.append(np.asarray(center, float))
         self.poly_color.append(color)
-        self.poly_bound.append(float(bound))
+        self.poly_axes.append(np.asarray(axes, float))
+        self.poly_half.append(np.asarray(half, float))
         self.poly_counts.append(len(normals))
         self.normals.append(normals)
         self.offsets.append(np.asarray(offsets, float))
@@ -175,7 +184,9 @@ class _Builder:
             cyl_color=stack([c[3] for c in self.cylinders], 3),
             poly_center=stack(self.poly_center, 3),
             poly_color=stack(self.poly_color, 3),
-            poly_bound=stack(self.poly_bound, 0),
+            poly_axes=(np.asarray(self.poly_axes, float) if self.poly_axes
+                       else np.zeros((0, 3, 3))),
+            poly_half=stack(self.poly_half, 3),
             poly_slice=slices,
             plane_normal=(np.concatenate(self.normals) if self.normals
                           else np.zeros((0, 3))),
@@ -235,6 +246,25 @@ def convex_hull_2d(points: np.ndarray) -> np.ndarray:
     lower = half(order)
     upper = half(order[::-1])
     return np.array(lower[:-1] + upper[:-1], dtype=np.int64)
+
+
+def _edge_intersections(normals: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+    """Corners of the 2-D convex region ``n·p <= d``, from consecutive edges.
+
+    The edges arrive in hull order, so each neighbouring pair meets at one
+    corner; a pair that is parallel has no corner and is skipped.
+    """
+    following = np.roll(np.arange(len(normals)), -1)
+    a = np.stack([normals, normals[following]], axis=1)          # (E, 2, 2)
+    b = np.stack([offsets, offsets[following]], axis=1)          # (E, 2)
+    det = a[:, 0, 0] * a[:, 1, 1] - a[:, 0, 1] * a[:, 1, 0]
+    ok = np.abs(det) > 1e-9
+    if not ok.any():
+        return np.zeros((1, 2))
+    a, b, det = a[ok], b[ok], det[ok]
+    x = (b[:, 0] * a[:, 1, 1] - b[:, 1] * a[:, 0, 1]) / det
+    y = (a[:, 0, 0] * b[:, 1] - a[:, 1, 0] * b[:, 0]) / det
+    return np.column_stack([x, y])
 
 
 def plane_frame(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -368,10 +398,11 @@ def _mitred_segment(a: np.ndarray, b: np.ndarray, side: np.ndarray,
     normals += [c[0] for c in caps]
     offsets += [c[1] for c in caps]
 
-    # Exact bound: walk the eight corners, each the intersection of a cap plane
-    # with one (side, up) edge. A mitred corner reaches further along the
-    # tangent than half the segment length, so a box bound would clip it.
-    reach = 0.0
+    # Walk the eight corners, each the intersection of a cap plane with one
+    # (side, up) edge, to find how far the solid runs along the tangent. A
+    # mitred corner overhangs half the segment length, so the enclosing box
+    # cannot just be the nominal one.
+    along = length * 0.5
     for s in (half_w, -half_w):
         for u in (half_t, -half_t):
             o = side * s + up * u
@@ -379,9 +410,10 @@ def _mitred_segment(a: np.ndarray, b: np.ndarray, side: np.ndarray,
                 denom = float(np.dot(n, tangent))
                 if abs(denom) < 1e-6:
                     continue
-                corner = o + tangent * ((d - float(np.dot(n, o))) / denom)
-                reach = max(reach, float(np.linalg.norm(corner)))
-    return center, np.array(normals), np.array(offsets), reach
+                along = max(along, abs((d - float(np.dot(n, o))) / denom))
+    axes = np.array([tangent, side, up])
+    return (center, np.array(normals), np.array(offsets),
+            axes, np.array([along, half_w, half_t]))
 
 
 def _add_ribbon(builder: _Builder, run: Sequence[Residue], positions: np.ndarray) -> None:
@@ -408,8 +440,8 @@ def _add_ribbon(builder: _Builder, run: Sequence[Residue], positions: np.ndarray
                               joints[k], joints[k + 1], half_w, half_t)
         if seg is None:
             continue
-        center, normals, offsets, reach = seg
-        builder.solid(center, normals, offsets, builder.pal.ribbon, reach)
+        center, normals, offsets, axes, half = seg
+        builder.solid(center, normals, offsets, builder.pal.ribbon, axes, half)
 
 
 def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray):
@@ -445,10 +477,16 @@ def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray):
                               [PLATE_THICKNESS * 0.5, PLATE_THICKNESS * 0.5]])
     # The inflated hull vertices sit further out than any edge plane's offset,
     # so bound on the vertices themselves.
-    reach = float(np.hypot(float(np.linalg.norm(loop, axis=1).max()) + PLATE_INFLATE,
-                           PLATE_THICKNESS * 0.5))
-    builder.solid(center, normals, offsets, builder.pal.plate, reach)
-    return center, reach
+    # Bound on the inflated outline's own corners, not on the ring atoms plus
+    # the inflation: pushing two edges out and intersecting them moves a sharp
+    # corner further than the inflation itself, and a box that assumed
+    # otherwise would slice the plate's points off at its edges.
+    corners = _edge_intersections(out2d, side_offsets)
+    half = np.array([np.abs(corners[:, 0]).max(), np.abs(corners[:, 1]).max(),
+                     PLATE_THICKNESS * 0.5])
+    builder.solid(center, normals, offsets, builder.pal.plate,
+                  np.array([e1, e2, normal]), half)
+    return center, float(np.linalg.norm(half))
 
 
 def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray):

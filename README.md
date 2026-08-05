@@ -52,6 +52,16 @@ status-bar pills pick the element and geometry), option-drag to draw bonds,
 `x` to delete, `c` to relax clashes, `u` to undo, `s` to save. `?` lists
 every binding.
 
+`1`–`4` switch between ball-and-stick, space-filling, licorice and wireframe.
+On a protein, `5` reads it the way a figure does instead: the backbone runs as
+a ribbon, and each residue sends a stick from its Cα out to a solid carrying
+its one-letter code — a plate cut to the shape of the ring for the aromatics,
+a rounded volume built from the real side-chain atom positions for everything
+else. Tiny red and blue nodes mark every atom that can accept or donate a
+hydrogen bond, at the exact coordinates in the file, with hairlines between the
+backbone pairs close enough to be bonded. It needs residue names, so it wants a
+PDB; anything else stays ball-and-stick and says so.
+
 Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
 session, auto-overlaid — the first structure of each file shown together, the
 active one in normal element colours and the rest flat-tinted so you can tell
@@ -60,6 +70,7 @@ structure list to add one into the overlay or drop it out.
 
 ```bash
 vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling
+vimol protein.pdb --style glyph           # lettered residues on a ribbon
 vimol a.xyz b.pdb                         # load both, auto-overlaid for comparison
 ```
 
