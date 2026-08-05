@@ -60,7 +60,10 @@ the ring for the aromatics, a rounded volume built from the real side-chain
 carbons for everything else. Only the carbon skeleton is abstracted: the
 carboxylate, the hydroxyl, the indole N–H and any hydrogen sitting on one of
 those stay real atoms in their element colours, at the exact coordinates in the
-file. Each solid is lettered with its one-letter code and residue number.
+file. Each solid is lettered with its one-letter code and residue number,
+printed onto one face of the residue -- so turning the structure foreshortens a
+letter and eventually takes it out of sight, the way a marking on a real object
+would.
 Overlaid structures tint flat, as in every other style. It needs
 residue names, so it wants a PDB; anything else stays ball-and-stick and says
 so.

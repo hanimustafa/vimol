@@ -35,13 +35,17 @@ RIBBON_WIDTH = 1.6          # angstrom, full width across the ribbon
 RIBBON_THICKNESS = 0.26     # angstrom, full thickness
 RIBBON_SAMPLES = 8          # spline samples per residue
 PLATE_INFLATE = 0.30        # angstrom the ring hull is pushed out by
-PLATE_THICKNESS = 0.34      # angstrom, full thickness
-BLOB_RADIUS = 0.80          # angstrom; over half a 1.5 A bond, so bonded atoms'
-                            # spheres merge -- but only just, so a two-carbon
-                            # side chain still reads as two lobes, not a ball
+PLATE_THICKNESS = 0.42      # angstrom, full thickness
+BLOB_RADIUS = 0.92          # angstrom; well over half a 1.5 A bond, so bonded
+                            # atoms' spheres run together with a soft waist --
+                            # a snowman rather than a string of beads
 GLYCINE_RADIUS = 0.55       # glycine has no side chain, so its marker is small
 LETTER_SIZE = 0.78          # angstrom, cap height of the one-letter code
-BEAD_RADIUS = 0.22          # the Cα and Cβ beads the link runs through
+BEAD_RADIUS = 0.20          # the Cβ bead the rod passes through
+# The Cα bead is bigger than the ribbon is thick, so it swells out of the
+# backbone instead of sitting on it: the rod then grows out of the ribbon
+# rather than being planted in it.
+BASE_RADIUS = 0.32
 ROD_RADIUS = 0.075
 JOIN_OVERLAP = 0.04     # angstrom each ribbon segment runs past its joint
 # `box_planes` emits side, -side, up, -up: the third plane is the first of the
@@ -127,7 +131,8 @@ class GlyphScene:
     # True where the letter is already printed onto a tablet face in `mesh`.
     # The raycaster billboards every label; the GPU billboards only these.
     label_on_tablet: np.ndarray    # (L,) bool
-    label_normal: np.ndarray       # (L, 3) tablet face normal; zero for a volume
+    label_normal: np.ndarray       # (L, 3) outward normal of the face it is on
+    label_down: np.ndarray         # (L, 3) in-plane direction the letter stands on
     label_offset: np.ndarray       # (L,) how far off the face to print it
     # Colour of the surface the letter is printed on. A printed letter blends
     # ink into its face, so the quad has to carry that face's colour; the ink
@@ -222,11 +227,12 @@ class _Builder:
         self.poly_smooth_face.append(SMOOTH_FACE if smooth is not None else -1)
 
     def label(self, center, char, number, size, bias, color, flat: bool = False,
-              on_tablet: bool = False, normal=None, offset: float = 0.0,
-              surface=None) -> None:
+              on_tablet: bool = False, normal=None, down=None,
+              offset: float = 0.0, surface=None) -> None:
         self.labels.append((np.asarray(center, float), char, float(size), float(bias),
                             color, flat, on_tablet,
                             np.zeros(3) if normal is None else np.asarray(normal, float),
+                            np.zeros(3) if down is None else np.asarray(down, float),
                             float(offset),
                             np.asarray(color if surface is None else surface, float),
                             str(number)))
@@ -272,16 +278,26 @@ class _Builder:
             label_color=stack([l[4] for l in self.labels], 3),
             label_flat=stack([l[5] for l in self.labels], 0, bool),
             label_char=[l[1] for l in self.labels],
-            label_number=[l[10] for l in self.labels],
+            label_number=[l[11] for l in self.labels],
             label_on_tablet=np.array([l[6] for l in self.labels], bool),
             label_normal=stack([l[7] for l in self.labels], 3),
-            label_offset=stack([l[8] for l in self.labels], 0),
-            label_surface=stack([l[9] for l in self.labels], 3),
+            label_down=stack([l[8] for l in self.labels], 3),
+            label_offset=stack([l[9] for l in self.labels], 0),
+            label_surface=stack([l[10] for l in self.labels], 3),
             mesh=self.mesh.freeze(),
         )
 
 
 # -- small geometry helpers ----------------------------------------------
+
+def _in_plane(v, normal):
+    """*v* with its component along *normal* removed, unit -- None if that
+    leaves nothing, i.e. *v* was along the normal to begin with."""
+    flat = np.asarray(v, float) - np.asarray(normal, float) * float(
+        np.dot(v, normal))
+    length = float(np.linalg.norm(flat))
+    return flat / length if length > 1e-6 else None
+
 
 def _unit(v: np.ndarray, fallback=(0.0, 0.0, 1.0)) -> np.ndarray:
     n = float(np.linalg.norm(v))
@@ -682,7 +698,9 @@ def _add_link_to_glyph(builder: _Builder, res: Residue, positions: np.ndarray,
     it is a real atom of the residue and reads better shown than skewered.
     """
     ca = positions[res.atoms["CA"]]
-    builder.sphere(ca, BEAD_RADIUS, color, flat)
+    # Wider than the ribbon is thick, so it reads as a swelling of the backbone
+    # the rod grows out of rather than a bead parked on top of it.
+    builder.sphere(ca, BASE_RADIUS, color, flat)
     cb = res.index("CB")
     waypoints = [ca] if cb is None else [ca, positions[cb]]
     if cb is not None:
@@ -754,17 +772,39 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
             face = None
         bead_color, _ = tint(res, pal.beads[residue_class(res.letter)])
         _add_link_to_glyph(builder, res, positions, anchor, bead_color, is_flat)
-        # The letter is lifted by the whole reach of its own solid, so it lands
-        # on the near surface from every camera angle. Biasing by a thickness
-        # or a single sphere radius is not enough: a tilted plate and a long
-        # side chain both put geometry well in front of their own anchor, and
-        # the letter comes out chewed into an unreadable shape. A tablet's
-        # letter is printed into its faces instead, and turns with it.
+
+        # The letter is printed onto one flat face of the residue and stays
+        # there: turn the structure and it foreshortens, then goes away, the
+        # same as any other marking on a real object would. A tablet's face is
+        # its own plane; a rounded volume has none, so it gets the plane facing
+        # away from the backbone -- which is the side you can see when the
+        # residue is pointing at you.
+        if on_tablet:
+            normal, offset = face, PLATE_THICKNESS * 0.5 + glyph_mesh.LETTER_LIFT
+        else:
+            normal = _unit(anchor - positions[ca], (0.0, 0.0, 1.0))
+            offset = reach - BLOB_RADIUS * 0.35 + glyph_mesh.LETTER_LIFT
+        # Stand the letter on the stem where there is one to stand on; a volume
+        # puts its stem straight through the face, so those line up along the
+        # chain instead.
+        down = _in_plane(positions[ca] - anchor, normal)
+        if down is None:
+            axis = positions[res.index("C", "CA")] - positions[res.index("N", "CA")]
+            down = _in_plane(axis, normal)
+        if down is None:
+            down = _unit(np.cross(normal, (0.0, 0.0, 1.0)))
+        # A tablet is printed on both faces -- one letter per side, each
+        # handed for the side it is read from -- so you can read it from
+        # wherever you are without it ever leaving the surface. A volume has
+        # only the one face, pointing away from the backbone.
+        faces = ((1.0, -1.0) if on_tablet else (1.0,))
+        for side in faces:
+            glyph_mesh.label(builder.mesh, anchor + normal * (side * offset),
+                             np.cross(normal * side, down), down, normal * side,
+                             res.letter, res.key[1], size, solid_color, is_flat)
         builder.label(anchor, res.letter, res.key[1], size, reach + 0.05,
-                      pal.ink, is_flat,
-                      on_tablet=on_tablet, normal=face,
-                      offset=PLATE_THICKNESS * 0.5 + glyph_mesh.LETTER_LIFT,
-                      surface=solid_color)
+                      pal.ink, is_flat, on_tablet=on_tablet, normal=normal,
+                      down=down, offset=offset, surface=solid_color)
 
     # Which hydrogens to keep and which bonds to draw both need connectivity.
     # The render path always perceives before drawing, but a caller building a

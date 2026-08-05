@@ -91,6 +91,19 @@ def test_labels_carry_the_residue_number(hairpin):
     assert scene.label_number == [str(n) for n in range(1, 13)]
 
 
+def test_a_letter_stays_on_the_face_it_is_printed_on(hairpin):
+    """It is a marking on the residue, not a tag pointing at it: the plane it
+    lies in is fixed to the structure, so turning the camera foreshortens it
+    and eventually takes it out of sight."""
+    scene = glyphs.build_scene(hairpin, "light")
+    assert np.allclose(np.linalg.norm(scene.label_normal, axis=1), 1.0)
+    assert np.allclose(np.linalg.norm(scene.label_down, axis=1), 1.0)
+    # The letter's baseline lies in the face, so its down is perpendicular to
+    # the normal -- otherwise the glyph would be sheared off the surface.
+    assert np.allclose(np.einsum("ij,ij->i", scene.label_normal,
+                                 scene.label_down), 0.0, atol=1e-9)
+
+
 def test_a_label_lays_its_number_out_beside_its_code():
     from vimol.glyph_font import layout
     run = layout("Y", "12", 1.0)
@@ -418,8 +431,10 @@ def test_the_gpu_mesh_carries_the_ribbon_and_the_tablets(hairpin):
     assert len(scene.mesh.vertices) > 0
     assert len(scene.mesh.indices) % 3 == 0
     assert int(scene.mesh.indices.max()) < len(scene.mesh.vertices)
-    # Only letters carry glyph coordinates, and they are added per frame.
-    assert (scene.mesh.uv[:, 0] < 0).all()
+    # Letters are printed into the mesh too, and are the only part of it that
+    # samples the glyph atlas.
+    lettered = scene.mesh.uv[:, 0] >= 0
+    assert lettered.any() and not lettered.all()
 
 
 def test_a_non_protein_still_falls_back_on_the_gpu():

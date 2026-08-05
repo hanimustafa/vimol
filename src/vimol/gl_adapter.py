@@ -148,7 +148,6 @@ def glyph_to_gl_inputs(scene, camera, style, width: int, height: int):
     and the tablets need real triangles, and those come pre-built in world space
     and are rotated into view here.
     """
-    from . import glyph_mesh
     from .gl_render import MeshBatch
 
     def view(points):
@@ -169,24 +168,19 @@ def glyph_to_gl_inputs(scene, camera, style, width: int, height: int):
         flat=np.asarray(scene.cyl_flat, np.float32),
     )
 
-    # The cached ribbon and tablets, plus this frame's letters: where a letter
-    # sits and which way up it reads both depend on the camera, so it is the one
-    # piece of the skin that cannot be cached with the rest.
-    parts = [scene.mesh, glyph_mesh.letters(scene, camera.rotation)]
-    parts = [m for m in parts if len(m.vertices)]
-    if parts:
-        offsets = np.cumsum([0] + [len(m.vertices) for m in parts])
+    # The ribbon, the tablets and the letters, all cached in world space: the
+    # letters are printed onto the residues themselves now, so nothing here
+    # depends on where the camera is except the rotation into view.
+    m = scene.mesh
+    if len(m.vertices):
         mesh = MeshBatch(
-            vertices=view(np.concatenate([m.vertices for m in parts])),
-            normals=np.concatenate([m.normals for m in parts]).astype(np.float64)
-            @ camera.rotation.T,
-            colors=np.concatenate([m.colors for m in parts]).astype(np.float32),
-            flat=np.concatenate([m.flat for m in parts]).astype(np.float32),
-            uv=np.concatenate([m.uv for m in parts]).astype(np.float32),
-            indices=np.concatenate([m.indices + offsets[i]
-                                    for i, m in enumerate(parts)]).astype(np.uint32),
+            vertices=view(m.vertices),
+            normals=(np.asarray(m.normals, float) @ camera.rotation.T).astype(np.float32),
+            colors=np.asarray(m.colors, np.float32),
+            flat=np.asarray(m.flat, np.float32),
+            uv=np.asarray(m.uv, np.float32),
+            indices=np.asarray(m.indices, np.uint32),
         )
-        mesh.normals = mesh.normals.astype(np.float32)
     else:
         mesh = MeshBatch.empty()
 

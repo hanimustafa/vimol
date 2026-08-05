@@ -146,62 +146,65 @@ def draw_polyhedron(center_view, normals_view, offsets, half_px, albedo,
 MIN_GLYPH_PX = 8.0
 
 
-def draw_label(center_view, char: str, number: str, size, bias, albedo,
-               zoom, ox_s, oy_s, xs, ys, width, height,
+def draw_label(center_view, right_view, down_view, normal_view, char, number,
+               size, albedo, zoom, ox_s, oy_s, xs, ys, width, height,
                color, alpha, zbuf, shade_write, y_lo, y_hi) -> None:
-    """Stamp one screen-aligned bitmap letter at a view-space anchor.
+    """Print a residue's code and number onto a face of it.
 
-    The letter is a billboard, not a decal painted onto the solid it names: it
-    stays square to the viewer at every camera angle, which is what makes a
-    labelled diagram readable while it spins. ``bias`` lifts it toward the
-    camera by the radius of its own solid, so a letter is never swallowed by
-    the shape it belongs to but is still occluded by anything genuinely in
-    front of both.
+    The letter lies in the plane the caller gives, exactly as it does on the
+    GPU, so the terminal shows the same marking on the same surface -- turn the
+    structure and it foreshortens and eventually goes away. Under an
+    orthographic camera the plane maps to the screen by an affine transform, so
+    a pixel's position within the glyph is one 2x2 solve, and the stroke test
+    then happens in the glyph's own coordinates.
     """
-    cx, cy, cz = (float(v) for v in center_view)
-    if float(size) * zoom < MIN_GLYPH_PX:
-        return
-    # Same layout the GPU uses, so the terminal puts the same text in the same
-    # place; only the rasterizing differs.
+    if float(normal_view[2]) <= 0.0:
+        return                                  # this face is turned away
     for glyph_char, dx, dy, cap in layout(char, number, float(size)):
-        _draw_glyph(cx + dx, cy - dy, cz, glyph_char, cap, bias, albedo,
+        at = (np.asarray(center_view, float) + np.asarray(right_view, float) * dx
+              + np.asarray(down_view, float) * dy)
+        _draw_glyph(at, np.asarray(right_view, float) * (cap * ASPECT * 0.5),
+                    np.asarray(down_view, float) * (cap * 0.5), glyph_char, albedo,
                     zoom, ox_s, oy_s, xs, ys, width, height,
                     color, alpha, zbuf, shade_write, y_lo, y_hi)
 
 
-def _draw_glyph(cx, cy, cz, char: str, size, bias, albedo,
+def _draw_glyph(center, ex, ey, char: str, albedo,
                 zoom, ox_s, oy_s, xs, ys, width, height,
                 color, alpha, zbuf, shade_write, y_lo, y_hi) -> None:
-    gh = float(size) * zoom
-    if gh < MIN_GLYPH_PX * 0.6:
-        return
-    gw = gh * ASPECT
-    pad = STROKE * gh                       # the stroke straddles the outline
-    left = ox_s + cx * zoom - gw * 0.5
-    top = oy_s - cy * zoom - gh * 0.5
-
-    x0 = max(int(np.floor(left - pad)), 0)
-    x1 = min(int(np.ceil(left + gw + pad)) + 1, width)
-    y0 = max(int(np.floor(top - pad)), y_lo)
-    y1 = min(int(np.ceil(top + gh + pad)) + 1, y_hi)
+    """One glyph on the parallelogram ``center ± ex ± ey`` in view space."""
+    # Screen images of the two half-axes. Y flips because screen y runs down.
+    ax, ay = float(ex[0]) * zoom, -float(ex[1]) * zoom
+    bx, by = float(ey[0]) * zoom, -float(ey[1]) * zoom
+    det = ax * by - ay * bx
+    if abs(det) < MIN_GLYPH_PX * MIN_GLYPH_PX * 0.25:
+        return                                  # edge-on, or too small to read
+    scx = ox_s + float(center[0]) * zoom
+    scy = oy_s - float(center[1]) * zoom
+    pad = STROKE * (abs(ay) + abs(by) + abs(ax) + abs(bx)) * 0.5
+    x0 = max(int(np.floor(scx - abs(ax) - abs(bx) - pad)), 0)
+    x1 = min(int(np.ceil(scx + abs(ax) + abs(bx) + pad)) + 1, width)
+    y0 = max(int(np.floor(scy - abs(ay) - abs(by) - pad)), y_lo)
+    y1 = min(int(np.ceil(scy + abs(ay) + abs(by) + pad)) + 1, y_hi)
     if x0 >= x1 or y0 >= y1:
         return
 
-    # Both axes in cap heights, so one stroke half-width covers every
-    # direction; the glyph's own x coordinates are already scaled to match.
-    inv = np.float32(1.0 / gh)
-    u = ((xs[x0:x1] - np.float32(left)) * inv)[None, :]
-    v = ((ys[y0:y1] - np.float32(top)) * inv)[:, None]
+    px = (xs[x0:x1] - np.float32(scx))[None, :]
+    py = (ys[y0:y1] - np.float32(scy))[:, None]
+    inv = np.float32(1.0 / det)
+    # Where in the glyph's own box each pixel falls, both in -1..1.
+    a = (px * np.float32(by) - py * np.float32(bx)) * inv
+    b = (py * np.float32(ax) - px * np.float32(ay)) * inv
 
-    win = np.zeros((y1 - y0, x1 - x0), bool)
+    u = (a + np.float32(1.0)) * np.float32(0.5 * ASPECT)
+    v = (b + np.float32(1.0)) * np.float32(0.5)
+    win = np.zeros(u.shape if u.shape == v.shape else (y1 - y0, x1 - x0), bool)
     limit = np.float32(STROKE * STROKE)
-    for (ax, ay), (bx, by) in segments(char):
-        dx, dy = float(bx - ax), float(by - ay)
+    for (sx0, sy0), (sx1, sy1) in segments(char):
+        dx, dy = float(sx1 - sx0), float(sy1 - sy0)
         span = dx * dx + dy * dy
-        du, dv = u - np.float32(ax), v - np.float32(ay)
+        du, dv = u - np.float32(sx0), v - np.float32(sy0)
         if span > 1e-12:
-            # Nearest point on the segment, clamped to its ends: round caps,
-            # which is what keeps a polyline's corners from splintering.
             t = (du * np.float32(dx / span)) + (dv * np.float32(dy / span))
             np.clip(t, 0.0, 1.0, out=t)
             du = du - t * np.float32(dx)
@@ -210,13 +213,12 @@ def _draw_glyph(cx, cy, cz, char: str, size, bias, albedo,
     if not win.any():
         return
 
+    depth = (np.float32(center[2]) + a * np.float32(ex[2]) + b * np.float32(ey[2])
+             ).astype(np.float32)
     sub_z = zbuf[y0:y1, x0:x1]
-    depth = np.full(win.shape, np.float32(cz + float(bias)), np.float32)
     win &= depth > sub_z
     if not win.any():
         return
-    # flat: ink, not a lit surface -- it still fogs with distance so a letter
-    # at the back of the structure recedes with everything around it.
     shade_write(color[y0:y1, x0:x1],
                 alpha[y0:y1, x0:x1] if alpha is not None else None,
                 sub_z, win, depth, None, None, None,
@@ -266,6 +268,10 @@ class Prepared:
     label_flat: np.ndarray
     label_char: List[str]
     label_number: List[str]
+    label_normal: np.ndarray
+    label_down: np.ndarray
+    label_offset: np.ndarray
+    label_on_tablet: np.ndarray
     label_rows: np.ndarray
 
 
@@ -332,6 +338,9 @@ def prepare(scene, camera, zoom, oy_s) -> Prepared:
         label_center=lab_c, label_size=scene.label_size, label_bias=scene.label_bias,
         label_color=scene.label_color, label_flat=scene.label_flat,
         label_char=scene.label_char, label_number=scene.label_number,
+        label_normal=scene.label_normal @ camera.rotation.T,
+        label_down=scene.label_down @ camera.rotation.T,
+        label_offset=scene.label_offset, label_on_tablet=scene.label_on_tablet,
         label_rows=_rows(oy_s - lab_c[:, 1] * zoom, scene.label_size * zoom * 0.5),
     )
 
@@ -386,7 +395,13 @@ def draw_band(prep: Prepared, zoom, ox_s, oy_s, xs, ys, width, height,
                         bool(prep.sphere_flat[k]))
 
     for k in _in_band(prep.label_rows, y_lo, y_hi):
-        draw_label(prep.label_center[k], prep.label_char[k], prep.label_number[k],
-                   float(prep.label_size[k]), float(prep.label_bias[k]),
-                   prep.label_color[k], zoom, ox_s, oy_s, xs, ys, width, height,
-                   color, alpha, zbuf, shade_write, y_lo, y_hi)
+        for side in (1.0, -1.0):
+            normal = prep.label_normal[k] * side
+            draw_label(prep.label_center[k] + normal * float(prep.label_offset[k]),
+                       np.cross(normal, prep.label_down[k]), prep.label_down[k],
+                       normal, prep.label_char[k], prep.label_number[k],
+                       float(prep.label_size[k]), prep.label_color[k],
+                       zoom, ox_s, oy_s, xs, ys, width, height,
+                       color, alpha, zbuf, shade_write, y_lo, y_hi)
+            if not prep.label_on_tablet[k]:
+                break                          # a volume has only the one face

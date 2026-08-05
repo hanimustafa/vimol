@@ -8,10 +8,12 @@ rendering actually lives -- a faceted box with clever shading still shows its
 silhouette, and a chamfer catches a highlight along its edge that nothing else
 reproduces.
 
-The ribbon and the tablets are built once per molecule in world space and cached
-with the rest of the glyph scene; the per-frame cost is one rotation of the
-vertices and normals into view space. The letters are the exception and are
-rebuilt every frame -- see :func:`letters` for why.
+Everything here is built once per molecule in world space and cached with the
+rest of the glyph scene; the per-frame cost is one rotation of the vertices and
+normals into view space. That includes the letters: each is printed onto one
+flat face of the residue it names and stays there, so turning the structure
+foreshortens it and eventually takes it out of sight, the way a marking on a
+real object behaves.
 """
 from __future__ import annotations
 
@@ -26,18 +28,18 @@ from .glyph_font import ASPECT, atlas_box, layout
 # the highlight running along the edge reads as curved at any terminal size.
 CORNER_STEPS = 4
 RIBBON_CORNER = 0.45        # corner radius as a fraction of the half-thickness
-TABLET_CHAMFER = 0.055      # angstrom cut off the tablet's face/rim edge
+TABLET_CHAMFER = 0.13       # angstrom cut off the tablet's face/rim edge
+# Steps across that cut. One step is a chamfer and catches a single hard
+# highlight; a few make it a rounded edge, which is what reads as a moulded
+# object rather than a sawn one.
+BEVEL_STEPS = 4
 LETTER_LIFT = 0.006         # angstrom the letter quad floats over its face
 NO_UV = (-1.0, -1.0)        # a vertex that samples no glyph
-# A letter printed onto a tablet face blends ink into the face it sits on, so
-# the whole quad is surface and only the strokes darken. One floating in front
-# of a rounded volume has no face to blend with -- its quad must vanish except
-# where the ink is. The shader tells them apart by this offset on u, which
-# keeps both in one mesh and one draw call.
+# A letter blends ink into the face it is printed on, so the whole quad is
+# surface and only the strokes darken. The shader keys that on a non-negative
+# u; the offset is reserved for a quad with nothing behind it to blend with,
+# which must instead vanish everywhere the ink is not.
 CUTOUT = 2.0
-# How square a tablet has to be to the camera before its letter is printed onto
-# the face rather than floated in front of it.
-FACE_ON_MIN = 0.45
 
 
 def _unit(v, fallback):
@@ -197,26 +199,31 @@ def tablet(builder: MeshBuilder, center: np.ndarray, e1: np.ndarray, e2: np.ndar
                 + points2d[:, 1, None] * e2[None, :] + height * normal[None, :])
 
     chamfer = min(TABLET_CHAMFER, half_thickness * 0.7)
-    # Shrink the outline toward its centroid for the inset face ring; for a
-    # convex polygon that is close enough to a true offset at this scale.
+    # Shrinking the outline toward its centroid stands in for a true polygon
+    # offset; for a convex outline at this scale the difference is invisible.
     middle = loop.mean(axis=0)
     span = float(np.linalg.norm(loop - middle, axis=1).mean())
-    inset = middle + (loop - middle) * max(0.0, 1.0 - chamfer / max(span, 1e-6))
 
     rim_h = half_thickness - chamfer
-    bevel = float(np.sqrt(0.5))
     outward = loop - middle
     outward /= np.maximum(np.linalg.norm(outward, axis=1, keepdims=True), 1e-9)
     out3 = outward[:, 0, None] * e1[None, :] + outward[:, 1, None] * e2[None, :]
 
     for sign in (1.0, -1.0):
-        face = to3(inset, sign * half_thickness)
-        edge = to3(loop, sign * rim_h)
-        builder.cap(face if sign > 0 else face[::-1], sign * normal, color, flat)
-        builder.strip(np.stack([face, edge]),
-                      np.stack([np.tile(sign * normal, (len(face), 1)),
-                                out3 * bevel + sign * normal * bevel]),
-                      color, flat)
+        # A quarter turn from the face to the rim, in BEVEL_STEPS rings: at
+        # each the outline is inset by the cosine and the height drops by the
+        # sine, and the normal is the matching blend of face and outward.
+        rings, normals_ = [], []
+        for i in range(BEVEL_STEPS + 1):
+            a = 0.5 * np.pi * i / BEVEL_STEPS
+            cos, sin = float(np.cos(a)), float(np.sin(a))
+            shrink = chamfer * (1.0 - sin)
+            ring2d = middle + (loop - middle) * max(0.0, 1.0 - shrink / max(span, 1e-6))
+            rings.append(to3(ring2d, sign * (rim_h + chamfer * cos)))
+            normals_.append(out3 * sin + sign * normal * cos)
+        builder.cap(rings[0] if sign > 0 else rings[0][::-1], sign * normal,
+                    color, flat)
+        builder.strip(np.stack(rings), np.stack(normals_), color, flat)
     builder.strip(np.stack([to3(loop, rim_h), to3(loop, -rim_h)]),
                   np.stack([out3, out3]), color, flat)
 
@@ -238,42 +245,3 @@ def label(builder: MeshBuilder, center: np.ndarray, right: np.ndarray,
                    at - right * half_w + down * half_h]
         builder.quad(corners, normal, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
                      color, flat)
-
-
-def letters(scene, rotation: np.ndarray) -> GlyphMesh:
-    """Every letter, placed for this frame's camera orientation.
-
-    Letters are the one part of the skin that cannot be cached with the rest of
-    the geometry, because both of the things that make one readable depend on
-    where the camera is. A letter on a tablet is printed onto the face and
-    stands upright *on screen* -- pinning its rotation to the tablet's own axes
-    instead would leave it lying at whatever angle the ring happens to sit at.
-    A letter on a rounded volume has no face to print on, so it is squared to
-    the viewer and cut out of its quad. A tablet turned nearly edge-on falls
-    back to the second: there is no face left to print on, and no reason to
-    prefer a label you cannot read to one you can.
-    """
-    view_right, view_down, toward = rotation[0], -rotation[1], rotation[2]
-    builder = MeshBuilder()
-    for k, char in enumerate(scene.label_char):
-        size = float(scene.label_size[k])
-        flat = bool(scene.label_flat[k])
-        facing = float(np.dot(scene.label_normal[k], toward))
-        if scene.label_on_tablet[k] and abs(facing) >= FACE_ON_MIN:
-            face = scene.label_normal[k] * (1.0 if facing > 0 else -1.0)
-            # Screen-down dropped into the tablet's plane: the letter lies on
-            # the face and still stands upright to the reader.
-            down = _unit(view_down - face * float(np.dot(view_down, face)),
-                         view_right)
-            label(builder,
-                  scene.label_center[k] + face * float(scene.label_offset[k]),
-                  np.cross(face, down), down, face, char, scene.label_number[k],
-                  size, scene.label_surface[k], flat)
-        else:
-            # Lifted toward the camera by the reach of the solid it names, so
-            # the shape it belongs to cannot swallow it.
-            label(builder,
-                  scene.label_center[k] + toward * float(scene.label_bias[k]),
-                  view_right, view_down, toward, char, scene.label_number[k],
-                  size, scene.label_color[k], flat, cutout=True)
-    return builder.freeze()

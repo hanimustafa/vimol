@@ -1,7 +1,7 @@
 # The `glyph` skin: a lettered, diagrammatic protein representation
 
 Date: 2026-08-05
-Status: implemented, then revised three times from further references. Where the build
+Status: implemented, then revised four times from further references. Where the build
 differs from the plan, this document records what was built and why; the
 revision is in "Second pass" at the end.
 
@@ -343,3 +343,35 @@ everything else — and sit a clear step apart. The ribbon is warm graphite rath
 than black, so its shading has somewhere to go. The beads and rods are fittings:
 they share one lightness so they read as a family, muted enough not to compete
 with the tablets, light enough to be visible against the ribbon they land on.
+
+
+## Fifth pass
+
+**Letters are printed onto the residue and stay there.** They were briefly
+placed per frame so they always stood upright on screen; that made them tags
+pointing at the structure rather than markings on it. Now each label's plane and
+its in-plane baseline are fixed to the residue, so turning the camera
+foreshortens a letter and eventually takes it out of sight, the way a marking on
+a real object behaves. A tablet's plane is its own, printed on both faces so it
+is readable from either side and lost only edge-on; a rounded volume gets the
+single plane facing away from the backbone. A letter stands on its stem where
+there is one to stand on -- feet toward the Cα -- and along the chain otherwise.
+
+Because nothing about a letter now depends on the camera, the whole skin is
+cached again: the per-frame letter pass is gone, and the raycaster maps a glyph
+onto its plane with one 2x2 solve per pixel, which under an orthographic camera
+is exact. Both renderers put the same marking on the same surface.
+
+**The font grew serifs, derived rather than drawn.** Every free stroke terminal
+gets a short tick perpendicular to the stroke that finishes there; a closed
+polyline has no free end and so gets none. Doing it by rule keeps thirty-three
+glyphs consistent, and it is what stops a run of capitals reading as marker pen.
+The stroke is lighter to suit them.
+
+**Tablets are thicker again** (0.42 Å) and their edge is a rounded bevel in four
+steps rather than a single chamfer -- one step catches a single hard highlight,
+a few make it a moulded edge. **The Cα bead is wider than the ribbon is thick**,
+so the rod grows out of a swelling of the backbone instead of being planted on
+it. **Side-chain spheres are 0.92 Å**, well over half a bond length, so a
+two-carbon side chain runs together with a soft waist -- a snowman rather than a
+string of beads.

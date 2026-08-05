@@ -18,8 +18,13 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # Cap width as a fraction of cap height, and stroke half-width in cap heights.
-ASPECT = 0.72
-STROKE = 0.085
+ASPECT = 0.70
+STROKE = 0.062
+# Half-length of the tick added across each free stroke end. Serifs are derived
+# rather than drawn: every terminal gets one, perpendicular to the stroke it
+# finishes. It is what stops a run of capitals reading as marker pen, and doing
+# it by rule keeps thirty-three glyphs consistent with each other.
+SERIF = 0.085
 
 Polyline = List[Tuple[float, float]]
 
@@ -197,11 +202,24 @@ def atlas_box(char: str) -> Tuple[float, float, float, float]:
     return boxes.get(char, boxes["X"])
 
 
+def _serif(a, b):
+    """A tick across the free end *b* of the stroke that runs from *a*."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = (dx * dx + dy * dy) ** 0.5
+    if length < 1e-6:
+        return None
+    # Perpendicular to the stroke, so a vertical stem gets a horizontal foot.
+    px, py = -dy / length * SERIF, dx / length * SERIF
+    return [[b[0] - px, b[1] - py], [b[0] + px, b[1] + py]]
+
+
 def segments(char: str) -> np.ndarray:
     """(S, 2, 2) segment endpoints for *char*: ``[[x0, y0], [x1, y1]]`` each.
 
     x is pre-multiplied by :data:`ASPECT`, so both axes are in cap heights and
-    a single stroke half-width applies to every direction.
+    a single stroke half-width applies to every direction. Serifs are added at
+    every free terminal; a closed polyline (an O, the bowl of a 6) has no free
+    end and so gets none.
     """
     char = (char or "X").upper()[:1]
     cached = _CACHE.get(char)
@@ -209,6 +227,13 @@ def segments(char: str) -> np.ndarray:
         rows = []
         for line in _STROKES.get(char) or _STROKES["X"]:
             for a, b in zip(line, line[1:]):
-                rows.append([[a[0] * ASPECT, a[1]], [b[0] * ASPECT, b[1]]])
-        cached = _CACHE[char] = np.asarray(rows, np.float32)
+                rows.append([list(a), list(b)])
+            if tuple(line[0]) != tuple(line[-1]):
+                for a, b in ((line[1], line[0]), (line[-2], line[-1])):
+                    tick = _serif(a, b)
+                    if tick is not None:
+                        rows.append(tick)
+        scaled = np.asarray(rows, np.float32)
+        scaled[:, :, 0] *= ASPECT
+        cached = _CACHE[char] = scaled
     return cached
