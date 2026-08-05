@@ -4,8 +4,9 @@ index. See ``docs/design/multi-structure.md`` for the full design.
 """
 from __future__ import annotations
 
+import time
+from collections import Counter, deque
 from dataclasses import dataclass, field
-from collections import Counter
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -13,6 +14,22 @@ import numpy as np
 from .molecule import Molecule
 from .bonds import ensure_bonds
 from . import editor
+
+# How much bond perception may run per render tick before it yields. One
+# 60Hz frame: long enough that the ordinary case (a handful of drawn frames,
+# a few ms) finishes inline exactly as it did before slicing existed, short
+# enough that a large overlay's catch-up costs one frame of input latency per
+# tick instead of blocking for seconds. Per TICK, not per call -- composite()
+# slices as well as poll_bonds(), and they share the allowance
+# (_bond_tick_spent), or a drawing tick would spend several frames' worth.
+#
+# Perception is sliced rather than threaded on purpose. perceive_bonds is
+# only half numpy -- its bond-cap loop is per-pair Python and holds the GIL
+# -- so worker threads measurably slowed the main thread down (a 5000-frame
+# overlay's composite assembly went 137ms -> ~1.0s while four workers ran),
+# on top of needing a stale-result guard against concurrent edits, which
+# perceiving inline does not: a slice reads the geometry as it is right now.
+_BOND_SLICE_SECONDS = 1.0 / 60.0
 
 
 @dataclass
@@ -148,6 +165,29 @@ class StructureSet:
         # keyed including transform, so a pure cache hit costs 0ms.
         self._composite_cache: Optional[Tuple[tuple, "Composite"]] = None
         self._topology_cache: Optional[Tuple[tuple, dict]] = None
+        # Frames waiting to be bonded, for an overlay too large to perceive
+        # in one slice (see _run_bond_slice). Molecules rather than entry
+        # indices: entries can be reordered or removed while the queue
+        # drains, but a Molecule's identity is what perception belongs to.
+        # The queue holds the strong reference, so a queued molecule cannot
+        # be collected and have its id() reused underneath the id set.
+        self._bond_queue: "deque[Molecule]" = deque()
+        self._bond_queued_ids: set = set()
+        # Sticky: set when a slice perceives anything, cleared only when the
+        # queue has drained and the caches have been invalidated for it. It
+        # must survive slices that perceive nothing (an already-bonded or
+        # unperceivable frame), or the last slice reporting "nothing changed"
+        # would strand every earlier slice's bonds behind a stale cache --
+        # nothing else invalidates, since _entry_state does not key on bonds.
+        self._bond_dirty: bool = False
+        # Slice time already spent this render tick. composite() runs a slice
+        # too (above its own cache check, so even a cache hit pays one), and
+        # a single drawing tick calls composite() more than once -- widget
+        # render goes through it for the highlight and again for the scene.
+        # Without a shared allowance those stack, and a tick that claimed to
+        # cost one frame of latency measured 3.1x that. poll_bonds() opens
+        # each new tick by clearing this.
+        self._bond_tick_spent: float = 0.0
 
     # -- sequence protocol --------------------------------------------------
     def __len__(self) -> int:
@@ -447,6 +487,109 @@ class StructureSet:
         self._composite_cache = None
         self._topology_cache = None
 
+    # -- sliced bond perception (large overlays, see composite()) ----------
+    @staticmethod
+    def _needs_perceiving(mol: Molecule) -> bool:
+        return not mol.bonds and not mol.bonds_perceived and mol.n_atoms >= 2
+
+    def bonds_pending(self) -> bool:
+        """True while frames are still queued for perception -- the viewer
+        polls this every tick so a large overlay keeps catching up (and says
+        so on the strip) even with no further input."""
+        return bool(self._bond_queue)
+
+    def _queue_bonds(self, molecules: Sequence[Molecule]) -> None:
+        """Append *molecules* to the perception queue, in order, skipping
+        anything already on it."""
+        for mol in molecules:
+            key = id(mol)
+            if key not in self._bond_queued_ids:
+                self._bond_queued_ids.add(key)
+                self._bond_queue.append(mol)
+
+    def _prune_bond_queue(self, keep_ids: set) -> None:
+        """Drop queued frames that are no longer drawn.
+
+        The queue is work the *screen* is waiting on, so it has to follow the
+        drawn set rather than outlive it. Closing a file mid-catch-up, or
+        clicking ALL a second time to clear the overlay, otherwise leaves
+        hundreds of entries queued for structures nobody is looking at (or
+        that no longer exist -- the deque holds a strong reference, so they
+        stay alive too). The render loop treats bonds_pending() as "the
+        screen is waiting", and would keep spinning at a zero read timeout,
+        suppressing the supersampled settle, and saying "perceiving bonds"
+        for the whole drain.
+
+        Only called with a non-empty queue, so the common case pays nothing.
+        """
+        if not self._bond_queue:
+            return
+        kept = deque(m for m in self._bond_queue if id(m) in keep_ids)
+        if len(kept) != len(self._bond_queue):
+            self._bond_queue = kept
+            self._bond_queued_ids = {id(m) for m in kept}
+
+    def _run_bond_slice(self, budget: Optional[float] = None) -> bool:
+        """Perceive queued frames until this tick's slice budget is spent,
+        then yield. Returns True if the caches were invalidated and a redraw
+        is due.
+
+        *budget* defaults to whatever is left of ``_BOND_SLICE_SECONDS`` this
+        tick -- composite() and poll_bonds() share one allowance, so a tick
+        that draws cannot spend several frames' worth between them.
+
+        Always perceives at least one molecule when it has any budget, so the
+        queue makes progress even when a single frame costs more than the
+        whole budget (perception is atomic per molecule -- it cannot be
+        preempted).
+
+        Because this runs on the main thread and reads each molecule's
+        geometry at the moment it perceives it, there is no window in which a
+        result can go stale against a concurrent edit: an edit either lands
+        before the slice (and is what gets perceived) or after it (and
+        re-perceives through editor._reperceive)."""
+        if budget is None:
+            budget = _BOND_SLICE_SECONDS - self._bond_tick_spent
+        if self._bond_queue and budget > 0:
+            start = time.perf_counter()
+            while self._bond_queue:
+                mol = self._bond_queue.popleft()
+                self._bond_queued_ids.discard(id(mol))
+                try:
+                    if self._needs_perceiving(mol):
+                        ensure_bonds(mol, tolerance=self.bond_tolerance)
+                        self._bond_dirty = True
+                except Exception:  # noqa: BLE001
+                    # A molecule that cannot be perceived is marked done
+                    # rather than left on the queue: retrying it forever
+                    # would spend every slice on it and starve the frames
+                    # behind it.
+                    mol.bonds_perceived = True
+                if time.perf_counter() - start >= budget:
+                    break
+            self._bond_tick_spent += time.perf_counter() - start
+        # Rebuild the flattened composite once the queue has drained, not
+        # after every slice: for a many-thousand-frame overlay that rebuild
+        # concatenates every atom and costs real time on its own, so
+        # invalidating per slice would pay it hundreds of times across the
+        # catch-up. Frames sit correctly-perceived-but-uncached until then;
+        # nothing reads mol.bonds except a composite rebuild.
+        if self._bond_dirty and not self._bond_queue:
+            self._bond_dirty = False
+            self.invalidate()
+            return True
+        return False
+
+    def poll_bonds(self) -> bool:
+        """Advance queued perception from the render loop, so a large
+        overlay keeps catching up during a lull with no input to trigger a
+        redraw. Returns True when a repaint is due.
+
+        This is the render loop's once-per-tick entry point, so it is also
+        where the shared slice allowance is refreshed."""
+        self._bond_tick_spent = 0.0
+        return self._run_bond_slice()
+
     def _entry_state(self, i: int, include_transform: bool) -> tuple:
         e = self.entries[i]
         base = (id(e.molecule), e.revision, e.visible, e.marked, e.tint)
@@ -522,15 +665,44 @@ class StructureSet:
         # it here -- on selection, on marking, on any change of the drawn set
         # -- is invisible and bounded by what is on screen.
         #
+        # That bound holds for the common case (a handful of drawn frames),
+        # but not for a large overlay -- the structure list's ALL button marks
+        # every entry, and a multi-thousand-frame trajectory turns "invisible"
+        # into ~17s blocking the single-threaded render loop, with no repaint
+        # and no input handled until it's done. So perception is sliced
+        # (_run_bond_slice): a frame's worth per call, the rest queued and
+        # drained a slice per render tick. A handful of frames still finishes
+        # inside this one call exactly as before; a big overlay returns early
+        # with the remainder drawn as loose atoms until its slices land.
+        #
+        # The active entry is perceived inline whatever the queue looks like:
+        # it is the frame the user is looking at, and the only one the editor
+        # can act on -- editor._neighbors reads mol.bonds with no fallback,
+        # so leaving the active frame queued would let an edit place atoms
+        # against empty connectivity.
+        #
         # This must stay ABOVE the caches and the single-entry fast path
         # below: that path returns the entry's Molecule directly, and the
         # renderers treat an empty bond list as "this molecule has no bonds"
         # rather than "not computed yet" (see gl_adapter/render), so a frame
-        # that slipped past here would quietly draw as loose atoms.
+        # that slipped past here would quietly draw as loose atoms -- which is
+        # now the deliberate, self-correcting state for anything still
+        # queued, rather than a bug.
         if self.auto_bonds:
-            for i in drawn:
-                ensure_bonds(self.entries[i].molecule,
-                             tolerance=self.bond_tolerance)
+            for mol in (self.entries[drawn[0]].molecule, self.active.molecule):
+                if self._needs_perceiving(mol):
+                    ensure_bonds(mol, tolerance=self.bond_tolerance)
+            needed = [self.entries[i].molecule for i in drawn
+                      if self._needs_perceiving(self.entries[i].molecule)]
+            # This is the one place that knows the current drawn set, so it
+            # is also where the queue is trimmed back to it (see
+            # _prune_bond_queue) -- a file closed or an overlay cleared
+            # mid-catch-up must not leave the screen waiting on frames it
+            # stopped drawing.
+            self._prune_bond_queue({id(self.entries[i].molecule) for i in drawn})
+            if needed:
+                self._queue_bonds(needed)
+            self._run_bond_slice()
 
         full_key = self._full_key(drawn)
         if self._composite_cache is not None and self._composite_cache[0] == full_key:

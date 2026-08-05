@@ -1588,7 +1588,14 @@ class Viewer:
             drawn = sset.drawn_indices()
             membership = "+".join(str(i + 1) for i in drawn)
             aligned = any(not sset[i].transform.is_identity for i in drawn)
-            status = f" overlay {membership}" + (" \u00b7 aligned" if aligned else "")
+            # A big ALL-marked overlay backgrounds its bond perception
+            # (StructureSet.composite/poll_bonds) rather than blocking the
+            # UI; while that's still catching up, say so -- newly-marked
+            # frames drawing as loose atoms for a few seconds is otherwise
+            # unexplained.
+            pending = " \u00b7 perceiving bonds\u2026" if sset.bonds_pending() else ""
+            status = (f" overlay {membership}"
+                      + (" \u00b7 aligned" if aligned else "") + pending)
             put(row0, self._list_line([(status, muted)], total_w))
             row0 += 1
         put(row0, self._list_line([(" camera shared", muted)], total_w))
@@ -4122,7 +4129,13 @@ class Viewer:
             frame_dt = 1.0 / self.target_fps
             dirty = False
             while self._running:
-                data = self._read(frame_dt)
+                # Don't idle out the frame wait while a large overlay still
+                # has frames queued for bonding: poll_bonds below spends a
+                # bounded slice per tick, so waiting first would halve the
+                # catch-up rate for no benefit. Input is still read (a zero
+                # timeout takes whatever is already there), so this stays
+                # responsive -- it just doesn't sleep with work outstanding.
+                data = self._read(0.0 if self.structures.bonds_pending() else frame_dt)
                 # VIMOL_TIMING: input burstiness -- the gap between reads that
                 # carried bytes, and how many events each burst decodes to.
                 in_gap = 0.0
@@ -4158,6 +4171,12 @@ class Viewer:
                     self.widget.cleanup_tick()
                     self._last_interact = time.time()
                     dirty = True
+                if self.structures.poll_bonds():
+                    # A large overlay's queued bond perception (see
+                    # StructureSet.composite) just drained: repaint so the
+                    # newly-bonded frames stop showing as loose atoms, even
+                    # though nothing else this tick asked for a redraw.
+                    dirty = True
                 if self._fence_t0 is not None:
                     # The previous frame hasn't reached the terminal yet.
                     # Keep reading input and folding it into the model
@@ -4170,12 +4189,18 @@ class Viewer:
                 if dirty:
                     self._draw()
                     dirty = False
-                elif self._target_ss() != self._drawn_ss and not self._input_pending():
+                elif (self._target_ss() != self._drawn_ss
+                      and not self._input_pending()
+                      and not self.structures.bonds_pending()):
                     # Settle to a crisp, supersampled frame once the view stops
                     # moving -- but ONLY in a genuine lull with nothing queued.
                     # The high-quality downsample is a heavy synchronous step
                     # (~0.2s at full screen); running it while a keypress or
                     # mouse-move is waiting would stall that input behind it.
+                    # Queued bond perception counts as "not a lull" for the
+                    # same reason, plus settling mid-catch-up would render an
+                    # expensive still of a half-bonded scene that the drain is
+                    # about to invalidate anyway.
                     self._draw()
         finally:
             self._exit()

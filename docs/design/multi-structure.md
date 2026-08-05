@@ -381,6 +381,55 @@ them out as read-only views. (Fixing this for plain single-molecule rendering
 too is a small standalone win, but it is not in this design's scope — note it
 and move on.)
 
+### Bond perception is sliced, so a large drawn set cannot block the loop
+
+`composite()` perceives bonds for the drawn entries, because it already
+computes exactly that set and the renderers read an empty bond list as "no
+bonds" rather than "not computed yet". Perceiving *all* of them inline does not
+scale: the drawn set is whatever is **marked**, and the strip's ALL button
+(§4.1) marks everything, so a 5000-frame trajectory meant ~17 s of perception
+inside one `composite()` call — on the single thread that also serves input and
+repaint. Measured, 5000 × 334 atoms.
+
+So perception is **time-sliced**, not batched: `_run_bond_slice` perceives from
+a queue until a one-frame budget (`_BOND_SLICE_SECONDS`, 1/60 s) is spent, then
+yields; `Viewer.run` drains a slice per tick via `poll_bonds()`. A handful of
+drawn frames still finishes inside the one call, exactly as before. A large
+overlay returns early and draws its unperceived frames as loose atoms — now a
+deliberate, self-correcting transient rather than the bug it would otherwise
+be. Measured on the same input: the ALL click costs ~190 ms (dominated by the
+composite assembly of 1.67 M atoms, not by bonds), with a median slice of
+~19 ms thereafter.
+
+Four invariants hold this together:
+
+- **One slice budget per render tick, shared.** `composite()` slices too, and
+  it does so *above* its own cache check, so even a cache hit pays one — and a
+  drawing tick calls `composite()` more than once (once for the highlight, once
+  for the scene). Unshared, those stack: a tick that is supposed to cost one
+  frame of added latency measured 3.1×. `poll_bonds()` opens each tick by
+  clearing the spent-so-far counter.
+- **The queue follows the drawn set.** It is work the *screen* is waiting on,
+  so `composite()` prunes it to the current drawn entries. Otherwise closing a
+  file or clearing the overlay mid-catch-up leaves hundreds of frames queued
+  (and, holding a strong reference, alive) while the loop keeps spinning at a
+  zero read timeout and holding off the settle for structures nobody is
+  looking at.
+
+- **The active entry is always perceived inline**, whatever the queue looks
+  like. `editor._neighbors` reads `mol.bonds` with no fallback, so leaving the
+  active frame queued would let an edit place atoms against empty connectivity.
+- **Invalidation waits for the drain**, and is sticky (`_bond_dirty`). The
+  cache key above does not include bonds, so nothing else would ever
+  invalidate for them; but invalidating *per slice* would pay the full rebuild
+  hundreds of times across the catch-up.
+- **Slices run on the main thread, deliberately.** A `ThreadPoolExecutor`
+  version was measured and rejected: `perceive_bonds` is only half numpy (its
+  bond-cap loop is per-pair Python and holds the GIL), so four workers inflated
+  the main thread's own composite assembly from 137 ms to ~1.0 s during
+  catch-up — and it needed a stale-result guard against concurrent edits, which
+  perceiving inline does not, since a slice reads the geometry as it is now.
+
 ### What reads the composite vs. the active structure
 
 | reads the **composite** | reads the **active** structure |
