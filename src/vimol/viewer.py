@@ -496,6 +496,9 @@ class Viewer:
         # same stable identity as grouping, so scrolling or changing the main
         # frame never loses collapse state.
         self._collapsed_groups = set()
+        # (key, rows) for _list_display_rows -- see there for why the strip's
+        # row layout is cached and what the key covers.
+        self._list_rows_cache: Optional[Tuple[tuple, List]] = None
         self._list_group_toggle_spans: List[Tuple[int, int, int, int, int]] = []
         self._list_group_summary_spans: List[Tuple[int, int, int, int, int]] = []
         # One past the last row the strip painted last time. Collapsing can
@@ -903,8 +906,33 @@ class Viewer:
         files also receive a section whenever several files are open or the
         viewer is in overlay mode. Runs are consecutive: structures load in
         file order, and grouping across a gap would reorder the strip.
+
+        Cached, because this is O(n) with a large constant -- roughly three
+        _list_group_key calls per entry -- and it is on the scroll path
+        twice per wheel notch (_list_max_scroll clamps with it, then
+        _draw_list slices it). At 5000 frames that measured 13.9 ms per
+        notch, all of it rebuilding rows that scrolling cannot change.
+
+        The key has to be O(1) or it defeats the purpose, which is what
+        StructureSet.structure_revision is for: entry labels and paths are
+        fixed at append, so the row layout can only change when the entry
+        list does, when a group is collapsed, or when overlay toggles (it
+        decides whether a lone path-backed file gets a header).
         """
+        # len() as well as the revision: the revision covers append/remove and
+        # label/path reassignment, and the length is a free second line of
+        # defence against anything that reaches into ``entries`` directly.
+        cache_key = (self.structures.structure_revision, len(self.structures),
+                     self.structures.overlay, frozenset(self._collapsed_groups))
+        if self._list_rows_cache is not None and self._list_rows_cache[0] == cache_key:
+            return self._list_rows_cache[1]
         rows: List[Tuple[str, Optional[int], str]] = []
+        # entry index -> (group first, group end), filled as the runs are
+        # found below. Every entry lands in exactly one run, so this ends up
+        # total. _list_group_end and _list_frame_path_tip read it instead of
+        # rediscovering the same boundaries by walking the group, which they
+        # each did once per drawn row.
+        bounds: List[Tuple[int, int]] = [(0, 0)] * len(self.structures)
         n = len(self.structures)
         path_names = self._list_path_display_names()
         path_groups = set()
@@ -918,6 +946,8 @@ class Viewer:
             j = i + 1
             while j < n and self._list_group_key(j) == key:
                 j += 1
+            for m in range(i, j):
+                bounds[m] = (i, j)
             sectioned = (j - i > 1
                          or (key[0] == "path"
                              and (self.structures.overlay or len(path_groups) > 1)))
@@ -933,15 +963,21 @@ class Viewer:
                 rows.append(("struct", i, self._list_group_name(
                     i, False, path_names)))
             i = j
+        self._list_rows_cache = (cache_key, rows, bounds)
         return rows
+
+    def _list_group_bounds(self) -> List[Tuple[int, int]]:
+        """``entry index -> (group first, group end)``, from the same cached
+        pass that builds the rows (see :meth:`_list_display_rows`)."""
+        self._list_display_rows()          # populates/validates the cache
+        return self._list_rows_cache[2]
 
     def _list_group_end(self, first: int) -> int:
         """Exclusive end of the consecutive file group starting at *first*."""
-        key = self._list_group_key(first)
-        end = first + 1
-        while end < len(self.structures) and self._list_group_key(end) == key:
-            end += 1
-        return end
+        bounds = self._list_group_bounds()
+        if not bounds or not 0 <= first < len(bounds):
+            return first + 1
+        return bounds[first][1]
 
     def _list_group_all_hit(self, col: int, row: int):
         for r0, c0, c1, first, end in self._list_group_all_spans:
@@ -970,10 +1006,8 @@ class Viewer:
         entry = self.structures[i]
         if entry.path is None:
             return ""
-        key = self._list_group_key(i)
-        first = i
-        while first > 0 and self._list_group_key(first - 1) == key:
-            first -= 1
+        bounds = self._list_group_bounds()
+        first = bounds[i][0] if 0 <= i < len(bounds) else i
         return f"{entry.path}#frame {i - first + 1}"
     @staticmethod
     def _list_group_span_hit(spans, col: int, row: int):

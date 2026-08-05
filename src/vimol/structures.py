@@ -102,6 +102,23 @@ class Structure:
         """Call after ANY in-place mutation of ``self.molecule``."""
         self.revision += 1
 
+    def __setattr__(self, name, value):
+        """Reassigning ``label`` or ``path`` bumps the owning set's
+        ``structure_revision``.
+
+        Those two are what the structure strip groups rows by, and its row
+        layout is cached against that counter (Viewer._list_display_rows).
+        They are *mostly* write-once -- set at append and left alone -- but
+        not entirely: saving under a new name assigns ``path`` on the active
+        entry. Rather than ask every such writer to remember the counter,
+        the assignment carries it, so the cache cannot silently go stale.
+        """
+        object.__setattr__(self, name, value)
+        if name in ("label", "path"):
+            owner = getattr(self, "_owner", None)
+            if owner is not None:
+                owner.structure_revision += 1
+
 
 # High-contrast, colour-blind-safe, deliberately not near any common CPK
 # colour (which is reserved for the active structure, see composite()).
@@ -149,6 +166,13 @@ class StructureSet:
 
     def __init__(self) -> None:
         self.entries: List[Structure] = []
+        # Bumped whenever the entry LIST changes shape (append/remove_range).
+        # Entry labels and paths are assigned at append and never reassigned,
+        # so this is a complete summary of everything the structure strip's
+        # row layout is derived from -- and it lets that layout be cached
+        # against an O(1) key instead of an O(n) one, which is the whole
+        # point (see Viewer._list_display_rows).
+        self.structure_revision: int = 0
         self.active_index: int = 0
         self.overlay: bool = False   # False: draw active only. True: draw the marked set.
         self._solo_restore: Optional[List[bool]] = None
@@ -234,7 +258,12 @@ class StructureSet:
         label = label if label is not None else f"structure{len(self.entries)}"
         tint = TINTS[len(self.entries) % len(TINTS)]
         entry = Structure(molecule=molecule, label=label, path=path, tint=tint)
+        # Not a dataclass field: it would land in repr/eq, and it is a cycle
+        # back to the set. Set after construction so Structure.__setattr__
+        # sees no owner while __init__ assigns the real fields.
+        object.__setattr__(entry, "_owner", self)
         self.entries.append(entry)
+        self.structure_revision += 1
         return entry
 
     def extend(self, molecules, labels=None, path: Optional[str] = None) -> List[Structure]:
@@ -263,6 +292,7 @@ class StructureSet:
         if end <= first:
             return
         del self.entries[first:end]
+        self.structure_revision += 1
         # solo() zips this against entries, so a snapshot left longer than
         # the rows it describes would restore visibility onto the wrong ones.
         if self._solo_restore is not None:

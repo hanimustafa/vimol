@@ -3862,3 +3862,124 @@ def test_alignment_pick_ignores_a_hidden_active_structure(tmp_path):
         w._apply_highlight()          # must not raise
     finally:
         os.close(fd)
+
+
+# -- structure strip: scrolling must not rebuild the whole row layout --------
+def _big_strip_viewer(tmp_path, n_frames=1200):
+    """A viewer holding one big single-file trajectory, as the strip sees it."""
+    from vimol.viewer import Viewer
+    from vimol.structures import StructureSet
+    from vimol import theme as _theme
+    mol = vimol.load(os.path.join(EX, "water.xyz"))
+    sset = StructureSet()
+    for i in range(n_frames):
+        sset.append(vimol.load(os.path.join(EX, "water.xyz")),
+                    label=f"traj.xyz#{i + 1}", path=str(tmp_path / "traj.xyz"))
+    fd = os.open(str(tmp_path / "out.bin"), os.O_WRONLY | os.O_CREAT, 0o644)
+    v = Viewer(mol, structures=sset, fd_out=fd)
+    v.theme = _theme.DARK
+    v._cols, v._rows = 200, 50
+    v._update_geometry()
+    return v, fd
+
+
+def test_scrolling_the_strip_does_not_rebuild_the_row_layout(tmp_path):
+    """Scrolling changes which rows are shown, never what the rows ARE.
+
+    The layout is O(n) with ~3 _list_group_key calls per entry, and the
+    scroll path walks it twice per wheel notch (_list_max_scroll clamps with
+    it, then _draw_list slices it). Rebuilding it per notch measured 13.9 ms
+    at 5000 frames -- the reported "scrolling is very slow".
+
+    Asserted as "the cost does not grow with the frame count" rather than as
+    a wall-clock bound (which would flake) or as zero work (a few O(1)
+    lookups per draw are legitimate -- the sticky header needs them).
+    """
+    def scroll_cost(n_frames):
+        v, fd = _big_strip_viewer(tmp_path, n_frames=n_frames)
+        try:
+            v._draw_list()                  # prime the cache
+            calls = []
+            real = type(v)._list_group_key
+            type(v)._list_group_key = lambda self, i: (calls.append(i), real(self, i))[1]
+            try:
+                for _ in range(10):
+                    v._list_scroll_by(3)
+                    v._draw_list()
+            finally:
+                type(v)._list_group_key = real
+            return len(calls)
+        finally:
+            os.close(fd)
+
+    small, large = scroll_cost(300), scroll_cost(1200)
+    assert small == large, (
+        f"scrolling cost grew with the frame count ({small} -> {large} "
+        "group-key lookups for 4x the frames) -- the layout is being rebuilt")
+
+
+def test_group_bounds_do_not_walk_the_group(tmp_path):
+    """_list_group_end and _list_frame_path_tip used to rediscover a group's
+    boundaries by walking it -- once per drawn row, O(n) each. They now read
+    the bounds the cached layout pass already computed."""
+    v, fd = _big_strip_viewer(tmp_path)
+    try:
+        v._draw_list()
+        n = len(v.structures)
+        assert v._list_group_end(0) == n          # one file: one group
+        assert v._list_group_end(n // 2) == n
+        assert v._list_frame_path_tip(0).endswith("#frame 1")
+        assert v._list_frame_path_tip(41).endswith("#frame 42")
+
+        calls = []
+        real = type(v)._list_group_key
+        type(v)._list_group_key = lambda self, i: (calls.append(i), real(self, i))[1]
+        try:
+            v._list_group_end(0)
+            v._list_frame_path_tip(41)
+        finally:
+            type(v)._list_group_key = real
+        assert not calls, f"{len(calls)} group-key calls to answer two lookups"
+    finally:
+        os.close(fd)
+
+
+def test_row_layout_cache_follows_a_reassigned_path(tmp_path):
+    """`label`/`path` decide how rows group, and saving under a new name
+    reassigns `path` on the active entry. The cache key must notice."""
+    v, fd = _big_strip_viewer(tmp_path, n_frames=6)
+    try:
+        before = v._list_display_rows()
+        assert before[0][0] == "group"        # one file, so one header
+        v.structures[0].path = str(tmp_path / "renamed.xyz")
+        after = v._list_display_rows()
+        assert after != before, "row layout served stale after a path change"
+    finally:
+        os.close(fd)
+
+
+def test_row_layout_cache_follows_a_reassigned_label(tmp_path):
+    v, fd = _big_strip_viewer(tmp_path, n_frames=6)
+    try:
+        for e in v.structures.entries:
+            e.path = None                     # fall back to label-based grouping
+        before = v._list_display_rows()
+        v.structures[2].label = "unrelated"
+        assert v._list_display_rows() != before, (
+            "row layout served stale after a label change")
+    finally:
+        os.close(fd)
+
+
+def test_row_layout_cache_follows_collapse_and_overlay(tmp_path):
+    v, fd = _big_strip_viewer(tmp_path, n_frames=6)
+    try:
+        rows = v._list_display_rows()
+        v._toggle_list_group_collapsed(0, 6)
+        collapsed = v._list_display_rows()
+        assert collapsed != rows
+        assert any(r[0] == "collapsed" for r in collapsed)
+        v._toggle_list_group_collapsed(0, 6)
+        assert v._list_display_rows() == rows
+    finally:
+        os.close(fd)
