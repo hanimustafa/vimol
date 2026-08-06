@@ -3170,6 +3170,22 @@ def test_default_demo_path_resolves_to_bundled_c60():
     assert os.path.basename(path) == "c60.xyz"
 
 
+def test_default_demo_path_prefers_packaged_copy_when_examples_dir_absent(monkeypatch):
+    # Simulates a real `pip install`: no examples/ checkout directory exists,
+    # only the packaged copy shipped inside the vimol package.
+    packaged = os.path.join(os.path.dirname(os.path.abspath(vimol_app.__file__)), "data", "c60.xyz")
+    real_exists = os.path.exists
+
+    def fake_exists(path):
+        if os.path.normpath(path).endswith(os.path.join("examples", "c60.xyz")):
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(os.path, "exists", fake_exists)
+    path = vimol_app._default_demo_path()
+    assert path == packaged
+
+
 def test_cli_with_no_file_uses_demo_default_not_help(capsys):
     # non-tty stdout (pytest) means it can't actually open the interactive
     # viewer -- it should get as far as trying to (exit 4), not fall back to
