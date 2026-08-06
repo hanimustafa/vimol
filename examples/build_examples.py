@@ -3,15 +3,18 @@ import math
 import os
 
 HERE = os.path.dirname(__file__)
+PKG_DATA = os.path.join(HERE, "..", "src", "vimol", "data")
 
 
-def write_xyz(name, comment, atoms):
-    path = os.path.join(HERE, name)
-    with open(path, "w") as f:
-        f.write(f"{len(atoms)}\n{comment}\n")
-        for sym, (x, y, z) in atoms:
-            f.write(f"{sym:2s} {x:12.6f} {y:12.6f} {z:12.6f}\n")
-    print("wrote", path, len(atoms), "atoms")
+def write_xyz(name, comment, atoms, dirs=(HERE,)):
+    for d in dirs:
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name)
+        with open(path, "w") as f:
+            f.write(f"{len(atoms)}\n{comment}\n")
+            for sym, (x, y, z) in atoms:
+                f.write(f"{sym:2s} {x:12.6f} {y:12.6f} {z:12.6f}\n")
+        print("wrote", path, len(atoms), "atoms")
 
 
 def water():
@@ -65,7 +68,7 @@ def buckyball():
                         pts.add(tuple(round(c, 6) for c in p))
     scale = 1.46 / 2.0  # edge length of construction is 2 A -> C-C ~1.46
     atoms = [("C", (x * scale, y * scale, z * scale)) for (x, y, z) in sorted(pts)]
-    write_xyz("c60.xyz", "buckminsterfullerene C60", atoms)
+    write_xyz("c60.xyz", "buckminsterfullerene C60", atoms, dirs=(HERE, PKG_DATA))
 
 
 def _sub(a, b):

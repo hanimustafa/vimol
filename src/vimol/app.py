@@ -1,6 +1,6 @@
 """Command-line driver for vimol.
 
-    vimol                           # opens the bundled C60 demo (checkout only)
+    vimol                           # opens the bundled C60 demo
     vimol file.pdb                 # interactive viewer (opens editable: a=append)
     vimol file.xyz --spin          # autospinning
     vimol a.xyz b.pdb              # load both, auto-overlaid for comparison
@@ -162,13 +162,17 @@ def _default_representation(molecule) -> str:
 def _default_demo_path() -> Optional[str]:
     """Path to the bundled C60 demo, for `vimol` with no file argument.
 
-    Only resolvable from a checkout or editable install -- `examples/` sits
-    next to `src/`, not inside the installed package -- so a plain `vimol`
-    still falls back to --help rather than crashing on a real install.
+    Prefers the copy shipped inside the package (src/vimol/data/c60.xyz,
+    included as package-data so it survives `pip install`); falls back to
+    the checkout's examples/c60.xyz for a source tree where that data file
+    hasn't been generated yet (see examples/build_examples.py).
     """
+    packaged = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "c60.xyz")
+    if os.path.exists(packaged):
+        return packaged
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    path = os.path.join(root, "examples", "c60.xyz")
-    return path if os.path.exists(path) else None
+    checkout = os.path.join(root, "examples", "c60.xyz")
+    return checkout if os.path.exists(checkout) else None
 
 
 def _build_structure_set(paths: List[str], no_bonds: bool, tolerance: float) -> StructureSet:

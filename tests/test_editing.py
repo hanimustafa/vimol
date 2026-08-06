@@ -3170,6 +3170,30 @@ def test_default_demo_path_resolves_to_bundled_c60():
     assert os.path.basename(path) == "c60.xyz"
 
 
+def test_default_demo_path_resolves_inside_the_package_not_examples():
+    # The demo a real `pip install` gets: resolution must land on the copy
+    # inside the package and so not depend on examples/ existing at all --
+    # examples/ sits next to src/ and is not part of the wheel. That the file
+    # is actually IN the built wheel and sdist is asserted by
+    # scripts/build-pypi-artifacts, which no unit test can check.
+    pkg_dir = os.path.dirname(os.path.abspath(vimol_app.__file__))
+    path = vimol_app._default_demo_path()
+    assert path == os.path.join(pkg_dir, "data", "c60.xyz")
+    assert os.path.exists(path)
+
+
+def test_default_demo_path_falls_back_to_examples_when_packaged_copy_absent(monkeypatch):
+    # A source tree where build_examples.py has not been run yet: the packaged
+    # copy is missing, so the checkout's examples/c60.xyz has to carry it.
+    packaged = os.path.join(os.path.dirname(os.path.abspath(vimol_app.__file__)), "data", "c60.xyz")
+    real_exists = os.path.exists
+    monkeypatch.setattr(os.path, "exists",
+                        lambda p: False if p == packaged else real_exists(p))
+    path = vimol_app._default_demo_path()
+    assert path.endswith(os.path.join("examples", "c60.xyz"))
+    assert real_exists(path)
+
+
 def test_cli_with_no_file_uses_demo_default_not_help(capsys):
     # non-tty stdout (pytest) means it can't actually open the interactive
     # viewer -- it should get as far as trying to (exit 4), not fall back to

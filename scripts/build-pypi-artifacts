@@ -58,6 +58,21 @@ rm -rf dist build src/vimol.egg-info
 "$py" -m build
 "$tw" check dist/*
 
+# The demo `vimol` opens with no arguments only reaches users if it is really
+# in the artifacts -- no unit test can see this, so assert it here. Both are
+# checked: the sdist matters because building a wheel FROM it is a path real
+# installers take.
+echo "==> checking data/c60.xyz landed in the wheel and sdist"
+"$py" -c "
+import sys, tarfile, zipfile
+with zipfile.ZipFile('dist/vimol-$ver-py3-none-any.whl') as zf:
+    if 'vimol/data/c60.xyz' not in zf.namelist():
+        sys.exit('!!  vimol/data/c60.xyz is MISSING from the wheel')
+with tarfile.open('dist/vimol-$ver.tar.gz') as tf:
+    if 'vimol-$ver/src/vimol/data/c60.xyz' not in tf.getnames():
+        sys.exit('!!  src/vimol/data/c60.xyz is MISSING from the sdist')
+" || { echo "    check [tool.setuptools.package-data] in pyproject.toml" >&2; exit 1; }
+
 echo "==> smoke test: install the wheel in a throwaway venv, check --version"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
