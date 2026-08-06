@@ -147,15 +147,14 @@ def _check_kitty_terminal() -> Tuple[Optional["kitty.TerminalProbe"], int]:
 def _default_representation(molecule) -> str:
     """What a single file should open as when the user named no style.
 
-    A file with no residue names is usually small enough that ball-and-stick
-    is the right first look -- unless it turns out to be a protein, where a
-    hundred sticks say far less than the fold does. Only for the nameless
-    formats: opening a PDB is a deliberate act and its author may well want to
-    see the atoms.
+    Small enough that ball-and-stick is the right first look -- unless it
+    turns out to be a protein, where a hundred sticks say far less than the
+    fold does. Residue names (as a PDB carries) help recognize a protein but
+    don't decide the question by themselves: a PDB of a small ligand is still
+    ball-and-stick, and a protein is still a protein whether or not its file
+    format happened to name the residues.
     """
     from .residues import protein_residues
-    if molecule.atom_resnames:
-        return "ball_and_stick"
     return "ribbon" if len(protein_residues(molecule)) >= 3 else "ball_and_stick"
 
 
