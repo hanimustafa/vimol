@@ -1,118 +1,110 @@
 # vimol
 
 A molecular viewer and editor that runs **in your terminal**. Open an `.xyz`,
-`.pdb`, `.mol`, or `.sdf` file and get a shaded, rotatable, editable 3D
-structure right where you're already working — over SSH, in tmux, next to
-your editor.
+`.pdb`, `.mol` or `.sdf` file and get a shaded, rotatable, editable 3D
+structure right where you are already working — over SSH, in tmux, beside your
+editor.
 
 ```bash
 pip install vimol
 vimol molecule.xyz
 ```
 
-Requires Python ≥ 3.8 and a terminal that speaks the
-[Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/)
-— **kitty, Ghostty, or WezTerm**. Rendering is pure software (numpy impostor
-raycasting), with an OpenGL fast path used automatically where a GPU is
-available. MIT licensed.
-
-## In the terminal
-
 ![C60 spinning in the terminal, rendered by vimol](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/spin.gif)
 
-`vimol` with no file opens this bundled C60 demo. Drag to rotate, scroll to
-zoom, hover an atom to identify it, `m` to measure distances/angles/dihedrals
-— with more than one structure loaded, a live column tracks it in a
-comparison table next to the structure list, evaluated for every loaded
-structure at once; move on to a different measurement (or a different frame)
-and it locks in as its own column (click a column's `×` to remove it).
-With an overlay up, `r` rigidly aligns every tinted structure onto the
-untinted main one and reports each RMSD (`r` and `R` only align in overlay
-mode, and say so otherwise). To fit on part of a structure instead, press `R`
-and click atoms on the main structure (or option-click an atom to jump
-straight into picking without `R`), then `Enter` or `r`. vimol finds the
-matching element-compatible subset in each tinted molecule and aligns the
-whole molecule from that fit (`Esc` cancels). Picking works before an overlay
-exists too — select atoms, `opt+click` a row to overlay it, then `r`.
-The fit stays beside the structure list as a `⊂RMSD #select1` column: hover
-its header to see which atoms it uses, click it to arm that selection again
-(clicking a second time disarms it), and press `R` to recalculate the same
-column — `×` removes it. Editing the main frame marks a saved column `*` and
-disarms it, since its numbers no longer describe the geometry on screen.
-Below the structure list, click the highlighted `select` hint (or press
-`Shift+S`) for the **Backbone** and **Backbone + Cβ** presets, or **Manual**
-to keep clicking atoms yourself. Presets act on the untinted main frame only:
-PDB `ATOM` names are used directly, other formats fall back to a bond-graph
-`N–Cα–C(–O)` motif detector. Two PDB structures that share residue/atom
-identity skip the search and fit directly. `pip install vimol[align]` adds
-scipy, which speeds up the permutation search; without it a numpy fallback is
-used.
-Editing is on by default: `a` to append (grow fragments, swap elements — the
-status-bar pills pick the element and geometry), option-drag to draw bonds,
-`x` to delete, `c` to relax clashes, `u` to undo, `s` to save. `?` lists
-every binding.
+Running `vimol` with no arguments opens that bundled C60. Drag to rotate,
+scroll to zoom, hover an atom to identify it, `?` for every binding.
 
-`1`–`4` switch between ball-and-stick, space-filling, licorice and wireframe.
-On a protein, `5` draws the bare backbone as a green cartoon ribbon, and `6`
-reads it the way a figure does: the backbone runs as
-a ribbon through the Cα atoms, and each residue links out from its Cα by way
-of its Cβ to a solid carrying its one-letter code — a plate cut to the shape of
-the ring for the aromatics, a rounded volume built from the real side-chain
-carbons for everything else. Only the carbon skeleton is abstracted: the
-carboxylate, the hydroxyl, the indole N–H and any hydrogen sitting on one of
-those stay real atoms in their element colours, at the exact coordinates in the
-file. Each solid is lettered with its one-letter code and residue number,
-printed onto one face of the residue -- so turning the structure foreshortens a
-letter and eventually takes it out of sight, the way a marking on a real object
-would.
-Overlaid structures tint flat, as in every other style.
+You need Python 3.8 or newer and a terminal that speaks the
+[Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) —
+**kitty, Ghostty or WezTerm**. Rendering is pure software (numpy impostor
+raycasting); if a GPU context can be created, an OpenGL path is used
+automatically instead. MIT licensed.
 
-Both work on an `.xyz` too, which carries neither residue names nor atom names —
-and a single `.xyz` that turns out to be a protein opens in `5` rather than as a
-thicket of sticks. The backbone and the residues are recovered from geometry:
-the backbone is found as a bond-graph `N–Cα–C(=O)` motif, and each side chain is
-walked outward from its Cα, which gives every atom its bond distance from the Cα
-— and that distance is what a PDB name's Greek letter records. The resulting
-(element, distance) signature identifies all twenty residues uniquely, so the
-letters and the ring shapes come out the same as they would from a PDB.
-Something with no peptide backbone in it stays ball-and-stick and says so.
+## Open a protein that does not know it is one
 
-This is the one style that looks materially better on a GPU. There the ribbon
-is a real swept tube with a rounded edge and the tablets are chamfered solids
-with their letters printed onto the faces — and it draws in about 2 ms where
-the raycaster takes 100. Without a GL context it still works: the raycaster
-intersects the same shapes analytically and fakes the smooth shading, which
-costs the polish rather than the picture.
+![vimol opening a bare xyz protein and switching to the lettered residue view](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/protein.gif)
 
-Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
-session, auto-overlaid — the first structure of each file shown together, the
-active one in normal element colours and the rest flat-tinted so you can tell
-them apart. Multi-model files keep every frame loaded; `opt+click` a row in the
-structure list to add one into the overlay or drop it out.
+An `.xyz` file carries elements and coordinates and nothing else — no residue
+names, no atom names, no chains. Hand vimol one anyway. It looks for the
+`N–Cα–C(=O)` motif in the bond graph, and if it finds a backbone the file opens
+as a cartoon ribbon rather than as a thicket of sticks.
 
-```bash
-vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling
-vimol protein.pdb --style glyph           # lettered residues on a ribbon
-vimol a.xyz b.pdb                         # load both, auto-overlaid for comparison
-```
+Press `6` and each residue is drawn the way a figure would draw it: the
+backbone runs as a ribbon through the Cα atoms, and every side chain links out
+from its Cα to a solid carrying its one-letter code — a plate cut to the shape
+of the ring for the aromatics, a rounded volume built from the real side-chain
+carbons for the rest. Only the carbon skeleton is abstracted. The carboxylate,
+the hydroxyl, the indole N–H and any hydrogen on one of those stay real atoms
+in their element colours, at the exact coordinates in your file.
 
-## Library usage
+Residue identity is recovered from geometry alone. Walking outward from each Cα
+gives every atom its bond distance from that Cα, which is precisely what the
+Greek letter in a PDB atom name records; the resulting (element, distance)
+signature identifies all twenty residues uniquely. The trp-cage above is PDB
+1RIJ stripped to bare coordinates, and vimol reads it back as
+`ALQELLGQWLKDGGPSSGRPPPS` — character for character the sequence in that
+entry's `SEQRES`. Something with no peptide backbone in it stays
+ball-and-stick and says so.
+
+## Line one structure up against a conformer set
+
+![vimol overlaying 72 CREST conformers on a reference structure and reporting each RMSD](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/align.gif)
+
+Pass more than one file and they load into a single session, auto-overlaid: the
+active structure in normal element colours, the rest flat-tinted so you can
+tell them apart. Multi-model files — trajectories, NMR ensembles, multi-record
+SDFs — keep every frame, listed down the left.
+
+Clicking a file's `ALL` control pulls its whole ensemble into the overlay.
+Then `r` rigidly aligns every tinted structure onto the untinted one and
+reports each RMSD in a `∀RMSD` column beside the list. Above, that is a
+chignolin crystal structure and 72 CREST conformers of it, landing between
+2.1 Å and 3.1 Å. Press `f` to re-fit the view once they are all in one place.
+
+To fit on part of a structure instead, press `R` and click atoms on the main
+structure, then `Enter`. vimol finds the matching element-compatible subset in
+each tinted molecule and aligns the whole molecule from that fit, saving it as
+a `⊂RMSD` column you can re-arm later. `Shift+S` offers ready-made selections —
+backbone, backbone + Cβ, heavy atoms, largest ring system — instead of clicking
+atoms yourself.
+`pip install vimol[align]` adds scipy, which speeds up the permutation search;
+without it a numpy fallback does the same work.
+
+## Build on a structure
+
+![vimol growing a methyl group onto threonine's side-chain hydroxyl](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/methyl.gif)
+
+Editing is on by default. `a` enters append mode, and from there clicking a
+hydrogen grows a new atom in its place, with its own filling hydrogens at
+sensible geometry — one click turns threonine into O-methylthreonine. Clicking
+a heavy atom replaces it, and clicking empty space starts a new molecule. The
+pills in the status bar choose which element and which geometry you are
+building with.
+
+Option-drag from one atom to another draws a bond the automatic perception
+would not have made, `x` deletes, `c` relaxes clashes, `u` undoes and `s`
+saves.
+
+## Use it as a library
+
+![a C60 painted into the middle of a terminal by three lines of Python](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/library.png)
+
+Three lines put a molecule anywhere on the screen. Build a `Scene` at the pixel
+size you want, park the cursor where its top-left corner belongs, and write:
 
 ```python
-import vimol
-
-mol = vimol.load("caffeine.sdf")      # parse; bonds perceived if absent
-vimol.view(mol, editable=True)        # full-screen interactive viewer
-
-scene = vimol.Scene(mol, 640, 480)    # ...or drive the renderer yourself
-scene.camera.orbit(30, -15)           # rotate (degrees)
-img = scene.render()                  # (H, W, 3) uint8 numpy array
-os.write(1, scene.to_kitty())         # paint it into a Kitty terminal
-scene.to_png("out.png")               # or save a PNG (stdlib encoder, no Pillow)
+scene = vimol.Scene(vimol.load("c60.xyz"), 640, 380)   # render it off-screen
+scene.style.transparent = True                         # let the terminal through
+os.write(1, b"\x1b[6;19H" + scene.to_kitty())          # paint at row 6, col 19
 ```
 
-To embed the viewer in your own terminal app, keep the input loop and hand
-only the events you want to the widget:
+That is `examples/inset.py`, and the picture above is what it prints.
+`scene.render()` hands you an `(H, W, 3)` uint8 array instead, and
+`scene.to_png("out.png")` writes a PNG with a stdlib encoder — no Pillow.
+
+For a molecule the user can actually turn, keep your own input loop and give
+the widget only the events you want it to have:
 
 ```python
 from vimol import MoleculeWidget, InputDecoder, MouseEvent
@@ -129,4 +121,38 @@ for ev in decoder.feed(data):                       # bytes you read from the tt
 os.write(1, widget.to_kitty(cols=region_cols, rows=region_rows))
 ```
 
-See `examples/embed_demo.py` for a complete host app.
+`examples/embed_demo.py` is a complete host application built that way.
+
+## Reference
+
+| | |
+|---|---|
+| Drag / arrows / `hjkl` | rotate |
+| Wheel, `+` `-` | zoom |
+| Right or middle drag | pan |
+| `[` `]` | roll |
+| `1` `2` `3` `4` | ball-and-stick, space-filling, licorice, wireframe |
+| `5` `6` | ribbon, lettered residues (proteins) |
+| `f` `z` | re-fit, reset the view |
+| `m` | measure — click 2, 3 or 4 atoms for distance, angle, dihedral |
+| `a` `x` `c` `u` `s` | append, delete, cleanup clashes, undo, save |
+| `r` `R` | align an overlay, or align on picked atoms |
+| `A` `n` `p` | add a file, next and previous structure |
+| `Tab` | focus the structure list |
+| `d` `g` `t` `ctrl-t` | depth cue, hi-quality, transparent background, theme |
+| `?` `q` | help, quit |
+
+```bash
+vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling
+vimol protein.pdb --style glyph           # lettered residues on a ribbon
+vimol a.xyz b.pdb                         # load both, auto-overlaid
+```
+
+Also `--backend cpu|gl|auto`, `--theme dark|light|auto`, `--rotate YAW PITCH`,
+`--frame N`, `--background`, `--transparent`/`--opaque`, `--atom-scale`,
+`--bond-radius`, `--no-depth-cue`, `--no-bonds`, `--bond-tolerance`,
+`--list-formats`.
+
+The three animations above are recorded by `scripts/record_demos.py`, which
+drives a real viewer and rasterizes the bytes it writes; `docs/media/demo` holds
+their inputs.

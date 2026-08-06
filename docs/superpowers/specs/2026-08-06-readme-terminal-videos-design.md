@@ -37,7 +37,7 @@ recording the real thing is also unavailable here: `screencapture` fails with
 *could not create image from display*, because the process holds no Screen
 Recording permission and cannot grant itself one.
 
-So `tools/termrec` renders the frames itself, from the bytes the program really
+So `scripts/termshot.py` renders the frames itself, from the bytes the program really
 emits:
 
 1. **Drive.** Construct a `Viewer` with `fd_out` pointed at a file rather than a
@@ -90,7 +90,7 @@ from a fresh checkout. Threonine is built by `examples/build_examples.py`,
 which exists precisely to generate exact geometry with no external data.
 
 The CREST ensemble in demo B is unpublished output from the author's own work
-and is **not** vendored. `tools/termrec` reads its path from `VIMOL_DEMO_ENSEMBLE`
+and is **not** vendored. `scripts/record_demos.py` reads its path from `VIMOL_DEMO_ENSEMBLE`
 and skips demo B when it is unset, so the repository stays reproducible without
 the recorder making a data release on the author's behalf.
 

@@ -212,8 +212,10 @@ def demo_align(canvas, font):
     s.capture()
     rec.shot(s.terminal, 0.1, pointer=target, badge="r")
     rec.hold(3.0)
-    zoom(rec, s, 4)
-    rec.hold(0.8)
+    s.key("f")                      # re-fit: the overlay now occupies one spot
+    s.capture()
+    rec.shot(s.terminal, 0.1, badge="f")
+    rec.hold(1.8)
     orbit(rec, s, 150, 30, steps=16)
     rec.hold(2.4)
     s.close()
