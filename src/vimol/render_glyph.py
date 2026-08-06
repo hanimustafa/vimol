@@ -155,8 +155,8 @@ def draw_label(center_view, right_view, down_view, normal_view, char, number,
     GPU, so the terminal shows the same marking on the same surface -- turn the
     structure and it foreshortens and eventually goes away. Under an
     orthographic camera the plane maps to the screen by an affine transform, so
-    a pixel's position within the glyph is one 2x2 solve, and the stroke test
-    then happens in the glyph's own coordinates.
+    a pixel's position within the glyph is one 2x2 solve, and the outlines are
+    then filled in the glyph's own coordinates.
     """
     if float(normal_view[2]) <= 0.0:
         return                                  # this face is turned away

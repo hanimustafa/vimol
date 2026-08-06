@@ -36,7 +36,8 @@ from .molecule import Molecule
 @dataclass
 class Style:
     """Rendering options."""
-    representation: str = "ball_and_stick"   # ball_and_stick | spacefill | wireframe | licorice | glyph
+    representation: str = "ball_and_stick"   # ball_and_stick | spacefill | wireframe
+                                             # | licorice | ribbon | glyph
     atom_scale: float = 0.25                 # multiplier on van der Waals radius (ball_and_stick)
     bond_radius: float = 0.10                # angstrom (cylinder radius)
     background: Tuple[float, float, float] = (0.05, 0.06, 0.09)

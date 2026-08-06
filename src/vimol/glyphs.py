@@ -1,15 +1,17 @@
-"""Build the glyph skin's geometry: ribbon, plates, volumes, letters, nodes.
+"""Build the geometry behind the two protein styles: `ribbon` and `glyph`.
 
 This module turns a protein into drawable primitives and nothing else -- it
 never touches a framebuffer. Everything it emits is in world coordinates, so
-the renderer only has to rotate it into view space.
+the renderer only has to rotate it into view space. ``ribbon_only`` stops after
+the backbone; the rest is what the lettered skin adds to it.
 
-The four kinds of primitive it produces:
+What it produces:
 
 ``spheres``     side-chain volumes, Cα/Cβ beads, and atoms drawn as themselves
-``cylinders``   the rods out to each glyph, real bonds, and hydrogen-bond links
-``polyhedra``   ribbon segments and aromatic ring plates, as sets of half-spaces
-``labels``      screen-aligned one-letter codes
+``cylinders``   the rods out to each glyph, and real bonds
+``polyhedra``   ribbon segments and ring tablets, as sets of half-spaces
+``labels``      a residue's code and number, printed onto one of its faces
+``mesh``        the same ribbon and tablets as triangles, for the GPU
 
 A convex solid is stored as a center plus planes ``n·(p − center) ≤ d``. Keeping
 the offsets relative to a center makes them invariant under the camera's
