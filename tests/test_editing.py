@@ -826,6 +826,50 @@ def test_alt_click_on_an_atom_still_arms_alignment_when_not_editable():
     assert w.align_sel == [0]
 
 
+def test_alt_click_on_empty_space_builds_nothing_in_append_mode():
+    """The release of an empty-space option gesture is a pan, not a click:
+    no mode may treat it as one. Append is the sharp edge -- the help panel
+    now advertises the pan, and a sub-3px release would silently grow a
+    fragment."""
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    w.set_append_mode(True)
+    n0 = w.molecule.n_atoms
+    fx, fy = _far_px(w)
+    _alt_click(w, fx, fy)
+    assert w.molecule.n_atoms == n0
+    assert not w.dirty
+
+
+def test_alt_click_on_empty_space_keeps_the_measure_selection():
+    """Same rule for measure mode, which has no editable gate. Its own
+    click-empty-space-resets shortcut must not fire on a pan release."""
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    w.set_measure_mode(True)
+    w.measure_sel = [0, 1]
+    fx, fy = _far_px(w)
+    _alt_click(w, fx, fy)
+    assert w.measure_sel == [0, 1]
+
+
+def test_alt_pan_miss_does_not_leak_into_the_next_gesture():
+    """The flag is cleared on 'up' as well as 'down' -- an embedding host is
+    not required to deliver balanced press/release pairs (widget.py is a
+    public API), and a stuck flag would silently kill the next pick."""
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    fx, fy = _far_px(w)
+    _alt_click(w, fx, fy)                 # empty-space gesture sets the flag
+    assert w._alt_pan_miss is False       # ...and its release clears it
+    ax, ay = _atom_px(w, 0)
+    _alt_click(w, ax, ay)                 # the next gesture still picks
+    assert w.align_sel == [0]
+
+
 def test_alt_click_on_empty_space_no_longer_clears_an_active_alignment_selection():
     mol = Molecule()
     editor.birth_molecule(mol, [0.0, 0.0, 0.0])

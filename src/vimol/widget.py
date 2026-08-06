@@ -92,10 +92,14 @@ class MoleculeWidget:
         self.cell_w = 9.0
         self.cell_h = 18.0
         self._drag_button: Optional[int] = None
-        self._drag_shift = False
+        # whether the live drag pans rather than orbits -- shift+left, or an
+        # option gesture that started on empty space (below). Named for what
+        # it decides, not for the modifier: two different keys set it.
+        self._drag_pan = False
         # True for the rest of an alt-gesture that started on empty space
         # (opt+click/opt+drag pans there instead of bonding/picking) -- read
-        # by the 'up' handler to suppress the alignment-click shortcut.
+        # by the 'up' handler, which must let no mode treat the release as
+        # a click.
         self._alt_pan_miss = False
         self._last = (0.0, 0.0)
         self._press = (0.0, 0.0)                 # where the current press started
@@ -267,7 +271,7 @@ class MoleculeWidget:
                     # picking with nothing to pick (view mode).
                     self._alt_pan_miss = True
             self._drag_button = ev.button
-            self._drag_shift = self._alt_pan_miss or ev.shift
+            self._drag_pan = self._alt_pan_miss or ev.shift
             self._last = (x, y)
             self._press = (x, y)
             if self.picking:
@@ -278,6 +282,14 @@ class MoleculeWidget:
                 return self._end_bond_gesture(x, y)
             was_left = self._drag_button == 0
             self._drag_button = None
+            if self._alt_pan_miss:
+                # This gesture started on empty space, so it was a pan: its
+                # release is not a click and NO mode below may act on it --
+                # append would grow a fragment, measure/align would reset
+                # their picks. Cleared here as well as on the next press,
+                # since an embedding host need not deliver balanced pairs.
+                self._alt_pan_miss = False
+                return False
             # A left click (no meaningful drag) in append mode edits the model.
             if self.editable and self.append_mode and was_left and not ev.shift:
                 dx = x - self._press[0]
@@ -295,7 +307,7 @@ class MoleculeWidget:
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
                     return self._measure_click(x, y)
-            elif self.align_mode and was_left and not ev.shift and not self._alt_pan_miss:
+            elif self.align_mode and was_left and not ev.shift:
                 dx = x - self._press[0]
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:
@@ -314,7 +326,7 @@ class MoleculeWidget:
                 dy = y - self._last[1]
                 self._last = (x, y)
                 # left = rotate, right or shift+left = pan, middle = pan
-                if self._drag_button == 2 or self._drag_button == 1 or self._drag_shift:
+                if self._drag_button == 2 or self._drag_button == 1 or self._drag_pan:
                     self.pan(dx, dy)
                 else:
                     self.orbit(dx, dy)

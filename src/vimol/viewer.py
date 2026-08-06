@@ -371,6 +371,10 @@ class Viewer:
 
         self._running = False
         self._show_help = False
+        # whether the corner hint currently owns its cells (see
+        # _draw_active_overlay): drives the one-shot erase when an overlay
+        # takes the screen, so the erase is not rewritten every frame.
+        self._corner_hint_drawn = False
         # modal state: "normal" | "save_input" | "save_confirm" |
         # "quit_confirm" | "periodic_table" | "geometry_picker" |
         # "selection_picker"
@@ -2055,13 +2059,20 @@ class Viewer:
         """(top, left, width, height) of the persistent bottom-left control
         hint, 0-based cell coords -- anchored to the render viewport (right
         of the structure list, never over it), stacked directly above the
-        status bar."""
+        status bar.
+
+        Height 0 means "does not fit": unlike the help panel, which admits
+        clipping with a '─ more ─' foot, a clipped hint would just read as
+        noise ('z    cent', or a lone 'z'), so :meth:`_draw_corner_hint`
+        draws nothing rather than a stub.
+        """
         lines = _CORNER_HINT_LINES
         left = self._list_w + self._measure_w
-        avail_w = max(self._cols - left, 1)
-        width = min(max(len(l) for l in lines), avail_w)
-        height = min(len(lines), max(self._rows - 1, 1))
-        top = max(0, (self._rows - 1) - height)
+        width = max(len(l) for l in lines)
+        height = len(lines)
+        if width > self._cols - left or height > self._rows - 1:
+            return (0, left, 0, 0)
+        top = (self._rows - 1) - height
         return (top, left, width, height)
 
     def _draw_corner_hint(self) -> bytes:
@@ -2070,16 +2081,49 @@ class Viewer:
         fg = self._sgr_fg(self.theme.list_muted_fg)
         out = bytearray()
         for k in range(height):
-            row = _CORNER_HINT_LINES[k][:width].ljust(width)
+            row = _CORNER_HINT_LINES[k].ljust(width)
             out.extend(b"\x1b[%d;%dH" % (top + k + 1, left + 1))
             out.extend(f"{bg}{fg}{row}\x1b[0m".encode("utf-8", "replace"))
-        kitty.write_bytes(bytes(out), self.fd_out)
+        if out:
+            kitty.write_bytes(bytes(out), self.fd_out)
+        return bytes(out)
+
+    def _erase_corner_hint(self) -> bytes:
+        """Blank the cells the corner hint last painted.
+
+        Column-scoped rather than whole-row (unlike :meth:`_erase_rows`):
+        _draw_list paints the structure strip earlier in the SAME frame, so
+        wiping these rows end-to-end would blank the strip until the next
+        one. Reset to the default background, which the negatively
+        z-indexed image shows through again.
+        """
+        top, left, width, height = self._corner_hint_geometry()
+        out = bytearray()
+        for k in range(height):
+            out += b"\x1b[%d;%dH\x1b[0m" % (top + k + 1, left + 1)
+            out += b" " * width
+        if out:
+            kitty.write_bytes(bytes(out), self.fd_out)
         return bytes(out)
 
     def _draw_active_overlay(self) -> None:
         """Draw whichever single overlay currently owns the screen -- the
         '?' help panel, a modal picker, or (when none of those claim it)
-        the persistent bottom-left control hint."""
+        the persistent bottom-left control hint.
+
+        The hint is the only one drawn unconditionally, so it is also the
+        only one needing an explicit teardown: its opaque cells are not
+        repainted by anything else, and a panel that does not happen to
+        cover them would otherwise leave it stranded on screen.
+        """
+        if self._show_help or self._mode in (
+                "periodic_table", "geometry_picker", "selection_picker",
+                "file_browser"):
+            if self._corner_hint_drawn:
+                self._erase_corner_hint()
+                self._corner_hint_drawn = False
+        else:
+            self._corner_hint_drawn = True
         if self._show_help:
             self._draw_help()
         elif self._mode == "periodic_table":
