@@ -333,14 +333,16 @@ def test_plane_frame_finds_the_ring_normal():
 
 
 def test_the_ribbon_runs_through_the_alpha_carbons(hairpin):
-    """Its guide points are the Cα atoms themselves, so each residue's link
-    starts on the ribbon rather than beside it. Peptide-plane midpoints smooth
-    marginally better and sit up to an angstrom off every Cα."""
+    """Its guide points are the Cα atoms, eased just enough to take the zigzag
+    off (see `_relax`) -- so each residue's link still starts on the ribbon
+    rather than beside it. Peptide-plane midpoints, the alternative, sit a full
+    angstrom off every Cα by construction."""
     res = residues.protein_residues(hairpin)
     run = residues.chain_runs(res, hairpin.positions)[0]
     centers, _sides = glyphs._ribbon_frames(run, hairpin.positions)
     expected = np.array([hairpin.positions[r.atoms["CA"]] for r in run])
-    assert np.allclose(centers, expected)
+    assert np.linalg.norm(centers - expected, axis=1).max() < glyphs.RIBBON_WIDTH * 0.5
+    assert np.allclose(centers[[0, -1]], expected[[0, -1]])
 
 
 def test_the_link_beads_sit_on_the_real_alpha_and_beta_carbons(hairpin):
@@ -432,7 +434,9 @@ def test_a_letter_is_lifted_clear_of_its_own_plate(hairpin):
     bounds = np.linalg.norm(scene.poly_half[plate], axis=1)
     for center, bound in zip(scene.poly_center[plate], bounds):
         k = int(np.argmin(np.linalg.norm(scene.label_center - center, axis=1)))
-        assert np.allclose(scene.label_center[k], center)
+        # Centred on the plaque's outline rather than on the solid's origin --
+        # for proline those differ, and the letter used to hang off the edge.
+        assert np.linalg.norm(scene.label_center[k] - center) < bound
         assert scene.label_bias[k] >= bound
 
 
@@ -586,12 +590,35 @@ def test_a_letter_too_small_to_read_is_dropped_rather_than_smeared(hairpin):
 
 # -- the key and the fallback message -------------------------------------
 
-def test_five_selects_the_glyph_skin(hairpin):
-    assert REPRESENTATIONS[4] == "glyph"
+def test_five_is_the_bare_ribbon_and_six_the_glyph_skin(hairpin):
+    assert REPRESENTATIONS[4:] == ["ribbon", "glyph"]
     widget = MoleculeWidget(hairpin, 160, 120)
     assert widget.handle_key("5")
+    assert widget.style.representation == "ribbon"
+    assert widget.handle_key("6")
     assert widget.style.representation == "glyph"
     assert widget.rep_note == ""
+
+
+def test_the_ribbon_mode_draws_the_backbone_and_nothing_else(hairpin):
+    scene = glyphs.build_scene(hairpin, "light", ribbon_only=True)
+    assert len(scene.poly_center)                     # ribbon segments
+    assert not len(scene.sphere_center) and not len(scene.cyl_a)
+    assert not scene.label_char
+    assert np.allclose(scene.poly_color, glyphs.RIBBON_GREEN)
+
+
+def test_relaxing_the_trace_keeps_it_under_the_ribbon(hairpin):
+    """Less crinkle costs some fidelity, and the budget is the ribbon's own
+    half-width: relax further and a helix pulls in toward its axis until the
+    ribbon no longer covers the atoms it was drawn from."""
+    res = residues.protein_residues(hairpin)
+    for run in residues.chain_runs(res, hairpin.positions):
+        raw = np.array([hairpin.positions[r.atoms["CA"]] for r in run])
+        drift = np.linalg.norm(glyphs._relax(raw) - raw, axis=1)
+        assert drift.max() < glyphs.RIBBON_WIDTH * 0.5
+    # And the ends are pinned, so a chain never shortens.
+    assert np.allclose(glyphs._relax(raw)[[0, -1]], raw[[0, -1]])
 
 
 def test_the_skin_says_why_it_did_nothing_for_a_non_protein():

@@ -31,9 +31,31 @@ from .residues import (RING_ATOMS, Residue, chain_runs, protein_residues,
 
 
 # -- tunables ------------------------------------------------------------
-RIBBON_WIDTH = 1.6          # angstrom, full width across the ribbon
+RIBBON_WIDTH = 2.0          # angstrom, full width across the ribbon
 RIBBON_THICKNESS = 0.26     # angstrom, full thickness
-RIBBON_SAMPLES = 8          # spline samples per residue
+RIBBON_SAMPLES = 16         # spline samples per residue. A helix turns every
+                            # 3.6 residues, so a coarse sampling reproduces its
+                            # coil as a polygon -- the kinks read as crinkle
+                            # even though the path through the Ca atoms is
+                            # exactly right.
+# Passes of neighbour-averaging over the ribbon's side vectors. The path stays
+# on the Cα atoms; this is only the ribbon's rotation about its own length. Per
+# peptide plane that rotation swings by about a hundred degrees along a helix,
+# and following it literally is what makes a ribbon read as crinkled -- the
+# turns are real but they are not what anyone is looking at.
+SIDE_SMOOTHING = 6
+# How far each guide point is pulled toward the mean of its neighbours, and how
+# many times. A Cα trace zigzags by design -- consecutive Cα atoms alternate
+# either side of the local axis -- and a spline through them reproduces every
+# one of those kinks. This takes the zigzag off while leaving the ribbon on the
+# atoms: at these settings no guide point moves more than a fraction of an
+# angstrom, far less than the ribbon is wide.
+# At these settings no guide point moves more than about 0.55 A on a helix --
+# comfortably inside the ribbon's own half-width, so every Ca is still under
+# the surface. Relaxing harder does look smoother, but it pulls a helix in
+# toward its axis and the ribbon stops covering the atoms it is drawn from.
+PATH_RELAX = 0.20
+PATH_RELAX_PASSES = 1
 PLATE_INFLATE = 0.30        # angstrom the ring hull is pushed out by
 PLATE_THICKNESS = 0.42      # angstrom, full thickness
 BLOB_RADIUS = 0.92          # angstrom; well over half a 1.5 A bond, so bonded
@@ -44,6 +66,9 @@ LETTER_SIZE = 0.78          # angstrom, cap height of the one-letter code
 # Fraction of a sphere's radius the whole label run may span once wrapped onto
 # it. Past about this the text reaches the horizon and folds out of sight.
 LETTER_SPAN = 1.45
+# The bare ribbon's colour: PyMOL's cartoon green, which is what a reader of
+# protein pictures expects a backbone trace to look like.
+RIBBON_GREEN = (0.13, 0.78, 0.15)
 BEAD_RADIUS = 0.20          # the Cβ bead the rod passes through
 # The Cα bead is bigger than the ribbon is thick, so it swells out of the
 # backbone instead of sitting on it: the rod then grows out of the ribbon
@@ -452,11 +477,46 @@ def _ribbon_frames(run: Sequence[Residue], positions: np.ndarray):
 
     if not peptide:
         return None
-    centers = np.array([positions[r.atoms["CA"]] for r in run])
+    centers = _relax(np.array([positions[r.atoms["CA"]] for r in run]))
     sides = np.array([_unit(sum(peptide[j] for j in (i - 1, i)
                                 if 0 <= j < len(peptide)))
                       for i in range(len(run))])
-    return centers, sides
+    return centers, _smooth_sides(sides)
+
+
+def _relax(points: np.ndarray) -> np.ndarray:
+    """Ease the zigzag out of a Cα trace, holding both ends.
+
+    Each interior point moves a fraction of the way toward the mean of its two
+    neighbours. The ribbon still runs through the backbone -- it is the same
+    points, nudged -- but it stops reproducing the alternation that makes a
+    faithful Cα spline look crinkled.
+    """
+    if len(points) < 3:
+        return points
+    out = points.astype(float).copy()
+    for _ in range(PATH_RELAX_PASSES):
+        mid = 0.5 * (out[:-2] + out[2:])
+        out[1:-1] += PATH_RELAX * (mid - out[1:-1])
+    return out
+
+
+def _smooth_sides(sides: np.ndarray) -> np.ndarray:
+    """Relax the ribbon's twist without moving where the ribbon goes.
+
+    A few passes of a three-tap average, renormalized each time, with the two
+    ends held. The guide points are untouched, so the ribbon still runs through
+    every Cα -- only how fast it rolls about its own length changes.
+    """
+    if len(sides) < 3:
+        return sides
+    out = sides.astype(float).copy()
+    for _ in range(SIDE_SMOOTHING):
+        blended = out.copy()
+        blended[1:-1] = out[:-2] + 2.0 * out[1:-1] + out[2:]
+        norm = np.linalg.norm(blended, axis=1, keepdims=True)
+        out = np.where(norm > 1e-9, blended / np.maximum(norm, 1e-9), out)
+    return out
 
 
 def _mitred_segment(a: np.ndarray, b: np.ndarray, side: np.ndarray,
@@ -567,9 +627,10 @@ def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray,
                color, flat: bool):
     """An extruded tablet cut to the shape of a side chain's ring.
 
-    Returns ``(center, reach)`` -- the glyph's anchor and how far the solid
-    extends from it -- or None when the ring atoms are missing and the caller
-    should fall back to a rounded volume.
+    Returns ``(anchor, reach, normal, label_at)`` -- where the rod ends, how far
+    the solid extends, its face normal, and the point on it a letter should be
+    centred on -- or None when the ring atoms are missing and the caller should
+    fall back to a rounded volume.
     """
     names = RING_ATOMS[res.name]
     idx = [res.atoms[n] for n in names if n in res.atoms]
@@ -615,7 +676,12 @@ def _add_plate(builder: _Builder, res: Residue, positions: np.ndarray,
                   np.array([e1, e2, normal]), half, flat=flat)
     glyph_mesh.tablet(builder.mesh, center, e1, e2, normal, corners,
                       PLATE_THICKNESS * 0.5, color, flat)
-    return center, float(np.linalg.norm(half)), normal
+    # The letter belongs at the middle of the plaque, which is the middle of the
+    # outline -- not at `center`, which is only the origin the planes are
+    # measured from and, for proline, is deliberately off to one side.
+    mid = corners.mean(axis=0)
+    label_at = center + mid[0] * e1 + mid[1] * e2
+    return center, float(np.linalg.norm(half)), normal, label_at
 
 
 def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray,
@@ -724,7 +790,8 @@ _CACHE_LIMIT = 4
 
 def build_scene(molecule: Molecule, theme: str = "dark", *,
                 atom_colors=None, atom_radii=None, flat_mask=None,
-                bond_radius: float = 0.10) -> Optional[GlyphScene]:
+                bond_radius: float = 0.10,
+                ribbon_only: bool = False) -> Optional[GlyphScene]:
     """Glyph geometry for *molecule*, or None if it is not a protein.
 
     None means "this skin has nothing to say about this molecule" -- nothing in
@@ -761,8 +828,13 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         return (colors[ca], True) if flat[ca] else (own, False)
 
     for run in chain_runs(residues, positions):
-        color, is_flat = tint(run[0], pal.ribbon)
+        color, is_flat = tint(run[0], RIBBON_GREEN if ribbon_only else pal.ribbon)
         _add_ribbon(builder, run, positions, color, is_flat)
+
+    if ribbon_only:
+        # The backbone trace on its own: no side chains, no letters, nothing
+        # else to read. Everything below is what the glyph skin adds to it.
+        return builder.freeze()
 
     for res in residues:
         ca = res.atoms["CA"]
@@ -772,11 +844,11 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
                  if res.is_ring else None)
         on_tablet = shape is not None
         if on_tablet:
-            anchor, reach, face = shape
+            anchor, reach, face, label_at = shape
         else:
             anchor, reach, blobs = _add_volume(builder, res, positions,
                                                tint(res, pal.volume)[0], is_flat)
-            face = None
+            face = label_at = None
         bead_color, _ = tint(res, pal.beads[residue_class(res.letter)])
         _add_link_to_glyph(builder, res, positions, anchor, bead_color, is_flat)
 
@@ -789,6 +861,7 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         curve = 0.0
         if on_tablet:
             normal, offset = face, PLATE_THICKNESS * 0.5 + glyph_mesh.LETTER_LIFT
+            anchor = label_at
         else:
             normal = _unit(anchor - positions[ca], (0.0, 0.0, 1.0))
             # Print on the lobe that sticks out furthest that way, and wrap the
@@ -848,6 +921,7 @@ def glyph_scene_for(molecule: Molecule, style) -> Optional[GlyphScene]:
     """
     return cached_scene(
         molecule, style.glyph_theme,
+        ribbon_only=style.representation == "ribbon",
         atom_colors=(style.color_override if style.color_override is not None
                      else molecule.element_colors()),
         atom_radii=molecule.vdw_radii() * style.atom_scale,
@@ -864,7 +938,8 @@ def _digest(array) -> tuple:
     return (a.shape, float(a.sum()), float(a.ravel()[-1]) if a.size else 0.0)
 
 
-def _cache_key(molecule: Molecule, theme: str, atom_colors, flat_mask) -> tuple:
+def _cache_key(molecule: Molecule, theme: str, atom_colors, flat_mask,
+               ribbon_only: bool) -> tuple:
     p = molecule.positions
     # Cheap and specific: identity plus a checksum of the coordinates, so an
     # edit or a new frame invalidates but a pure camera move does not. Colour
@@ -874,24 +949,25 @@ def _cache_key(molecule: Molecule, theme: str, atom_colors, flat_mask) -> tuple:
     return (id(molecule), molecule.n_atoms, str(theme),
             float(p.sum()) if p.size else 0.0,
             float(p[-1, 0]) if p.size else 0.0,
-            _digest(atom_colors), _digest(flat_mask))
+            _digest(atom_colors), _digest(flat_mask), bool(ribbon_only))
 
 
 def cached_scene(molecule: Molecule, theme: str = "dark", *,
                  atom_colors=None, atom_radii=None, flat_mask=None,
-                 bond_radius: float = 0.10) -> Optional[GlyphScene]:
+                 bond_radius: float = 0.10,
+                 ribbon_only: bool = False) -> Optional[GlyphScene]:
     """:func:`build_scene`, memoized across frames.
 
     A spin or an orbit re-renders the same geometry many times a second;
     rebuilding splines and hulls each time would dominate the frame.
     """
-    key = _cache_key(molecule, theme, atom_colors, flat_mask)
+    key = _cache_key(molecule, theme, atom_colors, flat_mask, ribbon_only)
     for k, scene in _CACHE:
         if k == key:
             return scene
     scene = build_scene(molecule, theme, atom_colors=atom_colors,
                         atom_radii=atom_radii, flat_mask=flat_mask,
-                        bond_radius=bond_radius)
+                        bond_radius=bond_radius, ribbon_only=ribbon_only)
     _CACHE.append((key, scene))
     if len(_CACHE) > _CACHE_LIMIT:
         _CACHE.pop(0)

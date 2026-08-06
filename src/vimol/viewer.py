@@ -172,7 +172,7 @@ _HELP_HEAD = [
     _help_row(_kv("Right / mid drag", "pan"), _kv("[ / ]", "roll")),
     _help_row(_kv("Hover", "identify atom"), _kv("Arrows / h j k l", "rotate")),
     _help_row(_kv("1 2 3 4", "ball / spacefill / licorice / wire")),
-    _help_row(_kv("5", "glyph: lettered residues on a ribbon (proteins)")),
+    _help_row(_kv("5 / 6", "ribbon / glyph: lettered residues (proteins)")),
 ]
 # Shown only when editing is disabled (the classic bindings).
 _HELP_VIEW = [

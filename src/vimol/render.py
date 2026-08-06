@@ -60,7 +60,7 @@ _POOL_WORKERS = min(8, os.cpu_count() or 1)
 
 
 def _atom_radii(mol: Molecule, style: Style) -> np.ndarray:
-    if style.representation == "glyph":
+    if style.representation in ("glyph", "ribbon"):
         # The glyph skin draws residues, not atoms; the underlying spheres and
         # bonds are suppressed and its own geometry stands in for them.
         return np.zeros(mol.n_atoms)
@@ -182,7 +182,7 @@ class Renderer:
         # empty. `style` is a per-call copy from Scene._effective_style, but
         # replace() keeps that true even when a caller passed one in directly.
         glyph_scene = None
-        if style.representation == "glyph":
+        if style.representation in ("glyph", "ribbon"):
             from .glyphs import glyph_scene_for
             glyph_scene = glyph_scene_for(mol, style)
             if glyph_scene is None:

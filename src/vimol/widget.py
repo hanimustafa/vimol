@@ -31,7 +31,8 @@ from .input import MouseEvent, KeyEvent, Event
 from . import editor
 from . import elements
 
-REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe", "glyph"]
+REPRESENTATIONS = ["ball_and_stick", "spacefill", "licorice", "wireframe",
+                   "ribbon", "glyph"]
 
 # Rubber-band preview for the option/alt-drag manual-bond gesture: a thin,
 # distinctive-colored arrow that grows from the anchor atom toward the cursor
@@ -156,7 +157,7 @@ class MoleculeWidget:
             return
         self.style.representation = rep
         self.rep_note = ""
-        if rep == "glyph":
+        if rep in ("ribbon", "glyph"):
             # Build it now rather than discovering at draw time that there was
             # nothing to draw: the renderer silently falls back to
             # ball-and-stick, which without a word here reads as a dead key.
@@ -165,7 +166,7 @@ class MoleculeWidget:
             self.style.glyph_theme = self.theme
             if glyph_scene_for(composite.molecule,
                                self.scene._effective_style(composite)) is None:
-                self.rep_note = ("glyph skin needs a peptide backbone — "
+                self.rep_note = (f"{rep} needs a peptide backbone — "
                                  "showing ball-and-stick")
         self.scene.fit(keep_orientation=True)
 
@@ -350,7 +351,7 @@ class MoleculeWidget:
             self.reset(); return True
         if key == "f":
             self.fit(); return True
-        if key in ("1", "2", "3", "4", "5"):
+        if key in ("1", "2", "3", "4", "5", "6"):
             self.set_representation(REPRESENTATIONS[int(key) - 1]); return True
         if key == "s" and not self.editable:
             # Without editing, 's' keeps its original meaning (cycle style).

@@ -53,7 +53,8 @@ status-bar pills pick the element and geometry), option-drag to draw bonds,
 every binding.
 
 `1`–`4` switch between ball-and-stick, space-filling, licorice and wireframe.
-On a protein, `5` reads it the way a figure does instead: the backbone runs as
+On a protein, `5` draws the bare backbone as a green cartoon ribbon, and `6`
+reads it the way a figure does: the backbone runs as
 a ribbon through the Cα atoms, and each residue links out from its Cα by way
 of its Cβ to a solid carrying its one-letter code — a plate cut to the shape of
 the ring for the aromatics, a rounded volume built from the real side-chain
@@ -66,7 +67,9 @@ letter and eventually takes it out of sight, the way a marking on a real object
 would.
 Overlaid structures tint flat, as in every other style.
 
-It works on an `.xyz` too, which carries neither residue names nor atom names:
+Both work on an `.xyz` too, which carries neither residue names nor atom names —
+and a single `.xyz` that turns out to be a protein opens in `5` rather than as a
+thicket of sticks. The backbone and the residues are recovered from geometry:
 the backbone is found as a bond-graph `N–Cα–C(=O)` motif, and each side chain is
 walked outward from its Cα, which gives every atom its bond distance from the Cα
 — and that distance is what a PDB name's Greek letter records. The resulting

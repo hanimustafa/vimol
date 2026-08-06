@@ -218,7 +218,7 @@ class Scene:
         mol = mol if mol is not None else self.structures.composite().molecule
         if mol.n_atoms == 0:
             return 0.0
-        if self.style.representation == "glyph":
+        if self.style.representation in ("glyph", "ribbon"):
             # Not an atom radius at all: whatever `fit` adds to the radius of
             # gyration has to cover the glyph skin's own geometry, which a
             # scaled van der Waals radius says nothing about -- a ribbon runs
@@ -282,7 +282,7 @@ class Scene:
         composite = self.structures.composite()
         mol = composite.molecule
         style = self._effective_style(composite)
-        if self._backend_name == "gl" and style.representation == "glyph":
+        if self._backend_name == "gl" and style.representation in ("glyph", "ribbon"):
             from .glyphs import glyph_scene_for, palette
             from .gl_adapter import glyph_to_gl_inputs
             glyph = glyph_scene_for(mol, style)
