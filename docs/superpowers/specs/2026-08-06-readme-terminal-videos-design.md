@@ -8,21 +8,30 @@ one still — each showing one thing end to end.
 
 ## The demos
 
-**A. A protein arrives as an `.xyz`.** `vimol 1rij.xyz` — 334 atoms, no residue
-names, no atom names, nothing but elements and coordinates. It opens as a green
-backbone ribbon (style `5`) because vimol recovered the peptide backbone from
-the bond graph, and `6` turns it into the lettered side-chain view. This is the
-capability that is hardest to believe from prose and the easiest to show.
+**A. A protein arrives as an `.xyz`.** `vimol trpcage.xyz` — 334 atoms, no
+residue names, no atom names, nothing but elements and coordinates. It opens as
+a green backbone ribbon (style `5`) because vimol recovered the peptide backbone
+from the bond graph, and `6` turns it into the lettered side-chain view. This is
+the capability that is hardest to believe from prose and the easiest to show.
+The recording checks the recovered sequence against the `SEQRES` of the entry it
+came from, so the letters on screen are known to be the right ones.
 
 **B. One structure against a conformer set.** `vimol 5awl_prepared.xyz
-crest_ensemble.xyz` loads chignolin's prepared crystal geometry alongside a
-CREST ensemble, the `ALL` control on the structure list pulls every conformer
-into the overlay, and `r` rigidly aligns them all onto the reference and reports
-each RMSD in the table beside the list.
+crest_ensemble.xyz --style ribbon` loads chignolin's prepared crystal geometry
+alongside a CREST ensemble, the `ALL` control on the structure list pulls every
+conformer into the overlay, `r` rigidly aligns them all onto the reference and
+reports each RMSD in the table beside the list, and `f` re-fits the view now
+that everything occupies one spot.
+
+`--style ribbon` is needed because `app.main` only runs
+`_default_representation` on the single-file path: opening several files always
+starts in ball-and-stick, even when every structure is a protein. Seventy-three
+superimposed proteins as sticks is a thicket, so the demo passes the flag; the
+underlying inconsistency is worth fixing separately.
 
 **C. Growing a methyl group.** Threonine, `a` for append mode, click the
-hydroxyl-bearing carbon's hydrogen to grow a carbon in its place, and the three
-filling hydrogens arrive with it.
+hydrogen on the side-chain hydroxyl, and a carbon takes its place with three
+filling hydrogens — O-methylthreonine, `C4H9NO3` to `C5H11NO3`.
 
 **D. Library usage.** Three lines that put the viewer in the middle of a host
 program's screen, and a still of the result.
@@ -78,16 +87,28 @@ Three details decide whether the output is honest or subtly wrong:
   a pixel-mode `MouseEvent`, so the click lands where the atom is rather than
   where it looked like it was.
 
+One more trap, found only by looking closely at a rendered frame: Menlo is
+missing three of the characters vimol can put on screen (`∡`, `⟳` and `⧉`), and
+a missing glyph does not render as nothing — it renders as a box, which is
+indistinguishable from a box-drawing character doing its job. Asking a face
+whether it has a character therefore means rendering the character and
+comparing the bitmap against that face's own `.notdef`; anything that fails
+falls through to STIXGeneral, Apple Symbols and Arial Unicode in turn.
+
 The recorder also draws the parts a terminal session has that the program does
-not emit: a window frame with a title, a shell prompt with the command typed
-one character at a time, and a pointer sprite for the steps that use the mouse.
+not emit: a rounded window panel, a shell prompt with the command typed one
+character at a time, a keycap for the key that causes each change, and a
+pointer sprite for the steps that use the mouse.
 
 ## Demo inputs
 
-`1rij.xyz` and `5awl_prepared.xyz` are conversions of PDB entries 1RIJ and 5AWL
-and are vendored into `docs/media/demo/`, so demos A and B can be re-recorded
-from a fresh checkout. Threonine is built by `examples/build_examples.py`,
-which exists precisely to generate exact geometry with no external data.
+`trpcage.xyz` (model 1 of PDB 1RIJ) and `5awl_prepared.xyz` (PDB 5AWL) are
+vendored into `docs/media/demo/`, so demos A and B can be re-recorded from a
+fresh checkout. Threonine is built by `examples/build_examples.py`, which
+exists precisely to generate exact geometry with no external data — both its
+stereocentres are set by matching the signed volumes of the threonines in 5AWL
+rather than by asserting a handedness, and its side chain takes whichever of
+the three staggered rotamers leaves the most room.
 
 The CREST ensemble in demo B is unpublished output from the author's own work
 and is **not** vendored. `scripts/record_demos.py` reads its path from `VIMOL_DEMO_ENSEMBLE`
