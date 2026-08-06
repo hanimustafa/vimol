@@ -36,7 +36,7 @@ from . import select
 from .structures import StructureSet, Structure, Transform, AlignmentResult
 from .align import kabsch, superpose, permutation_search, subset_search
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "Molecule", "VectorField", "Camera", "Renderer", "Style", "Scene", "MoleculeWidget",
