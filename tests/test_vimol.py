@@ -683,6 +683,37 @@ def test_cli_theme_flag_outranks_env(monkeypatch):
     assert theme.resolve(os.environ.get("VIMOL_THEME"), None, None) is theme.DARK
 
 
+TRIPEPTIDE = """\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00  0.00           C
+ATOM      3  C   ALA A   1       2.009   1.420   0.000  1.00  0.00           C
+ATOM      4  O   ALA A   1       1.251   2.390   0.000  1.00  0.00           O
+ATOM      5  N   SER A   2       3.332   1.550   0.000  1.00  0.00           N
+ATOM      6  CA  SER A   2       3.970   2.858   0.000  1.00  0.00           C
+ATOM      7  C   SER A   2       5.480   2.700   0.000  1.00  0.00           C
+ATOM      8  O   SER A   2       6.000   1.580   0.000  1.00  0.00           O
+ATOM      9  N   GLY A   3       6.800   3.000   0.000  1.00  0.00           N
+ATOM     10  CA  GLY A   3       7.500   4.200   0.000  1.00  0.00           C
+ATOM     11  C   GLY A   3       9.000   4.200   0.000  1.00  0.00           C
+ATOM     12  O   GLY A   3       9.700   3.200   0.000  1.00  0.00           O
+"""
+
+
+def test_default_representation_pdb_protein_is_ribbon():
+    """A PDB carries residue names, but that alone must not force
+    ball-and-stick -- a real protein (>=3 recognized residues) should still
+    default to ribbon, same as a nameless format would."""
+    from vimol import app
+    mol = loads(TRIPEPTIDE, "pdb")
+    assert app._default_representation(mol) == "ribbon"
+
+
+def test_default_representation_pdb_non_protein_is_ball_and_stick():
+    from vimol import app
+    mol = loads(PDB_ETHANOL, "pdb")
+    assert app._default_representation(mol) == "ball_and_stick"
+
+
 def test_backend_gl_explicit_raises_if_unavailable(monkeypatch):
     """An explicit `backend="gl"` request must not silently downgrade to
     CPU -- force the GL import to fail regardless of whether moderngl is
