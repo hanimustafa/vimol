@@ -2834,6 +2834,75 @@ def _help_rows(v):
     return {int(parts[i]) - 1: parts[i + 2] for i in range(1, len(parts), 3)}
 
 
+def _corner_hint_rows(v):
+    """{0-based screen row: the SGR text drawn there} for one _draw_corner_hint()."""
+    parts = re.split(r"\x1b\[(\d+);(\d+)H", v._draw_corner_hint().decode("utf-8", "replace"))
+    return {int(parts[i]) - 1: parts[i + 2] for i in range(1, len(parts), 3)}
+
+
+def test_corner_hint_shows_exactly_the_three_essential_bindings(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = 100, 30
+        v._list_w = 0
+        rows = _corner_hint_rows(v)
+        text = "".join(_visible(t) for t in rows.values())
+        assert "z" in text and "center" in text
+        assert "r" in text and "align" in text
+        assert "1-6" in text and "display modes" in text
+        assert "opt" not in text.lower()          # not documented here, by design
+    finally:
+        os.close(fd)
+
+
+def test_corner_hint_sits_above_the_status_bar_right_of_the_structure_list(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = 100, 30
+        v._list_w = 20
+        top, left, width, height = v._corner_hint_geometry()
+        assert left == v._list_w + v._measure_w
+        assert top + height <= v._rows - 1        # 0-based: status bar sits at row _rows-1
+    finally:
+        os.close(fd)
+
+
+def test_draw_active_overlay_shows_corner_hint_by_default(tmp_path, monkeypatch):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        calls = []
+        for name in ("_draw_help", "_draw_periodic_table", "_draw_geometry_picker",
+                     "_draw_selection_picker", "_draw_file_browser", "_draw_corner_hint"):
+            monkeypatch.setattr(v, name, lambda *_a, n=name: calls.append(n))
+        v._draw_active_overlay()
+        assert calls == ["_draw_corner_hint"]
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("mode_attr,mode_value", [
+    ("_show_help", True),
+    ("_mode", "periodic_table"),
+    ("_mode", "geometry_picker"),
+    ("_mode", "selection_picker"),
+    ("_mode", "file_browser"),
+])
+def test_draw_active_overlay_suppresses_corner_hint_for_other_overlays(
+        tmp_path, monkeypatch, mode_attr, mode_value):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        calls = []
+        for name in ("_draw_help", "_draw_periodic_table", "_draw_geometry_picker",
+                     "_draw_selection_picker", "_draw_file_browser", "_draw_corner_hint"):
+            monkeypatch.setattr(v, name, lambda *_a, n=name: calls.append(n))
+        setattr(v, mode_attr, mode_value)
+        v._draw_active_overlay()
+        assert calls != ["_draw_corner_hint"]
+        assert "_draw_corner_hint" not in calls
+    finally:
+        os.close(fd)
+
+
 @pytest.mark.parametrize("editable", [False, True])
 @pytest.mark.parametrize("cols,rows_h", [(120, 40), (80, 30), (60, 12), (30, 6), (8, 5)])
 def test_viewer_help_panel_is_a_closed_box_of_uniform_width(tmp_path, editable,

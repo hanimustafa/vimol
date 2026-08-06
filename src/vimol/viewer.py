@@ -146,6 +146,15 @@ _HELP_TITLE = " vimol — terminal molecular viewer "
 _HELP_KEY_W = 18        # 'key' plus its dot leader, before the value's space
 _HELP_COL_W = 36        # one whole key/value column, left column to right
 
+# Persistent bottom-left control hint (unlike the '?' panel above, this one
+# is never toggled -- drawn every frame the same way the status bar is).
+_CORNER_HINT_KEY_W = 5
+_CORNER_HINT_LINES = [
+    f"{'z':<{_CORNER_HINT_KEY_W}}center",
+    f"{'r':<{_CORNER_HINT_KEY_W}}align",
+    f"{'1-6':<{_CORNER_HINT_KEY_W}}display modes",
+]
+
 
 def _kv(key: str, value: str) -> str:
     """One ``key ......... value`` cell.
@@ -1948,6 +1957,10 @@ class Viewer:
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
+        # Overlays (help/pickers/corner hint) draw here, before the pacing
+        # fence below -- the fence must be the LAST bytes written for the
+        # frame (see _arm_fence), and each overlay does its own write.
+        self._draw_active_overlay()
         elapsed = time.perf_counter() - frame_start
         if self._timing_path is not None:      # VIMOL_TIMING: per-frame stages
             t_now = time.perf_counter()
@@ -1991,16 +2004,6 @@ class Viewer:
             # writes block at real link speed).
             self._interact_scale = self._next_render_scale(
                 self._interact_scale, elapsed)
-        if self._show_help:
-            self._draw_help()
-        elif self._mode == "periodic_table":
-            self._draw_periodic_table()
-        elif self._mode == "geometry_picker":
-            self._draw_geometry_picker()
-        elif self._mode == "selection_picker":
-            self._draw_selection_picker()
-        elif self._mode == "file_browser":
-            self._draw_file_browser()
 
     def _help_geometry(self) -> Tuple[int, int, int, int]:
         """(top, left, width, height) of the help panel, 0-based cell coords.
@@ -2046,6 +2049,48 @@ class Viewer:
         put(top + height - 1, f"{border}└{foot}┘\x1b[0m")
         kitty.write_bytes(bytes(out), self.fd_out)
         return bytes(out)
+
+    def _corner_hint_geometry(self) -> Tuple[int, int, int, int]:
+        """(top, left, width, height) of the persistent bottom-left control
+        hint, 0-based cell coords -- anchored to the render viewport (right
+        of the structure list, never over it), stacked directly above the
+        status bar."""
+        lines = _CORNER_HINT_LINES
+        left = self._list_w + self._measure_w
+        avail_w = max(self._cols - left, 1)
+        width = min(max(len(l) for l in lines), avail_w)
+        height = min(len(lines), max(self._rows - 1, 1))
+        top = max(0, (self._rows - 1) - height)
+        return (top, left, width, height)
+
+    def _draw_corner_hint(self) -> bytes:
+        top, left, width, height = self._corner_hint_geometry()
+        bg = self._sgr_bg(self.theme.help_bg)
+        fg = self._sgr_fg(self.theme.list_muted_fg)
+        out = bytearray()
+        for k in range(height):
+            row = _CORNER_HINT_LINES[k][:width].ljust(width)
+            out.extend(b"\x1b[%d;%dH" % (top + k + 1, left + 1))
+            out.extend(f"{bg}{fg}{row}\x1b[0m".encode("utf-8", "replace"))
+        kitty.write_bytes(bytes(out), self.fd_out)
+        return bytes(out)
+
+    def _draw_active_overlay(self) -> None:
+        """Draw whichever single overlay currently owns the screen -- the
+        '?' help panel, a modal picker, or (when none of those claim it)
+        the persistent bottom-left control hint."""
+        if self._show_help:
+            self._draw_help()
+        elif self._mode == "periodic_table":
+            self._draw_periodic_table()
+        elif self._mode == "geometry_picker":
+            self._draw_geometry_picker()
+        elif self._mode == "selection_picker":
+            self._draw_selection_picker()
+        elif self._mode == "file_browser":
+            self._draw_file_browser()
+        else:
+            self._draw_corner_hint()
 
     # -- periodic-table picker ---------------------------------------------
     def _pt_geometry(self) -> Tuple[int, int, int, int]:
