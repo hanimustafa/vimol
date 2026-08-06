@@ -228,20 +228,76 @@ def tablet(builder: MeshBuilder, center: np.ndarray, e1: np.ndarray, e2: np.ndar
                   np.stack([out3, out3]), color, flat)
 
 
+# How finely a wrapped letter is subdivided. The grid only has to be dense
+# enough that the ink follows the curve rather than chording across it.
+WRAP_STEPS = 5
+
+
 def label(builder: MeshBuilder, center: np.ndarray, right: np.ndarray,
           down: np.ndarray, normal: np.ndarray, code: str, number: str,
-          size: float, color, flat, cutout: bool = False) -> None:
-    """A residue's code and number, as one textured quad per glyph."""
+          size: float, color, flat, cutout: bool = False,
+          curve: float = 0.0) -> None:
+    """A residue's code and number, printed at *center* facing *normal*.
+
+    With ``curve`` set to a sphere's radius the text is wrapped onto that
+    sphere rather than floated on a tangent plane: a flat quad on a ball this
+    small visibly lifts off it at the corners, and the letter reads as a card
+    stuck on rather than something printed on the surface.
+    """
     for char, dx, dy, height in layout(code, number, size):
-        at = center + right * dx + down * dy
+        at_u, at_v = dx, dy
         u0, v0, u1, v1 = atlas_box(char)
         if cutout:
             u0, u1 = u0 + CUTOUT, u1 + CUTOUT
         half_w = height * ASPECT * 0.5
         half_h = height * 0.5
-        corners = [at - right * half_w - down * half_h,
-                   at + right * half_w - down * half_h,
-                   at + right * half_w + down * half_h,
-                   at - right * half_w + down * half_h]
-        builder.quad(corners, normal, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
-                     color, flat)
+        if curve <= 0.0:
+            at = center + right * at_u + down * at_v
+            corners = [at - right * half_w - down * half_h,
+                       at + right * half_w - down * half_h,
+                       at + right * half_w + down * half_h,
+                       at - right * half_w + down * half_h]
+            builder.quad(corners, normal, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
+                         color, flat)
+            continue
+        _wrapped(builder, center - normal * curve, curve, right, down, normal,
+                 (at_u - half_w, at_v - half_h), (at_u + half_w, at_v + half_h),
+                 (u0, v0, u1, v1), color, flat)
+
+
+def _wrapped(builder: MeshBuilder, sphere: np.ndarray, radius: float,
+             right: np.ndarray, down: np.ndarray, normal: np.ndarray,
+             lo, hi, box, color, flat) -> None:
+    """One glyph laid onto a sphere, as a grid of quads.
+
+    A point *d* away from the print centre, in surface-tangent direction *w*,
+    goes to ``radius * (normal cos(d/radius) + w sin(d/radius))`` -- the point
+    you reach by walking that far across the surface. That keeps the letter's
+    proportions along its own strokes instead of stretching them toward the
+    edges, which is what a decal wrapped onto a ball actually does.
+    """
+    u = np.linspace(lo[0], hi[0], WRAP_STEPS + 1)
+    v = np.linspace(lo[1], hi[1], WRAP_STEPS + 1)
+    uu, vv = np.meshgrid(u, v)
+    dist = np.hypot(uu, vv)
+    angle = dist / radius
+    # sin(a)/d, finite at the print centre where both go to zero together.
+    scale = np.where(dist > 1e-9, np.sin(angle) / np.maximum(dist, 1e-12),
+                     1.0 / radius)
+    direction = (normal[None, None, :] * np.cos(angle)[..., None]
+                 + (right[None, None, :] * (uu * scale)[..., None]
+                    + down[None, None, :] * (vv * scale)[..., None]))
+    points = sphere[None, None, :] + direction * radius
+
+    u0, v0, u1, v1 = box
+    tu = u0 + (uu - lo[0]) / max(hi[0] - lo[0], 1e-9) * (u1 - u0)
+    tv = v0 + (vv - lo[1]) / max(hi[1] - lo[1], 1e-9) * (v1 - v0)
+
+    rows, cols = points.shape[0], points.shape[1]
+    base = builder._add(points.reshape(-1, 3), direction.reshape(-1, 3),
+                        np.column_stack([tu.ravel(), tv.ravel()]), color, flat)
+    r = np.arange(rows - 1)[:, None]
+    c = np.arange(cols - 1)[None, :]
+    a = base + r * cols + c
+    builder._idx.append(np.stack([a, a + 1, a + cols + 1,
+                                  a, a + cols + 1, a + cols], axis=-1).ravel())

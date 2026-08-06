@@ -1,9 +1,9 @@
 # The `glyph` skin: a lettered, diagrammatic protein representation
 
 Date: 2026-08-05
-Status: implemented, then revised five times. Where the build
-differs from the plan, this document records what was built and why; the
-revision is in "Second pass" at the end.
+Status: implemented, then revised repeatedly against further references. Where
+the build differs from the plan below, this document records what was built and
+why -- see the numbered passes at the end, which supersede the body.
 
 ## Goal
 
@@ -409,3 +409,34 @@ things the walk has to refuse to cross, both found that way:
   owns two sulfurs, so refusing to step from one to another costs nothing.
 - **Any other motif's backbone**, so a mis-perceived bond cannot leak the walk
   along the chain into the next residue.
+
+
+## Seventh pass: text on a ball
+
+Three complaints about the letters on the rounded volumes, all one cause: the
+letter's plane was measured out from the blob's *centroid* along the outward
+direction. A blob is not a ball centred on its centroid, so that plane cuts
+through whichever lobe happens to lie in front of it -- and on glycine, whose
+anchor **is** its only sphere, the plane fell inside it and the letter never
+appeared at all.
+
+The letter is now printed on the lobe that reaches furthest along the outward
+direction, tangent to that sphere. A regression test asserts the print point of
+every volume label lies outside every sphere in the scene, which is the property
+that was actually violated.
+
+It is also **wrapped onto the sphere** rather than floated on a tangent plane.
+A point *d* from the print centre in tangent direction *w* maps to
+``radius * (normal cos(d/radius) + w sin(d/radius))`` -- where you get to by
+walking that far across the surface -- so proportions hold along the strokes
+instead of stretching toward the edges, the way a decal on a ball behaves. On
+a quarter-angstrom ball a flat quad visibly lifts off at the corners and reads
+as a card stuck on; this reads as printed.
+
+One consequence worth its own guard: wrapped text that reaches the ball's
+horizon folds under and disappears, so the run has to be scaled to fit. On the
+*width* of the whole run, not the cap height -- "G10" is more than twice as wide
+as it is tall, which is exactly the case that overflowed a small glycine marker.
+
+The raycaster still prints these flat, on the same corrected plane. The wrap is
+GPU-only; the CPU path gets the placement right and loses only the curvature.

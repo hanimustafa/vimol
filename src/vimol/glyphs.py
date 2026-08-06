@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from . import glyph_mesh
+from . import glyph_font, glyph_mesh
 from .bonds import perceive_bonds
 from .molecule import Molecule
 from .residues import (RING_ATOMS, Residue, chain_runs, protein_residues,
@@ -41,6 +41,9 @@ BLOB_RADIUS = 0.92          # angstrom; well over half a 1.5 A bond, so bonded
                             # a snowman rather than a string of beads
 GLYCINE_RADIUS = 0.55       # glycine has no side chain, so its marker is small
 LETTER_SIZE = 0.78          # angstrom, cap height of the one-letter code
+# Fraction of a sphere's radius the whole label run may span once wrapped onto
+# it. Past about this the text reaches the horizon and folds out of sight.
+LETTER_SPAN = 1.45
 BEAD_RADIUS = 0.20          # the Cβ bead the rod passes through
 # The Cα bead is bigger than the ribbon is thick, so it swells out of the
 # backbone instead of sitting on it: the rod then grows out of the ribbon
@@ -625,7 +628,10 @@ def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray,
     oxygens and sulfurs hanging off the skeleton are drawn as themselves, and
     swallowing them into the blob would be the one thing that hides them.
 
-    Returns ``(anchor, reach)`` like :func:`_add_plate`.
+    Returns ``(anchor, reach, spheres)`` -- the glyph's anchor, how far the
+    solid extends from it, and the spheres themselves, which the letter needs:
+    a blob is not a ball centred on its anchor, so a letter placed from the
+    anchor sinks into whichever lobe happens to lie in front of it.
     """
     side = res.side_chain_carbons()
     if side:
@@ -633,7 +639,7 @@ def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray,
             builder.sphere(positions[i], BLOB_RADIUS, color, flat)
         anchor = positions[side].mean(axis=0)
         reach = float(np.linalg.norm(positions[side] - anchor, axis=1).max()) + BLOB_RADIUS
-        return anchor, reach
+        return anchor, reach, [(positions[i], BLOB_RADIUS) for i in side]
 
     # Glycine: nothing past Cα, so mark where its Cβ would be.
     n, ca, c = res.index("N"), res.index("CA"), res.index("C")
@@ -642,7 +648,7 @@ def _add_volume(builder: _Builder, res: Residue, positions: np.ndarray,
     else:
         anchor = positions[res.atoms["CA"]] + np.array([0.0, 0.0, 1.2])
     builder.sphere(anchor, GLYCINE_RADIUS, color, flat)
-    return anchor, GLYCINE_RADIUS
+    return anchor, GLYCINE_RADIUS, [(anchor, GLYCINE_RADIUS)]
 
 
 def _add_atoms(builder: _Builder, residues: Sequence[Residue], molecule: Molecule,
@@ -768,8 +774,8 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         if on_tablet:
             anchor, reach, face = shape
         else:
-            anchor, reach = _add_volume(builder, res, positions,
-                                        tint(res, pal.volume)[0], is_flat)
+            anchor, reach, blobs = _add_volume(builder, res, positions,
+                                               tint(res, pal.volume)[0], is_flat)
             face = None
         bead_color, _ = tint(res, pal.beads[residue_class(res.letter)])
         _add_link_to_glyph(builder, res, positions, anchor, bead_color, is_flat)
@@ -780,11 +786,26 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         # its own plane; a rounded volume has none, so it gets the plane facing
         # away from the backbone -- which is the side you can see when the
         # residue is pointing at you.
+        curve = 0.0
         if on_tablet:
             normal, offset = face, PLATE_THICKNESS * 0.5 + glyph_mesh.LETTER_LIFT
         else:
             normal = _unit(anchor - positions[ca], (0.0, 0.0, 1.0))
-            offset = reach - BLOB_RADIUS * 0.35 + glyph_mesh.LETTER_LIFT
+            # Print on the lobe that sticks out furthest that way, and wrap the
+            # letter around it. Measuring from the anchor instead buries the
+            # letter in whichever lobe happens to lie in front of it -- and on
+            # glycine, whose anchor *is* its only sphere, inside that.
+            centre, curve = max(blobs, key=lambda b: float(np.dot(b[0], normal))
+                                + b[1])
+            anchor = centre
+            offset = curve + glyph_mesh.LETTER_LIFT
+            # Wrapped text that reaches past the ball's horizon folds under
+            # and disappears, so the whole run -- code and number together --
+            # has to fit inside it. Scale on the run's width, not the cap
+            # height: "G10" is more than twice as wide as it is tall, which is
+            # exactly the case that overflowed a small glycine marker.
+            span = glyph_font.run_width(res.letter, res.key[1], size)
+            size *= min(1.0, curve * LETTER_SPAN / max(span, 1e-6))
         # Stand the letter on the stem where there is one to stand on; a volume
         # puts its stem straight through the face, so those line up along the
         # chain instead.
@@ -802,7 +823,8 @@ def build_scene(molecule: Molecule, theme: str = "dark", *,
         for side in faces:
             glyph_mesh.label(builder.mesh, anchor + normal * (side * offset),
                              np.cross(normal * side, down), down, normal * side,
-                             res.letter, res.key[1], size, solid_color, is_flat)
+                             res.letter, res.key[1], size, solid_color, is_flat,
+                             curve=curve)
         builder.label(anchor, res.letter, res.key[1], size, reach + 0.05,
                       pal.ink, is_flat, on_tablet=on_tablet, normal=normal,
                       down=down, offset=offset, surface=solid_color)

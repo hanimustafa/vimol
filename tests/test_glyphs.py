@@ -135,6 +135,37 @@ def test_labels_carry_the_residue_number(hairpin):
     assert scene.label_number == [str(n) for n in range(1, 13)]
 
 
+def test_every_residue_gets_a_letter_clear_of_its_own_solid(hairpin):
+    """A volume's letter is printed on the lobe that sticks out furthest, not
+    on a plane measured from the blob's centroid: the centroid sits *inside*
+    the spheres, so a letter placed from it is swallowed -- and on glycine,
+    whose anchor is its only sphere, it never showed at all."""
+    scene = glyphs.build_scene(hairpin, "light")
+    assert len(scene.label_char) == 12
+    for k in range(len(scene.label_char)):
+        if scene.label_on_tablet[k]:
+            continue
+        printed = scene.label_center[k] + scene.label_normal[k] * scene.label_offset[k]
+        inside = (np.linalg.norm(scene.sphere_center - printed, axis=1)
+                  < scene.sphere_radius - 1e-6)
+        assert not inside.any(), f"{scene.label_char[k]} is printed inside a sphere"
+
+
+def test_a_wrapped_run_fits_on_the_ball_it_is_printed_on():
+    """Wrapped text reaching the horizon folds under and disappears, so the
+    run has to be scaled on its width -- "G10" is more than twice as wide as
+    it is tall, which is what overflowed the small glycine marker."""
+    from vimol.glyph_font import run_width
+    mol = pdb.parse(DIPEPTIDE.replace("ALA A   1", "GLY A   1"))[0]
+    scene = glyphs.build_scene(mol, "light")
+    for k, char in enumerate(scene.label_char):
+        if scene.label_on_tablet[k]:
+            continue
+        radius = float(scene.label_offset[k] - glyphs.glyph_mesh.LETTER_LIFT)
+        assert run_width(char, scene.label_number[k],
+                         float(scene.label_size[k])) <= radius * glyphs.LETTER_SPAN + 1e-9
+
+
 def test_a_letter_stays_on_the_face_it_is_printed_on(hairpin):
     """It is a marking on the residue, not a tag pointing at it: the plane it
     lies in is fixed to the structure, so turning the camera foreshortens it

@@ -195,6 +195,14 @@ def atlas() -> Tuple[np.ndarray, Dict[str, Tuple[float, float, float, float]]]:
     return _ATLAS
 
 
+def run_width(code: str, number: str, size: float) -> float:
+    """How wide the whole code-plus-number run is, in world units."""
+    run = layout(code, number, size)
+    left = min(dx - h * ASPECT * 0.5 for _c, dx, _dy, h in run)
+    right = max(dx + h * ASPECT * 0.5 for _c, dx, _dy, h in run)
+    return right - left
+
+
 def atlas_box(char: str) -> Tuple[float, float, float, float]:
     """The atlas box for *char*, falling back to ``X``."""
     _image, boxes = atlas()
