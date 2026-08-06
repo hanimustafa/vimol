@@ -12,8 +12,9 @@ vimol molecule.xyz
 
 ![C60 spinning in the terminal, rendered by vimol](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/spin.gif)
 
-Running `vimol` with no arguments opens that bundled C60. Drag to rotate,
-scroll to zoom, hover an atom to identify it, `?` for every binding.
+That is the C60 bundled with the source, which `vimol` opens with no arguments
+when you run it from a checkout. Drag to rotate, scroll to zoom, hover an atom
+to identify it, `?` for every binding.
 
 You need Python 3.8 or newer and a terminal that speaks the
 [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) —
@@ -54,7 +55,8 @@ ball-and-stick and says so.
 Pass more than one file and they load into a single session, auto-overlaid: the
 active structure in normal element colours, the rest flat-tinted so you can
 tell them apart. Multi-model files — trajectories, NMR ensembles, multi-record
-SDFs — keep every frame, listed down the left.
+SDFs — keep every frame, listed down the left. Several files always open in
+ball-and-stick, so add `--style ribbon` when they are proteins, as above.
 
 Clicking a file's `ALL` control pulls its whole ensemble into the overlay.
 Then `r` rigidly aligns every tinted structure onto the untinted one and
@@ -88,20 +90,23 @@ saves.
 
 ## Use it as a library
 
-![a C60 painted into the middle of a terminal by three lines of Python](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/library.png)
+![a C60 painted into the middle of a terminal by three lines of vimol](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/library.png)
 
 Three lines put a molecule anywhere on the screen. Build a `Scene` at the pixel
 size you want, park the cursor where its top-left corner belongs, and write:
 
 ```python
+import os, vimol
+
 scene = vimol.Scene(vimol.load("c60.xyz"), 640, 380)   # render it off-screen
 scene.style.transparent = True                         # let the terminal through
 os.write(1, b"\x1b[6;19H" + scene.to_kitty())          # paint at row 6, col 19
 ```
 
 That is `examples/inset.py`, and the picture above is what it prints.
-`scene.render()` hands you an `(H, W, 3)` uint8 array instead, and
-`scene.to_png("out.png")` writes a PNG with a stdlib encoder — no Pillow.
+`scene.render()` hands you the pixels as a uint8 array instead — `(H, W, 3)`,
+or `(H, W, 4)` with a transparent background as above — and
+`scene.to_png("out.png")` writes a PNG with a stdlib encoder, no Pillow.
 
 For a molecule the user can actually turn, keep your own input loop and give
 the widget only the events you want it to have:
@@ -125,7 +130,7 @@ os.write(1, widget.to_kitty(cols=region_cols, rows=region_rows))
 
 ## Reference
 
-| | |
+| Key | Does |
 |---|---|
 | Drag / arrows / `hjkl` | rotate |
 | Wheel, `+` `-` | zoom |
@@ -153,6 +158,6 @@ Also `--backend cpu|gl|auto`, `--theme dark|light|auto`, `--rotate YAW PITCH`,
 `--bond-radius`, `--no-depth-cue`, `--no-bonds`, `--bond-tolerance`,
 `--list-formats`.
 
-The three animations above are recorded by `scripts/record_demos.py`, which
-drives a real viewer and rasterizes the bytes it writes; `docs/media/demo` holds
-their inputs.
+The protein, alignment and editing animations are recorded by
+`scripts/record_demos.py`, which drives a real viewer and rasterizes the bytes
+it writes; `docs/media/demo` holds their inputs.
