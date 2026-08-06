@@ -146,6 +146,15 @@ _HELP_TITLE = " vimol — terminal molecular viewer "
 _HELP_KEY_W = 18        # 'key' plus its dot leader, before the value's space
 _HELP_COL_W = 36        # one whole key/value column, left column to right
 
+# Persistent bottom-left control hint (unlike the '?' panel above, this one
+# is never toggled -- drawn every frame the same way the status bar is).
+_CORNER_HINT_KEY_W = 5
+_CORNER_HINT_LINES = [
+    f"{'z':<{_CORNER_HINT_KEY_W}}center",
+    f"{'r':<{_CORNER_HINT_KEY_W}}align",
+    f"{'1-6':<{_CORNER_HINT_KEY_W}}display modes",
+]
+
 
 def _kv(key: str, value: str) -> str:
     """One ``key ......... value`` cell.
@@ -170,6 +179,7 @@ def _help_note(text: str) -> str:
 _HELP_HEAD = [
     _help_row(_kv("Mouse drag", "rotate"), _kv("Wheel / + -", "zoom")),
     _help_row(_kv("Right / mid drag", "pan"), _kv("[ / ]", "roll")),
+    _help_note("opt+drag empty space · also pans"),
     _help_row(_kv("Hover", "identify atom"), _kv("Arrows / h j k l", "rotate")),
     _help_row(_kv("1 2 3 4", "ball / spacefill / licorice / wire")),
     _help_row(_kv("5 / 6", "ribbon / glyph: lettered residues (proteins)")),
@@ -361,6 +371,10 @@ class Viewer:
 
         self._running = False
         self._show_help = False
+        # whether the corner hint currently owns its cells (see
+        # _draw_active_overlay): drives the one-shot erase when an overlay
+        # takes the screen, so the erase is not rewritten every frame.
+        self._corner_hint_drawn = False
         # modal state: "normal" | "save_input" | "save_confirm" |
         # "quit_confirm" | "periodic_table" | "geometry_picker" |
         # "selection_picker"
@@ -1948,6 +1962,10 @@ class Viewer:
         out += b"\x1b[%d;1H\x1b[2K" % self._rows
         out += self._status_bar().encode("utf-8", "replace")
         kitty.write_bytes(bytes(out), self.fd_out)
+        # Overlays (help/pickers/corner hint) draw here, before the pacing
+        # fence below -- the fence must be the LAST bytes written for the
+        # frame (see _arm_fence), and each overlay does its own write.
+        self._draw_active_overlay()
         elapsed = time.perf_counter() - frame_start
         if self._timing_path is not None:      # VIMOL_TIMING: per-frame stages
             t_now = time.perf_counter()
@@ -1991,16 +2009,6 @@ class Viewer:
             # writes block at real link speed).
             self._interact_scale = self._next_render_scale(
                 self._interact_scale, elapsed)
-        if self._show_help:
-            self._draw_help()
-        elif self._mode == "periodic_table":
-            self._draw_periodic_table()
-        elif self._mode == "geometry_picker":
-            self._draw_geometry_picker()
-        elif self._mode == "selection_picker":
-            self._draw_selection_picker()
-        elif self._mode == "file_browser":
-            self._draw_file_browser()
 
     def _help_geometry(self) -> Tuple[int, int, int, int]:
         """(top, left, width, height) of the help panel, 0-based cell coords.
@@ -2046,6 +2054,88 @@ class Viewer:
         put(top + height - 1, f"{border}└{foot}┘\x1b[0m")
         kitty.write_bytes(bytes(out), self.fd_out)
         return bytes(out)
+
+    def _corner_hint_geometry(self) -> Tuple[int, int, int, int]:
+        """(top, left, width, height) of the persistent bottom-left control
+        hint, 0-based cell coords -- anchored to the render viewport (right
+        of the structure list, never over it), stacked directly above the
+        status bar.
+
+        Height 0 means "does not fit": unlike the help panel, which admits
+        clipping with a '─ more ─' foot, a clipped hint would just read as
+        noise ('z    cent', or a lone 'z'), so :meth:`_draw_corner_hint`
+        draws nothing rather than a stub.
+        """
+        lines = _CORNER_HINT_LINES
+        left = self._list_w + self._measure_w
+        width = max(len(l) for l in lines)
+        height = len(lines)
+        if width > self._cols - left or height > self._rows - 1:
+            return (0, left, 0, 0)
+        top = (self._rows - 1) - height
+        return (top, left, width, height)
+
+    def _draw_corner_hint(self) -> bytes:
+        top, left, width, height = self._corner_hint_geometry()
+        bg = self._sgr_bg(self.theme.help_bg)
+        fg = self._sgr_fg(self.theme.list_muted_fg)
+        out = bytearray()
+        for k in range(height):
+            row = _CORNER_HINT_LINES[k].ljust(width)
+            out.extend(b"\x1b[%d;%dH" % (top + k + 1, left + 1))
+            out.extend(f"{bg}{fg}{row}\x1b[0m".encode("utf-8", "replace"))
+        if out:
+            kitty.write_bytes(bytes(out), self.fd_out)
+        return bytes(out)
+
+    def _erase_corner_hint(self) -> bytes:
+        """Blank the cells the corner hint last painted.
+
+        Column-scoped rather than whole-row (unlike :meth:`_erase_rows`):
+        _draw_list paints the structure strip earlier in the SAME frame, so
+        wiping these rows end-to-end would blank the strip until the next
+        one. Reset to the default background, which the negatively
+        z-indexed image shows through again.
+        """
+        top, left, width, height = self._corner_hint_geometry()
+        out = bytearray()
+        for k in range(height):
+            out += b"\x1b[%d;%dH\x1b[0m" % (top + k + 1, left + 1)
+            out += b" " * width
+        if out:
+            kitty.write_bytes(bytes(out), self.fd_out)
+        return bytes(out)
+
+    def _draw_active_overlay(self) -> None:
+        """Draw whichever single overlay currently owns the screen -- the
+        '?' help panel, a modal picker, or (when none of those claim it)
+        the persistent bottom-left control hint.
+
+        The hint is the only one drawn unconditionally, so it is also the
+        only one needing an explicit teardown: its opaque cells are not
+        repainted by anything else, and a panel that does not happen to
+        cover them would otherwise leave it stranded on screen.
+        """
+        if self._show_help or self._mode in (
+                "periodic_table", "geometry_picker", "selection_picker",
+                "file_browser"):
+            if self._corner_hint_drawn:
+                self._erase_corner_hint()
+                self._corner_hint_drawn = False
+        else:
+            self._corner_hint_drawn = True
+        if self._show_help:
+            self._draw_help()
+        elif self._mode == "periodic_table":
+            self._draw_periodic_table()
+        elif self._mode == "geometry_picker":
+            self._draw_geometry_picker()
+        elif self._mode == "selection_picker":
+            self._draw_selection_picker()
+        elif self._mode == "file_browser":
+            self._draw_file_browser()
+        else:
+            self._draw_corner_hint()
 
     # -- periodic-table picker ---------------------------------------------
     def _pt_geometry(self) -> Tuple[int, int, int, int]:

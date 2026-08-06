@@ -2834,6 +2834,156 @@ def _help_rows(v):
     return {int(parts[i]) - 1: parts[i + 2] for i in range(1, len(parts), 3)}
 
 
+def _corner_hint_rows(v):
+    """{0-based screen row: the SGR text drawn there} for one _draw_corner_hint()."""
+    parts = re.split(r"\x1b\[(\d+);(\d+)H", v._draw_corner_hint().decode("utf-8", "replace"))
+    return {int(parts[i]) - 1: parts[i + 2] for i in range(1, len(parts), 3)}
+
+
+def test_corner_hint_shows_exactly_the_three_essential_bindings(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = 100, 30
+        v._list_w = 0
+        rows = _corner_hint_rows(v)
+        text = "".join(_visible(t) for t in rows.values())
+        assert "z" in text and "center" in text
+        assert "r" in text and "align" in text
+        assert "1-6" in text and "display modes" in text
+        assert "opt" not in text.lower()          # not documented here, by design
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("cols,rows_h", [(17, 40), (8, 40), (120, 3), (120, 2)])
+def test_corner_hint_hides_itself_rather_than_showing_a_truncated_stub(
+        tmp_path, monkeypatch, cols, rows_h):
+    """A clipped hint reads as noise ('z    cent', or a lone 'z'), and unlike
+    the help panel it has no '─ more ─' foot to admit it. Below the size its
+    three lines need, it draws nothing at all."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = cols, rows_h
+        v._list_w = 0
+        assert _overlay_writes(v, monkeypatch) == ""
+    finally:
+        os.close(fd)
+
+
+def test_corner_hint_sits_above_the_status_bar_right_of_the_structure_list(tmp_path):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = 100, 30
+        v._list_w = 20
+        top, left, width, height = v._corner_hint_geometry()
+        assert left == v._list_w + v._measure_w
+        assert top + height <= v._rows - 1        # 0-based: status bar sits at row _rows-1
+    finally:
+        os.close(fd)
+
+
+def _overlay_writes(v, monkeypatch):
+    """Bytes one _draw_active_overlay() writes to the terminal."""
+    from vimol import kitty
+    sink = bytearray()
+    monkeypatch.setattr(kitty, "write_bytes", lambda data, fd=1: sink.extend(data))
+    v._draw_active_overlay()
+    return bytes(sink).decode("utf-8", "replace")
+
+
+def _cells(text):
+    """{(row0, col0): char} actually painted by an SGR-decorated write."""
+    out = {}
+    parts = re.split(r"\x1b\[(\d+);(\d+)H", text)
+    for i in range(1, len(parts), 3):
+        r0, c0 = int(parts[i]) - 1, int(parts[i + 1]) - 1
+        for j, ch in enumerate(_visible(parts[i + 2])):
+            out[(r0, c0 + j)] = ch
+    return out
+
+
+def test_opening_an_overlay_erases_the_corner_hint_it_does_not_cover(
+        tmp_path, monkeypatch):
+    """The hint paints opaque text cells over the (negatively z-indexed)
+    image, and nothing repaints them -- so without an explicit teardown it
+    stays on screen beside an open help panel. Suppressing it in the
+    dispatch is not enough; its cells must be blanked."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = 120, 40
+        v._list_w = 0
+        top, left, width, height = v._corner_hint_geometry()
+        painted = _cells(_overlay_writes(v, monkeypatch))
+        assert any(painted.get((top, left + c), " ") != " " for c in range(width))
+
+        v._show_help = True                       # the help panel takes over
+        after = _cells(_overlay_writes(v, monkeypatch))
+        # Every hint cell must be EXPLICITLY repainted blank. Merely being
+        # absent from this frame's writes is the bug: the terminal keeps
+        # whatever the previous frame left there.
+        for r in range(top, top + height):
+            for c in range(left, left + width):
+                assert (r, c) in after, ("never repainted", r, c)
+                assert after[(r, c)] == " ", (r, c, after[(r, c)])
+    finally:
+        os.close(fd)
+
+
+def test_corner_hint_teardown_leaves_the_structure_strip_alone(tmp_path, monkeypatch):
+    """The erase must be column-scoped, not whole-row: _draw_list paints the
+    strip earlier in the SAME frame, so wiping those rows end-to-end would
+    blank the strip until the next frame."""
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        v._cols, v._rows = 120, 40
+        v._list_w = 20
+        top, left, _width, height = v._corner_hint_geometry()
+        _overlay_writes(v, monkeypatch)           # draw the hint
+        v._show_help = True
+        erased = _cells(_overlay_writes(v, monkeypatch))
+        for r in range(top, top + height):
+            for c in range(0, v._list_w):
+                assert (r, c) not in erased, (r, c)
+    finally:
+        os.close(fd)
+
+
+def test_draw_active_overlay_shows_corner_hint_by_default(tmp_path, monkeypatch):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        calls = []
+        for name in ("_draw_help", "_draw_periodic_table", "_draw_geometry_picker",
+                     "_draw_selection_picker", "_draw_file_browser", "_draw_corner_hint"):
+            monkeypatch.setattr(v, name, lambda *_a, n=name: calls.append(n))
+        v._draw_active_overlay()
+        assert calls == ["_draw_corner_hint"]
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("mode_attr,mode_value", [
+    ("_show_help", True),
+    ("_mode", "periodic_table"),
+    ("_mode", "geometry_picker"),
+    ("_mode", "selection_picker"),
+    ("_mode", "file_browser"),
+])
+def test_draw_active_overlay_suppresses_corner_hint_for_other_overlays(
+        tmp_path, monkeypatch, mode_attr, mode_value):
+    v, fd = _multi_viewer(tmp_path)
+    try:
+        calls = []
+        for name in ("_draw_help", "_draw_periodic_table", "_draw_geometry_picker",
+                     "_draw_selection_picker", "_draw_file_browser", "_draw_corner_hint"):
+            monkeypatch.setattr(v, name, lambda *_a, n=name: calls.append(n))
+        setattr(v, mode_attr, mode_value)
+        v._draw_active_overlay()
+        assert calls != ["_draw_corner_hint"]
+        assert "_draw_corner_hint" not in calls
+    finally:
+        os.close(fd)
+
+
 @pytest.mark.parametrize("editable", [False, True])
 @pytest.mark.parametrize("cols,rows_h", [(120, 40), (80, 30), (60, 12), (30, 6), (8, 5)])
 def test_viewer_help_panel_is_a_closed_box_of_uniform_width(tmp_path, editable,
