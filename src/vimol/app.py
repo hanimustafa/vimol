@@ -20,7 +20,7 @@ from . import kitty
 
 
 def build_style(args) -> Style:
-    st = Style(representation=args.style)
+    st = Style(representation=args.style or "ball_and_stick")
     if args.atom_scale is not None:
         st.atom_scale = args.atom_scale
     if args.bond_radius is not None:
@@ -55,8 +55,9 @@ def make_parser() -> argparse.ArgumentParser:
         epilog="Supported formats: " + ", ".join(SUPPORTED_EXTENSIONS),
     )
     p.add_argument("file", nargs="*", help="one or more structure files (xyz/pdb/mol/sdf)")
-    p.add_argument("--style", default="ball_and_stick",
-                   choices=["ball_and_stick", "spacefill", "licorice", "wireframe"])
+    p.add_argument("--style", default=None,
+                   choices=["ball_and_stick", "spacefill", "licorice", "wireframe",
+                            "ribbon", "glyph"])
     p.add_argument("--backend", default="auto", choices=["auto", "cpu", "gl"],
                    help="rendering backend: numpy CPU raycaster, GPU (OpenGL), "
                         "or auto (GPU if a context can be created, else CPU)")
@@ -141,6 +142,21 @@ def _check_kitty_terminal() -> Tuple[Optional["kitty.TerminalProbe"], int]:
         print("         Set VIMOL_FORCE_KITTY=1 to try anyway.", file=sys.stderr)
         return None, 5
     return probe, 0
+
+
+def _default_representation(molecule) -> str:
+    """What a single file should open as when the user named no style.
+
+    A file with no residue names is usually small enough that ball-and-stick
+    is the right first look -- unless it turns out to be a protein, where a
+    hundred sticks say far less than the fold does. Only for the nameless
+    formats: opening a PDB is a deliberate act and its author may well want to
+    see the atoms.
+    """
+    from .residues import protein_residues
+    if molecule.atom_resnames:
+        return "ball_and_stick"
+    return "ribbon" if len(protein_residues(molecule)) >= 3 else "ball_and_stick"
 
 
 def _default_demo_path() -> Optional[str]:
@@ -250,6 +266,8 @@ def main(argv: List[str] | None = None) -> int:
         frames, source_path = None, None
 
     style = build_style(args)
+    if args.style is None and frames is not None:
+        style.representation = _default_representation(mol)
 
     # -- interactive viewer ----------------------------------------------
     probe, rc = _check_kitty_terminal()

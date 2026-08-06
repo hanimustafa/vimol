@@ -52,6 +52,38 @@ status-bar pills pick the element and geometry), option-drag to draw bonds,
 `x` to delete, `c` to relax clashes, `u` to undo, `s` to save. `?` lists
 every binding.
 
+`1`–`4` switch between ball-and-stick, space-filling, licorice and wireframe.
+On a protein, `5` draws the bare backbone as a green cartoon ribbon, and `6`
+reads it the way a figure does: the backbone runs as
+a ribbon through the Cα atoms, and each residue links out from its Cα by way
+of its Cβ to a solid carrying its one-letter code — a plate cut to the shape of
+the ring for the aromatics, a rounded volume built from the real side-chain
+carbons for everything else. Only the carbon skeleton is abstracted: the
+carboxylate, the hydroxyl, the indole N–H and any hydrogen sitting on one of
+those stay real atoms in their element colours, at the exact coordinates in the
+file. Each solid is lettered with its one-letter code and residue number,
+printed onto one face of the residue -- so turning the structure foreshortens a
+letter and eventually takes it out of sight, the way a marking on a real object
+would.
+Overlaid structures tint flat, as in every other style.
+
+Both work on an `.xyz` too, which carries neither residue names nor atom names —
+and a single `.xyz` that turns out to be a protein opens in `5` rather than as a
+thicket of sticks. The backbone and the residues are recovered from geometry:
+the backbone is found as a bond-graph `N–Cα–C(=O)` motif, and each side chain is
+walked outward from its Cα, which gives every atom its bond distance from the Cα
+— and that distance is what a PDB name's Greek letter records. The resulting
+(element, distance) signature identifies all twenty residues uniquely, so the
+letters and the ring shapes come out the same as they would from a PDB.
+Something with no peptide backbone in it stays ball-and-stick and says so.
+
+This is the one style that looks materially better on a GPU. There the ribbon
+is a real swept tube with a rounded edge and the tablets are chamfered solids
+with their letters printed onto the faces — and it draws in about 2 ms where
+the raycaster takes 100. Without a GL context it still works: the raycaster
+intersects the same shapes analytically and fakes the smooth shading, which
+costs the polish rather than the picture.
+
 Pass more than one file (`vimol a.xyz b.pdb`) and they all load into one
 session, auto-overlaid — the first structure of each file shown together, the
 active one in normal element colours and the rest flat-tinted so you can tell
@@ -60,6 +92,7 @@ structure list to add one into the overlay or drop it out.
 
 ```bash
 vimol traj.xyz --spin --style spacefill   # spin a trajectory, space-filling
+vimol protein.pdb --style glyph           # lettered residues on a ribbon
 vimol a.xyz b.pdb                         # load both, auto-overlaid for comparison
 ```
 

@@ -64,6 +64,7 @@ def parse(text: str) -> List[Molecule]:
             cur.symbols.append(el)
             cur.atom_names.append(atom_name.strip().upper())
             cur.atom_is_hetatm.append(rec == "HETATM")
+            cur.atom_resnames.append(line[17:20].strip().upper())
             chain = line[21:22].strip()
             residue_number = line[22:26].strip()
             insertion = line[26:27].strip()

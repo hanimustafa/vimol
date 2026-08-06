@@ -296,6 +296,8 @@ def delete_atom(mol: Molecule, idx: int) -> None:
         mol.atom_is_hetatm = [mol.atom_is_hetatm[i] for i in keep]
     if len(mol.atom_keys) == len(keep) + len(victims):
         mol.atom_keys = [mol.atom_keys[i] for i in keep]
+    if len(mol.atom_resnames) == len(keep) + len(victims):
+        mol.atom_resnames = [mol.atom_resnames[i] for i in keep]
     # fancy-index the surviving rows (a copy); empty keep -> a clean (0, 3) array
     mol.positions = mol.positions[keep]
     _reperceive(mol)

@@ -137,3 +137,58 @@ def molecule_to_gl_inputs(molecule: Molecule, camera: Camera, style: Style,
     )
 
     return spheres, cylinders, cones, proj, shading
+
+
+def glyph_to_gl_inputs(scene, camera, style, width: int, height: int):
+    """GL batches for the glyph skin, from a prebuilt ``glyphs.GlyphScene``.
+
+    The skin's rounded volumes, beads, rods, bonds and atoms are all spheres
+    and cylinders, so they go through the same analytic impostors as any other
+    representation -- exact, and cheaper than tessellating them. Only the ribbon
+    and the tablets need real triangles, and those come pre-built in world space
+    and are rotated into view here.
+    """
+    from .gl_render import MeshBatch
+
+    def view(points):
+        return (camera.view_positions(points).astype(np.float32) if len(points)
+                else np.zeros((0, 3), np.float32))
+
+    spheres = SphereBatch(
+        centers=view(scene.sphere_center),
+        radii=np.asarray(scene.sphere_radius, np.float32),
+        colors=np.asarray(scene.sphere_color, np.float32),
+        flat=np.asarray(scene.sphere_flat, np.float32),
+    )
+    cylinders = CylinderBatch(
+        a=view(scene.cyl_a), b=view(scene.cyl_b),
+        radii=np.asarray(scene.cyl_radius, np.float32),
+        colors_a=np.asarray(scene.cyl_color, np.float32),
+        colors_b=np.asarray(scene.cyl_color_b, np.float32),
+        flat=np.asarray(scene.cyl_flat, np.float32),
+    )
+
+    # The ribbon, the tablets and the letters, all cached in world space: the
+    # letters are printed onto the residues themselves now, so nothing here
+    # depends on where the camera is except the rotation into view.
+    m = scene.mesh
+    if len(m.vertices):
+        mesh = MeshBatch(
+            vertices=view(m.vertices),
+            normals=(np.asarray(m.normals, float) @ camera.rotation.T).astype(np.float32),
+            colors=np.asarray(m.colors, np.float32),
+            flat=np.asarray(m.flat, np.float32),
+            uv=np.asarray(m.uv, np.float32),
+            indices=np.asarray(m.indices, np.uint32),
+        )
+    else:
+        mesh = MeshBatch.empty()
+
+    proj = _build_projection(camera.zoom, camera.pan, width, height, camera.extent)
+    shading = ShadingParams(
+        ambient=style.ambient, specular_strength=style.specular_strength,
+        shininess=style.shininess, light_dir=tuple(style.light_dir),
+        fill_light=style.fill_light, depth_cue=style.depth_cue,
+        background=tuple(style.background), transparent=style.transparent,
+    )
+    return spheres, cylinders, mesh, proj, shading

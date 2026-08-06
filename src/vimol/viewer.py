@@ -172,6 +172,7 @@ _HELP_HEAD = [
     _help_row(_kv("Right / mid drag", "pan"), _kv("[ / ]", "roll")),
     _help_row(_kv("Hover", "identify atom"), _kv("Arrows / h j k l", "rotate")),
     _help_row(_kv("1 2 3 4", "ball / spacefill / licorice / wire")),
+    _help_row(_kv("5 / 6", "ribbon / glyph: lettered residues (proteins)")),
 ]
 # Shown only when editing is disabled (the classic bindings).
 _HELP_VIEW = [
@@ -2653,7 +2654,8 @@ class Viewer:
         raw_left = (self._subset_hover_tip or self._full_rmsd_hover_tip
                     or self._list_path_hover_tip
                     or align_prompt or measure
-                    or self.widget.pick_refusal or hov or (self._msg or
+                    or self.widget.pick_refusal or self.widget.rep_note
+                    or hov or (self._msg or
                     f"{mol.name or 'molecule'}  {mol.formula()}  {mol.n_atoms} atoms"))
         rep = self.style.representation
         spin = " ⟳" if self.autospin else ""
