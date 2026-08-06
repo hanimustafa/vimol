@@ -12,9 +12,9 @@ vimol molecule.xyz
 
 ![C60 spinning in the terminal, rendered by vimol](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/spin.gif)
 
-That is the C60 bundled with the source, which `vimol` opens with no arguments
-when you run it from a checkout. Drag to rotate, scroll to zoom, hover an atom
-to identify it, `?` for every binding.
+That is the C60 bundled with vimol, which `vimol` opens with no arguments.
+Drag to rotate, scroll to zoom, hover an atom to identify it, `?` for every
+binding.
 
 You need Python 3.8 or newer and a terminal that speaks the
 [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) —
