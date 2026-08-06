@@ -93,6 +93,10 @@ class MoleculeWidget:
         self.cell_h = 18.0
         self._drag_button: Optional[int] = None
         self._drag_shift = False
+        # True for the rest of an alt-gesture that started on empty space
+        # (opt+click/opt+drag pans there instead of bonding/picking) -- read
+        # by the 'up' handler to suppress the alignment-click shortcut.
+        self._alt_pan_miss = False
         self._last = (0.0, 0.0)
         self._press = (0.0, 0.0)                 # where the current press started
         self._base_colors = self.scene.structures.composite().base_colors
@@ -235,13 +239,14 @@ class MoleculeWidget:
             # down so its preview arrow can't be orphaned in vector_fields.
             if self._bond_anchor is not None:
                 self._cancel_bond_gesture()
-            if ev.button == 0 and ev.alt and self.editable:
+            self._alt_pan_miss = False
+            if ev.button == 0 and ev.alt:
                 # The option gesture acts on the active structure, so it must
                 # see the active structure: a composite pick would let a
                 # tinted overlay atom in front intercept the press and lose
                 # both the bond anchor and the subset-pick shortcut.
                 idx = self._pick_active_only(x, y)
-                if idx is not None:
+                if idx is not None and self.editable:
                     # Start a bond gesture -- and deliberately do NOT set
                     # _drag_button, so the drag branch below won't rotate the
                     # camera while the gesture is live.
@@ -250,14 +255,19 @@ class MoleculeWidget:
                     self._bond_drag_distance2 = 0.0
                     self._start_bond_preview(idx)
                     return False
-                # alt+down over empty space: fall through to a normal press.
-            elif ev.button == 0 and ev.alt:
-                # Option-click is the always-available shortcut into subset
-                # picking. Preserve a loaded named selection so the click
-                # edits a live copy rather than starting from nothing.
-                self.set_alignment_mode(True, preserve=True)
+                if idx is not None:
+                    # Option-click is the always-available shortcut into
+                    # subset picking. Preserve a loaded named selection so
+                    # the click edits a live copy rather than starting from
+                    # nothing.
+                    self.set_alignment_mode(True, preserve=True)
+                else:
+                    # opt+click/opt+drag over empty space pans the scene
+                    # instead of rotating (edit mode) or arming alignment
+                    # picking with nothing to pick (view mode).
+                    self._alt_pan_miss = True
             self._drag_button = ev.button
-            self._drag_shift = ev.shift
+            self._drag_shift = self._alt_pan_miss or ev.shift
             self._last = (x, y)
             self._press = (x, y)
             if self.picking:
@@ -285,7 +295,7 @@ class MoleculeWidget:
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:      # within ~3px -> a click, not a drag
                     return self._measure_click(x, y)
-            elif self.align_mode and was_left and not ev.shift:
+            elif self.align_mode and was_left and not ev.shift and not self._alt_pan_miss:
                 dx = x - self._press[0]
                 dy = y - self._press[1]
                 if dx * dx + dy * dy <= 9.0:

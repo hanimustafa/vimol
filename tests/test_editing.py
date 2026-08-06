@@ -770,6 +770,74 @@ def _alt_drag(widget, x0, y0, x1, y1):
     return widget.handle_event(MouseEvent("up", x1, y1, button=0, alt=True, pixel=True))
 
 
+def _far_px(widget):
+    """A pixel guaranteed to miss every atom: the widget's far corner."""
+    return widget.scene.width - 5.0, widget.scene.height - 5.0
+
+
+def _alt_click(widget, x, y):
+    """Simulate a plain option-click (down+up, no drag) at one pixel."""
+    widget.handle_event(MouseEvent("down", x, y, button=0, alt=True, pixel=True))
+    return widget.handle_event(MouseEvent("up", x, y, button=0, alt=True, pixel=True))
+
+
+def test_alt_drag_on_empty_space_pans_when_editable():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    fx, fy = _far_px(w)
+    w.handle_event(MouseEvent("down", fx, fy, button=0, alt=True, pixel=True))
+    w.handle_event(MouseEvent("drag", fx - 20, fy - 20, button=0, alt=True, pixel=True))
+    w.handle_event(MouseEvent("up", fx - 20, fy - 20, button=0, alt=True, pixel=True))
+    assert not np.array_equal(w.scene.camera.pan, np.zeros(2))
+    assert np.array_equal(w.scene.camera.rotation, np.eye(3))   # not rotated
+    assert w._bond_anchor is None                                 # no bond gesture started
+
+
+def test_alt_down_on_an_atom_still_starts_a_bond_gesture_when_editable():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
+    ax, ay = _atom_px(w, 0)
+    w.handle_event(MouseEvent("down", ax, ay, button=0, alt=True, pixel=True))
+    assert w._bond_anchor == 0
+    assert np.array_equal(w.scene.camera.pan, np.zeros(2))        # gesture, not a pan
+
+
+def test_alt_drag_on_empty_space_pans_when_not_editable():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")   # editable defaults False
+    fx, fy = _far_px(w)
+    w.handle_event(MouseEvent("down", fx, fy, button=0, alt=True, pixel=True))
+    w.handle_event(MouseEvent("drag", fx - 20, fy - 20, button=0, alt=True, pixel=True))
+    w.handle_event(MouseEvent("up", fx - 20, fy - 20, button=0, alt=True, pixel=True))
+    assert not np.array_equal(w.scene.camera.pan, np.zeros(2))
+    assert w.align_mode is False       # a miss no longer arms alignment picking
+
+
+def test_alt_click_on_an_atom_still_arms_alignment_when_not_editable():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    ax, ay = _atom_px(w, 0)
+    _alt_click(w, ax, ay)
+    assert w.align_mode is True
+    assert w.align_sel == [0]
+
+
+def test_alt_click_on_empty_space_no_longer_clears_an_active_alignment_selection():
+    mol = Molecule()
+    editor.birth_molecule(mol, [0.0, 0.0, 0.0])
+    w = MoleculeWidget(mol, 200, 200, backend="cpu")
+    ax, ay = _atom_px(w, 0)
+    _alt_click(w, ax, ay)                 # picks atom 0, arms alignment mode
+    assert w.align_sel == [0]
+    fx, fy = _far_px(w)
+    _alt_click(w, fx, fy)                 # a plain click (no drag) on empty space
+    assert w.align_sel == [0]             # retired: opt+click there now pans instead
+
+
 def test_widget_click_empty_space_births_molecule():
     mol = Molecule()                      # empty scene
     w = MoleculeWidget(mol, 200, 200, backend="cpu", editable=True)
