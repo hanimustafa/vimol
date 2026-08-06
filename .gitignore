@@ -5,6 +5,8 @@ build/
 dist/
 .pytest_cache/
 *.png
+# except the README's own stills
+!docs/media/*.png
 .DS_Store
 .venv-release/
 .venv-bench/
