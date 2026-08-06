@@ -44,18 +44,6 @@ RIBBON_SAMPLES = 16         # spline samples per residue. A helix turns every
 # and following it literally is what makes a ribbon read as crinkled -- the
 # turns are real but they are not what anyone is looking at.
 SIDE_SMOOTHING = 6
-# How far each guide point is pulled toward the mean of its neighbours, and how
-# many times. A Cα trace zigzags by design -- consecutive Cα atoms alternate
-# either side of the local axis -- and a spline through them reproduces every
-# one of those kinks. This takes the zigzag off while leaving the ribbon on the
-# atoms: at these settings no guide point moves more than a fraction of an
-# angstrom, far less than the ribbon is wide.
-# At these settings no guide point moves more than about 0.55 A on a helix --
-# comfortably inside the ribbon's own half-width, so every Ca is still under
-# the surface. Relaxing harder does look smoother, but it pulls a helix in
-# toward its axis and the ribbon stops covering the atoms it is drawn from.
-PATH_RELAX = 0.20
-PATH_RELAX_PASSES = 1
 PLATE_INFLATE = 0.30        # angstrom the ring hull is pushed out by
 PLATE_THICKNESS = 0.42      # angstrom, full thickness
 BLOB_RADIUS = 0.92          # angstrom; well over half a 1.5 A bond, so bonded
@@ -454,7 +442,7 @@ def _ribbon_frames(run: Sequence[Residue], positions: np.ndarray):
     visibly launches from beside the ribbon rather than out of it.
 
     Carson-Bugg: between consecutive Cα atoms the peptide plane fixes a natural
-    "side" direction, ``normalize((CA(i+1) − CA(i)) × (O(i) − CA(i)))``. That
+    "side" direction -- the carbonyl, squared up against the chain. That
     direction flips by nearly 180° from one residue to the next in a β-strand
     (the carbonyls alternate), so each is negated when it opposes its
     predecessor -- without that the ribbon corkscrews once per residue. Each
@@ -469,7 +457,14 @@ def _ribbon_frames(run: Sequence[Residue], positions: np.ndarray):
         if o_i is None:
             side = previous if previous is not None else _unit(np.cross(a, (0.0, 0.0, 1.0)))
         else:
-            side = _unit(np.cross(a, positions[o_i] - positions[ca_i]))
+            # The width runs along the carbonyl, squared up against the chain --
+            # Carson-Bugg's D = (A x B) x A, which reduces to the component of
+            # B perpendicular to A. Using A x B itself, the peptide plane's
+            # *normal*, turns the ribbon through ninety degrees: a helix then
+            # presents its edge to the outside and reads as a narrow coil
+            # instead of the flat spiral a cartoon should show.
+            b = positions[o_i] - positions[ca_i]
+            side = _unit(b - a * (float(np.dot(a, b)) / float(np.dot(a, a))))
         if previous is not None and float(np.dot(side, previous)) < 0.0:
             side = -side
         previous = side
@@ -477,28 +472,11 @@ def _ribbon_frames(run: Sequence[Residue], positions: np.ndarray):
 
     if not peptide:
         return None
-    centers = _relax(np.array([positions[r.atoms["CA"]] for r in run]))
+    centers = np.array([positions[r.atoms["CA"]] for r in run])
     sides = np.array([_unit(sum(peptide[j] for j in (i - 1, i)
                                 if 0 <= j < len(peptide)))
                       for i in range(len(run))])
     return centers, _smooth_sides(sides)
-
-
-def _relax(points: np.ndarray) -> np.ndarray:
-    """Ease the zigzag out of a Cα trace, holding both ends.
-
-    Each interior point moves a fraction of the way toward the mean of its two
-    neighbours. The ribbon still runs through the backbone -- it is the same
-    points, nudged -- but it stops reproducing the alternation that makes a
-    faithful Cα spline look crinkled.
-    """
-    if len(points) < 3:
-        return points
-    out = points.astype(float).copy()
-    for _ in range(PATH_RELAX_PASSES):
-        mid = 0.5 * (out[:-2] + out[2:])
-        out[1:-1] += PATH_RELAX * (mid - out[1:-1])
-    return out
 
 
 def _smooth_sides(sides: np.ndarray) -> np.ndarray:

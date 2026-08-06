@@ -333,16 +333,14 @@ def test_plane_frame_finds_the_ring_normal():
 
 
 def test_the_ribbon_runs_through_the_alpha_carbons(hairpin):
-    """Its guide points are the Cα atoms, eased just enough to take the zigzag
-    off (see `_relax`) -- so each residue's link still starts on the ribbon
-    rather than beside it. Peptide-plane midpoints, the alternative, sit a full
-    angstrom off every Cα by construction."""
+    """Exactly through them -- no smoothing of the path at all. What read as
+    crinkle was the ribbon's twist, not its route (see
+    `test_the_ribbon_does_not_corkscrew_along_a_helix`)."""
     res = residues.protein_residues(hairpin)
     run = residues.chain_runs(res, hairpin.positions)[0]
     centers, _sides = glyphs._ribbon_frames(run, hairpin.positions)
     expected = np.array([hairpin.positions[r.atoms["CA"]] for r in run])
-    assert np.linalg.norm(centers - expected, axis=1).max() < glyphs.RIBBON_WIDTH * 0.5
-    assert np.allclose(centers[[0, -1]], expected[[0, -1]])
+    assert np.allclose(centers, expected)
 
 
 def test_the_link_beads_sit_on_the_real_alpha_and_beta_carbons(hairpin):
@@ -608,17 +606,32 @@ def test_the_ribbon_mode_draws_the_backbone_and_nothing_else(hairpin):
     assert np.allclose(scene.poly_color, glyphs.RIBBON_GREEN)
 
 
-def test_relaxing_the_trace_keeps_it_under_the_ribbon(hairpin):
-    """Less crinkle costs some fidelity, and the budget is the ribbon's own
-    half-width: relax further and a helix pulls in toward its axis until the
-    ribbon no longer covers the atoms it was drawn from."""
-    res = residues.protein_residues(hairpin)
-    for run in residues.chain_runs(res, hairpin.positions):
-        raw = np.array([hairpin.positions[r.atoms["CA"]] for r in run])
-        drift = np.linalg.norm(glyphs._relax(raw) - raw, axis=1)
-        assert drift.max() < glyphs.RIBBON_WIDTH * 0.5
-    # And the ends are pinned, so a chain never shortens.
-    assert np.allclose(glyphs._relax(raw)[[0, -1]], raw[[0, -1]])
+def test_the_ribbon_does_not_corkscrew_along_a_helix():
+    """The width runs along the carbonyl squared up against the chain, which on
+    a helix is very nearly the helix axis and so barely turns from one residue
+    to the next. Carson-Bugg's other vector, the peptide plane's normal, is
+    radial there and sweeps a full turn every 3.6 residues -- use it as the
+    width and the ribbon corkscrews, presenting its edge to the outside instead
+    of the flat face a cartoon shows."""
+    # An ideal alpha helix: 100 degrees and 1.5 A of rise per residue, with the
+    # carbonyl pointing along the axis.
+    n = 12
+    angle = np.radians(100.0) * np.arange(n)
+    ca = np.column_stack([2.3 * np.cos(angle), 2.3 * np.sin(angle),
+                          1.5 * np.arange(n)])
+    residues_ = []
+    positions = []
+    for i in range(n):
+        base = len(positions)
+        positions += [ca[i], ca[i] + [0.0, 0.0, 1.0]]     # CA, then O up the axis
+        res = residues.Residue(key=("", str(i + 1), ""), name="ALA", letter="A")
+        res.atoms.update({"CA": base, "O": base + 1})
+        res.elements.update({"CA": "C", "O": "O"})
+        residues_.append(res)
+    _centers, sides = glyphs._ribbon_frames(residues_, np.array(positions))
+    turn = np.degrees(np.arccos(np.clip(
+        np.einsum("ij,ij->i", sides[:-1], sides[1:]), -1.0, 1.0)))
+    assert turn.max() < 25.0, f"ribbon rolls {turn.max():.0f} deg per residue"
 
 
 def test_the_skin_says_why_it_did_nothing_for_a_non_protein():

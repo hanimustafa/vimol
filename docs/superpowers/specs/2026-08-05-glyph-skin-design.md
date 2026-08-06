@@ -484,27 +484,30 @@ or atom is added. A single `.xyz` that turns out to be a protein now opens in
 `5`, since a hundred sticks say much less than the fold does. A PDB still opens
 ball-and-stick: opening one is a deliberate act and its author may want atoms.
 
-**The ribbon is less crinkly**, along two independent axes:
+**The ribbon was rolled ninety degrees.** Carson-Bugg gives two vectors: `A × B`,
+the peptide plane's *normal*, and `(A × B) × A`, which lies in the plane
+perpendicular to the chain and reduces to the carbonyl squared up against it.
+The width belongs on the second. It was on the first.
 
-- Its *twist* is relaxed by neighbour-averaging the side vectors. Along a helix
-  the Carson-Bugg direction swings about a hundred degrees per residue, and
-  following that literally is most of what read as crinkle. The path is
-  untouched by this.
-- Its *path* is eased by pulling each guide point a fifth of the way toward the
-  mean of its neighbours, once, with the ends pinned. A Cα trace zigzags by
-  construction -- consecutive Cα atoms alternate either side of the local axis
-  -- and a faithful spline reproduces every kink.
+On a helix that mistake is not subtle once you know to look. The carbonyls point
+along the helix axis, so the in-plane vector is very nearly axial and barely
+turns from one residue to the next -- a ribbon built on it lies flat against the
+cylinder, face outward, which is the spiral staircase a cartoon shows. The
+plane's normal is *radial* there and sweeps a full turn every 3.6 residues, so a
+ribbon built on it corkscrews and presents its edge to the viewer: a narrow coil.
 
-The second is a real trade against "the ribbon should pass through the backbone
-atoms", so the budget is explicit: **no guide point may move more than the
-ribbon's own half-width**, which keeps every Cα under the surface. On 1RIJ that
-is 0.55 Å against a 1.0 Å half-width. Relaxing twice as hard looks materially
-smoother and closer to PyMOL, but it pulls a helix in toward its axis until the
-ribbon no longer covers the atoms it was drawn from -- so it is not done, and a
-test pins the bound.
+That was also the whole of the "crinkle". Two things tried before finding it
+turned out to be beside the point and are not in the tree:
 
-Raising the spline sampling, tried first, changed nothing: the kinks were the
-trace, not its tessellation.
+- Raising the spline sampling from 8 to 16 per residue changed nothing visible.
+- Relaxing the guide points toward their neighbours' mean did help, at the cost
+  of pulling helices in toward their axes -- exactly the fidelity the ribbon is
+  supposed to keep. With the twist fixed, relaxations of 0, 0.1 and 0.2 are
+  indistinguishable, so the path is now used exactly as it comes: **every guide
+  point is a Cα**, and a test asserts equality rather than a tolerance.
+
+What did survive is neighbour-averaging the *side vectors*, which costs nothing
+in fidelity because it does not move the path.
 
 **Proline's letter is centred on its plaque.** The tablet's outline is built
 relative to `center`, so shifting `center` off the ring -- which proline does,
