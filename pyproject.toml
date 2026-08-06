@@ -57,4 +57,4 @@ version = { attr = "vimol.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-vimol = ["py.typed"]
+vimol = ["py.typed", "data/c60.xyz"]
