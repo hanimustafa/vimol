@@ -22,7 +22,7 @@ from typing import List, Sequence
 
 import numpy as np
 
-from .glyph_font import ASPECT, atlas_box, layout
+from .glyph_font import atlas_box, glyph_box, layout
 
 # Points per quarter-turn of the ribbon's rounded corners. Four is enough that
 # the highlight running along the edge reads as curved at any terminal size.
@@ -33,7 +33,11 @@ TABLET_CHAMFER = 0.13       # angstrom cut off the tablet's face/rim edge
 # highlight; a few make it a rounded edge, which is what reads as a moulded
 # object rather than a sawn one.
 BEVEL_STEPS = 4
-LETTER_LIFT = 0.006         # angstrom the letter quad floats over its face
+# Angstrom the letter stands off the surface it is printed on. Small enough to
+# read as printed, large enough that it does not fight the surface for the
+# depth test -- and on a ball the wrap has to be concentric with it, or the
+# clearance shrinks to nothing away from the pole and the letter tears.
+LETTER_LIFT = 0.02
 NO_UV = (-1.0, -1.0)        # a vertex that samples no glyph
 # A letter blends ink into the face it is printed on, so the whole quad is
 # surface and only the strokes darken. The shader keys that on a non-negative
@@ -249,8 +253,9 @@ def label(builder: MeshBuilder, center: np.ndarray, right: np.ndarray,
         u0, v0, u1, v1 = atlas_box(char)
         if cutout:
             u0, u1 = u0 + CUTOUT, u1 + CUTOUT
-        half_w = height * ASPECT * 0.5
-        half_h = height * 0.5
+        cell_w, cell_h = glyph_box(char)
+        half_w = height * cell_w * 0.5
+        half_h = height * cell_h * 0.5
         if curve <= 0.0:
             at = center + right * at_u + down * at_v
             corners = [at - right * half_w - down * half_h,
@@ -260,7 +265,10 @@ def label(builder: MeshBuilder, center: np.ndarray, right: np.ndarray,
             builder.quad(corners, normal, [(u0, v0), (u1, v0), (u1, v1), (u0, v1)],
                          color, flat)
             continue
-        _wrapped(builder, center - normal * curve, curve, right, down, normal,
+        # Concentric with the ball: `center` is already lifted off it, so the
+        # wrap radius has to include that lift and the centre back it all out.
+        radius = curve + LETTER_LIFT
+        _wrapped(builder, center - normal * radius, radius, right, down, normal,
                  (at_u - half_w, at_v - half_h), (at_u + half_w, at_v + half_h),
                  (u0, v0, u1, v1), color, flat)
 

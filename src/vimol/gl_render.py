@@ -895,7 +895,12 @@ class GLRenderer:
             image, _boxes = atlas()
             tex = self.ctx.texture((image.shape[1], image.shape[0]), 1,
                                    np.ascontiguousarray(image).tobytes())
-            tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            # Mipmapped, and it matters: a real typeface's stems are a tenth
+            # of its cap height, so a letter drawn smaller than its atlas cell
+            # loses them between samples and comes out as a hollow outline.
+            tex.build_mipmaps()
+            tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            tex.anisotropy = 8.0
             # Clamp: a letter's quad maps exactly onto its tile, and wrapping
             # would fetch its neighbour along the seam.
             tex.repeat_x = tex.repeat_y = False

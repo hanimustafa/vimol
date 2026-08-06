@@ -179,6 +179,37 @@ def test_a_letter_stays_on_the_face_it_is_printed_on(hairpin):
                                  scene.label_down), 0.0, atol=1e-9)
 
 
+def test_the_font_is_a_real_face_with_no_runtime_font_machinery():
+    """Outlines are baked out of DejaVu Sans Bold by a script, so vimol needs
+    no fontTools, no freetype and no Pillow at run time -- and draws the same
+    letterforms everywhere rather than whatever the host has installed."""
+    from vimol import glyph_outlines
+    assert set("ACDEFGHIKLMNPQRSTVWY0123456789") <= set(glyph_outlines.OUTLINES)
+    assert "Bitstream Vera" in (glyph_outlines.__doc__ or "")
+    # A D has an outer contour and its counter; a T has just the one.
+    assert len(glyph_outlines.OUTLINES["D"]) == 2
+    assert len(glyph_outlines.OUTLINES["T"]) == 1
+
+
+def test_a_filled_glyph_is_solid_not_hollow():
+    """The counter of a D is empty and the stroke around it is not. An
+    even-odd fill gets this right; a stroke test would ink only the outline."""
+    from vimol.glyph_font import atlas
+    image, boxes = atlas()
+    h, w = image.shape
+    u0, v0, u1, v1 = boxes["D"]
+    cell = image[int(v0 * h):int(v1 * h), int(u0 * w):int(u1 * w)]
+    rows = cell.shape[0]
+    def runs(row):
+        return int(np.count_nonzero(np.diff(np.r_[False, row > 128, False].astype(int)) > 0))
+    # A row through the waist crosses the stem, the counter, then the bowl:
+    # two runs of ink. An outline would give the same there, so also check a
+    # row through the top bar, where a filled D is one solid run and an
+    # outlined one is two.
+    assert runs(cell[rows // 2]) == 2
+    assert runs(cell[int(rows * 0.18)]) == 1
+
+
 def test_a_label_lays_its_number_out_beside_its_code():
     from vimol.glyph_font import layout
     run = layout("Y", "12", 1.0)

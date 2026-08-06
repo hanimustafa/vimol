@@ -309,10 +309,12 @@ def infer_residues(molecule: Molecule) -> List[Residue]:
     spine = {i for run in runs for motif in run for i in motif[:3]}
 
     out: List[Residue] = []
-    number = 0
     for chain, run in enumerate(runs):
-        for nitrogen, alpha, carbonyl, oxygen in run:
-            number += 1
+        # Numbering restarts with every run, because a run is a chain -- and
+        # in an overlay each structure is its own, being bonded to nothing in
+        # the other. Counting straight through would label the second copy of
+        # a twelve-residue peptide 13 to 24.
+        for number, (nitrogen, alpha, carbonyl, oxygen) in enumerate(run, 1):
             backbone = set(spine)
             if oxygen is not None:
                 backbone.add(oxygen)

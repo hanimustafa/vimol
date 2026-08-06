@@ -440,3 +440,36 @@ as it is tall, which is exactly the case that overflowed a small glycine marker.
 
 The raycaster still prints these flat, on the same corrected plane. The wrap is
 GPU-only; the CPU path gets the placement right and loses only the curvature.
+
+
+## Eighth pass: a real typeface
+
+The hand-drawn strokes went. `scripts/build_glyph_outlines.py` bakes the
+outlines of the thirty-four characters the skin needs out of **DejaVu Sans
+Bold** into a plain data module, and both renderers fill those: the GPU by
+scan-converting them once into the atlas, the raycaster by a crossing-parity
+test per pixel against the same contours. Same letterform either way.
+
+Baked rather than loaded, so vimol still carries no font machinery at run time
+-- no fontTools, no freetype, no Pillow, which the README promises -- and draws
+the same letters everywhere rather than whatever the host has installed. Only
+the script needs fontTools, and only when the data is regenerated.
+
+DejaVu rather than Helvetica: Helvetica is Monotype's and its outlines are not
+ours to redistribute. DejaVu ships with matplotlib under the Bitstream Vera
+license, which is permissive and sits fine beside vimol's MIT; the generated
+module carries its notice. **Bold** because these letters are printed onto
+shaded, curved solids at a couple of dozen pixels, where regular-weight stems
+come out pale.
+
+Two things this exposed, neither of them the font:
+
+- A wrapped letter was tearing into what looked like a hollow outline. The wrap
+  sphere was not concentric with the ball -- it was built about a centre
+  displaced by the letter's own stand-off -- so the clearance shrank toward zero
+  away from the pole and the letter fought the ball for the depth test. The old
+  thick strokes hid it; a real face's thin parts did not.
+- Residue numbering ran straight through an overlay, labelling the second copy
+  of a twelve-residue peptide 13 to 24. It restarts per run now, a run being a
+  chain -- and in an overlay each structure is its own, being bonded to nothing
+  in the other.

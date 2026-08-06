@@ -13,7 +13,7 @@ from typing import List
 
 import numpy as np
 
-from .glyph_font import ASPECT, STROKE, layout, segments
+from .glyph_font import contours, glyph_box, layout
 
 _EPS = 1e-9
 
@@ -163,8 +163,9 @@ def draw_label(center_view, right_view, down_view, normal_view, char, number,
     for glyph_char, dx, dy, cap in layout(char, number, float(size)):
         at = (np.asarray(center_view, float) + np.asarray(right_view, float) * dx
               + np.asarray(down_view, float) * dy)
-        _draw_glyph(at, np.asarray(right_view, float) * (cap * ASPECT * 0.5),
-                    np.asarray(down_view, float) * (cap * 0.5), glyph_char, albedo,
+        cell_w, cell_h = glyph_box(glyph_char)
+        _draw_glyph(at, np.asarray(right_view, float) * (cap * cell_w * 0.5),
+                    np.asarray(down_view, float) * (cap * cell_h * 0.5), glyph_char, albedo,
                     zoom, ox_s, oy_s, xs, ys, width, height,
                     color, alpha, zbuf, shade_write, y_lo, y_hi)
 
@@ -181,11 +182,10 @@ def _draw_glyph(center, ex, ey, char: str, albedo,
         return                                  # edge-on, or too small to read
     scx = ox_s + float(center[0]) * zoom
     scy = oy_s - float(center[1]) * zoom
-    pad = STROKE * (abs(ay) + abs(by) + abs(ax) + abs(bx)) * 0.5
-    x0 = max(int(np.floor(scx - abs(ax) - abs(bx) - pad)), 0)
-    x1 = min(int(np.ceil(scx + abs(ax) + abs(bx) + pad)) + 1, width)
-    y0 = max(int(np.floor(scy - abs(ay) - abs(by) - pad)), y_lo)
-    y1 = min(int(np.ceil(scy + abs(ay) + abs(by) + pad)) + 1, y_hi)
+    x0 = max(int(np.floor(scx - abs(ax) - abs(bx))), 0)
+    x1 = min(int(np.ceil(scx + abs(ax) + abs(bx))) + 1, width)
+    y0 = max(int(np.floor(scy - abs(ay) - abs(by))), y_lo)
+    y1 = min(int(np.ceil(scy + abs(ay) + abs(by))) + 1, y_hi)
     if x0 >= x1 or y0 >= y1:
         return
 
@@ -196,20 +196,22 @@ def _draw_glyph(center, ex, ey, char: str, albedo,
     a = (px * np.float32(by) - py * np.float32(bx)) * inv
     b = (py * np.float32(ax) - px * np.float32(ay)) * inv
 
-    u = (a + np.float32(1.0)) * np.float32(0.5 * ASPECT)
+    # Where in the glyph's cell each pixel falls, both 0..1, and whether that
+    # point is inside the letter: a parity count of the outline edges a ray
+    # from it crosses. Same outlines the atlas is filled from, so the terminal
+    # and the GPU draw the same letterform.
+    u = (a + np.float32(1.0)) * np.float32(0.5)
     v = (b + np.float32(1.0)) * np.float32(0.5)
-    win = np.zeros(u.shape if u.shape == v.shape else (y1 - y0, x1 - x0), bool)
-    limit = np.float32(STROKE * STROKE)
-    for (sx0, sy0), (sx1, sy1) in segments(char):
-        dx, dy = float(sx1 - sx0), float(sy1 - sy0)
-        span = dx * dx + dy * dy
-        du, dv = u - np.float32(sx0), v - np.float32(sy0)
-        if span > 1e-12:
-            t = (du * np.float32(dx / span)) + (dv * np.float32(dy / span))
-            np.clip(t, 0.0, 1.0, out=t)
-            du = du - t * np.float32(dx)
-            dv = dv - t * np.float32(dy)
-        win |= (du * du + dv * dv) <= limit
+    win = np.zeros((y1 - y0, x1 - x0), bool)
+    for contour in contours(char):
+        nxt = np.roll(contour, -1, axis=0)
+        for (sx0, sy0), (sx1, sy1) in zip(contour, nxt):
+            if sy0 == sy1:
+                continue
+            straddles = (sy0 > v) != (sy1 > v)
+            crossing = np.float32(sx0) + (v - np.float32(sy0)) * np.float32(
+                (sx1 - sx0) / (sy1 - sy0))
+            win ^= straddles & (u < crossing)
     if not win.any():
         return
 
