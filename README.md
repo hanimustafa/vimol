@@ -21,7 +21,8 @@ available. MIT licensed.
 ![C60 spinning in the terminal, rendered by vimol](https://raw.githubusercontent.com/hanimustafa/vimol/main/docs/media/spin.gif)
 
 `vimol` with no file opens this bundled C60 demo. Drag to rotate, scroll to
-zoom, hover an atom to identify it, `m` to measure distances/angles/dihedrals
+zoom, option-drag empty space to pan, hover an atom to identify it, `m` to
+measure distances/angles/dihedrals
 — with more than one structure loaded, a live column tracks it in a
 comparison table next to the structure list, evaluated for every loaded
 structure at once; move on to a different measurement (or a different frame)

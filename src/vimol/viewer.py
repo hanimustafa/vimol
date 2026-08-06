@@ -179,6 +179,7 @@ def _help_note(text: str) -> str:
 _HELP_HEAD = [
     _help_row(_kv("Mouse drag", "rotate"), _kv("Wheel / + -", "zoom")),
     _help_row(_kv("Right / mid drag", "pan"), _kv("[ / ]", "roll")),
+    _help_note("opt+drag empty space · also pans"),
     _help_row(_kv("Hover", "identify atom"), _kv("Arrows / h j k l", "rotate")),
     _help_row(_kv("1 2 3 4", "ball / spacefill / licorice / wire")),
     _help_row(_kv("5 / 6", "ribbon / glyph: lettered residues (proteins)")),
